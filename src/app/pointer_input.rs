@@ -1,5 +1,86 @@
 use super::*;
 
+/// Outer edge of the pane area for the double-click split feature.
+/// Encodes both the visual side and the post-split placement: clicking
+/// Top/Left spawns the new pane on the clicked side (first child);
+/// Bottom/Right keeps the historical "new pane on the trailing side"
+/// behavior (second child). See Issue #245.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EdgeSide {
+    Top,
+    Bottom,
+    Left,
+    Right,
+}
+
+/// Decide whether `(col, row)` lies on the outer edge of `pane_area`
+/// (the bounding box of all pane rects) and, if so, which leaf pane
+/// owns that edge cell. Corner cells (on two outer edges at once) are
+/// rejected for v1 because their split direction is ambiguous and the
+/// historical click already focuses the corner pane. Cells on shared
+/// internal boundaries return `None` here because their `rect.x` /
+/// `rect.y` doesn't match `pane_area`'s — those clicks are handled by
+/// the resize-drag boundary path that already runs first.
+pub(crate) fn detect_outer_edge(
+    pane_area: Rect,
+    pane_rects: &[(usize, Rect)],
+    col: u16,
+    row: u16,
+) -> Option<(EdgeSide, usize)> {
+    if pane_area.width == 0 || pane_area.height == 0 {
+        return None;
+    }
+    let on_top = row == pane_area.y;
+    let on_bottom = row + 1 == pane_area.y + pane_area.height;
+    let on_left = col == pane_area.x;
+    let on_right = col + 1 == pane_area.x + pane_area.width;
+    let side_count = on_top as u8 + on_bottom as u8 + on_left as u8 + on_right as u8;
+    if side_count != 1 {
+        // Either not on the outer edge, or on a corner (two sides).
+        return None;
+    }
+    let side = if on_top {
+        EdgeSide::Top
+    } else if on_bottom {
+        EdgeSide::Bottom
+    } else if on_left {
+        EdgeSide::Left
+    } else {
+        EdgeSide::Right
+    };
+    let target = pane_rects
+        .iter()
+        .find(|(_, r)| match side {
+            EdgeSide::Top => r.y == pane_area.y && col >= r.x && col < r.x + r.width,
+            EdgeSide::Bottom => {
+                r.y + r.height == pane_area.y + pane_area.height
+                    && col >= r.x
+                    && col < r.x + r.width
+            }
+            EdgeSide::Left => r.x == pane_area.x && row >= r.y && row < r.y + r.height,
+            EdgeSide::Right => {
+                r.x + r.width == pane_area.x + pane_area.width && row >= r.y && row < r.y + r.height
+            }
+        })
+        .map(|(id, _)| *id)?;
+    Some((side, target))
+}
+
+/// Split direction and placement implied by clicking each outer edge.
+/// Top/Bottom edges run a horizontal split (rows above / rows below);
+/// Left/Right edges run a vertical split (cols left / cols right).
+/// Top and Left place the new pane in the first child slot so the
+/// visual "the clicked edge spawns the new pane on that side" rule
+/// holds.
+pub(crate) fn split_intent_for_edge(side: EdgeSide) -> (SplitDirection, bool) {
+    match side {
+        EdgeSide::Top => (SplitDirection::Horizontal, true),
+        EdgeSide::Bottom => (SplitDirection::Horizontal, false),
+        EdgeSide::Left => (SplitDirection::Vertical, true),
+        EdgeSide::Right => (SplitDirection::Vertical, false),
+    }
+}
+
 impl App {
     fn scroll_pane_to_click(&self, pane_id: usize, click_row: u16, inner: &Rect) {
         if let Some(pane) = self.ws().panes.get(&pane_id) {
@@ -164,6 +245,50 @@ impl App {
                             self.dragging = Some(DragTarget::PaneSplit(path, direction, pane_area));
                             return;
                         }
+                    }
+
+                    // Outer-edge double-click → split. The shared-boundary
+                    // resize check above already returned for any internal
+                    // border, so reaching here means we're either on an
+                    // outer edge or off the layout entirely. We record
+                    // single clicks so the second within 500ms triggers a
+                    // split on the same edge cell; control flow then falls
+                    // through to the per-pane focus loop so a single click
+                    // on a pane's outer border still focuses that pane,
+                    // preserving the historical behavior. (Issue #245)
+                    let pane_rects = self.ws().last_pane_rects.clone();
+                    if let Some((side, target_id)) =
+                        detect_outer_edge(pane_area, &pane_rects, col, row)
+                    {
+                        let now = Instant::now();
+                        let is_double = matches!(
+                            self.last_edge_click,
+                            Some((prev_col, prev_row, prev_t))
+                                if prev_col == col
+                                    && prev_row == row
+                                    && now.duration_since(prev_t).as_millis() < 500
+                        );
+                        if is_double {
+                            self.last_edge_click = None;
+                            self.ws_mut().focused_pane_id = target_id;
+                            self.ws_mut().focus_target = FocusTarget::Pane;
+                            let (direction, new_pane_first) = split_intent_for_edge(side);
+                            if let Ok(Some(new_id)) = self.split_focused_pane_with_position(
+                                direction,
+                                new_pane_first,
+                                None,
+                            ) {
+                                self.emit_pane_started(new_id);
+                            }
+                            return;
+                        } else {
+                            self.last_edge_click = Some((col, row, now));
+                            // Don't return — let the per-pane focus loop
+                            // run so a single edge click still selects
+                            // the underlying pane.
+                        }
+                    } else {
+                        self.last_edge_click = None;
                     }
                 }
 

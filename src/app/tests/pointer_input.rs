@@ -101,3 +101,173 @@ fn mouse_forward_disabled_reads_env_var() {
 
     std::env::remove_var("RENGA_DISABLE_MOUSE_FORWARD");
 }
+
+// ─── detect_outer_edge (Issue #245) ────────────────────────────
+
+/// A single 100×50 pane filling the whole workspace. Every test in
+/// this group uses this layout unless noted.
+fn single_pane_rects() -> Vec<(usize, Rect)> {
+    vec![(1, Rect::new(0, 0, 100, 50))]
+}
+
+#[test]
+fn detect_outer_edge_returns_each_side_for_single_pane() {
+    // A solo pane is the simplest case: all four outer edges belong
+    // to pane 1 and corner cells must be rejected.
+    let rects = single_pane_rects();
+    let area = Rect::new(0, 0, 100, 50);
+
+    // Mid-edge of each side: detection must classify the side and
+    // return the only pane id.
+    assert_eq!(
+        detect_outer_edge(area, &rects, 50, 0),
+        Some((EdgeSide::Top, 1))
+    );
+    assert_eq!(
+        detect_outer_edge(area, &rects, 50, 49),
+        Some((EdgeSide::Bottom, 1))
+    );
+    assert_eq!(
+        detect_outer_edge(area, &rects, 0, 25),
+        Some((EdgeSide::Left, 1))
+    );
+    assert_eq!(
+        detect_outer_edge(area, &rects, 99, 25),
+        Some((EdgeSide::Right, 1))
+    );
+}
+
+#[test]
+fn detect_outer_edge_rejects_corner_cells() {
+    // Issue §3.5 v1: corners are ambiguous (two sides meet) so they
+    // must not trigger a split.
+    let rects = single_pane_rects();
+    let area = Rect::new(0, 0, 100, 50);
+    assert_eq!(detect_outer_edge(area, &rects, 0, 0), None, "top-left");
+    assert_eq!(detect_outer_edge(area, &rects, 99, 0), None, "top-right");
+    assert_eq!(detect_outer_edge(area, &rects, 0, 49), None, "bottom-left");
+    assert_eq!(
+        detect_outer_edge(area, &rects, 99, 49),
+        None,
+        "bottom-right"
+    );
+}
+
+#[test]
+fn detect_outer_edge_rejects_inner_cells() {
+    // Interior PTY cells must never look like an edge click.
+    let rects = single_pane_rects();
+    let area = Rect::new(0, 0, 100, 50);
+    assert_eq!(detect_outer_edge(area, &rects, 50, 25), None);
+    assert_eq!(detect_outer_edge(area, &rects, 1, 1), None);
+    assert_eq!(detect_outer_edge(area, &rects, 98, 48), None);
+}
+
+#[test]
+fn detect_outer_edge_rejects_shared_internal_boundary_cells() {
+    // Two panes split vertically at x=50. The shared internal column
+    // (x=50, the boundary between pane 1's right border and pane 2's
+    // left border) is NOT an outer edge — only the workspace's true
+    // outer rim is. Clicks on x=50 must return None so the
+    // resize-drag boundary handler (which runs first in real code)
+    // keeps owning that column.
+    let rects = vec![(1, Rect::new(0, 0, 50, 50)), (2, Rect::new(50, 0, 50, 50))];
+    let area = Rect::new(0, 0, 100, 50);
+    // A point inside the shared boundary column but in the interior
+    // (not on a row at the top/bottom outer edge) is fully internal.
+    assert_eq!(detect_outer_edge(area, &rects, 50, 25), None);
+    assert_eq!(detect_outer_edge(area, &rects, 49, 25), None);
+}
+
+#[test]
+fn detect_outer_edge_picks_correct_pane_in_multi_layout() {
+    // Vertical split: top-edge click on the left half must target
+    // pane 1, top-edge click on the right half must target pane 2.
+    // Same for the bottom edge. Left/right outer edges respectively
+    // belong to pane 1 / pane 2.
+    let rects = vec![(1, Rect::new(0, 0, 50, 50)), (2, Rect::new(50, 0, 50, 50))];
+    let area = Rect::new(0, 0, 100, 50);
+    assert_eq!(
+        detect_outer_edge(area, &rects, 25, 0),
+        Some((EdgeSide::Top, 1))
+    );
+    assert_eq!(
+        detect_outer_edge(area, &rects, 75, 0),
+        Some((EdgeSide::Top, 2))
+    );
+    assert_eq!(
+        detect_outer_edge(area, &rects, 25, 49),
+        Some((EdgeSide::Bottom, 1))
+    );
+    assert_eq!(
+        detect_outer_edge(area, &rects, 75, 49),
+        Some((EdgeSide::Bottom, 2))
+    );
+    assert_eq!(
+        detect_outer_edge(area, &rects, 0, 25),
+        Some((EdgeSide::Left, 1))
+    );
+    assert_eq!(
+        detect_outer_edge(area, &rects, 99, 25),
+        Some((EdgeSide::Right, 2))
+    );
+}
+
+#[test]
+fn detect_outer_edge_offset_origin_workspace() {
+    // The workspace doesn't always start at (0, 0); a side bar or
+    // status bar can offset the pane area. detect_outer_edge must
+    // anchor off `pane_area`, not absolute coordinates.
+    let rects = vec![(7, Rect::new(20, 3, 80, 40))];
+    let area = Rect::new(20, 3, 80, 40);
+    assert_eq!(
+        detect_outer_edge(area, &rects, 50, 3),
+        Some((EdgeSide::Top, 7))
+    );
+    assert_eq!(
+        detect_outer_edge(area, &rects, 50, 42),
+        Some((EdgeSide::Bottom, 7))
+    );
+    assert_eq!(
+        detect_outer_edge(area, &rects, 20, 20),
+        Some((EdgeSide::Left, 7))
+    );
+    assert_eq!(
+        detect_outer_edge(area, &rects, 99, 20),
+        Some((EdgeSide::Right, 7))
+    );
+    // Cell on the workspace edge but BEYOND the pane area: not an
+    // edge click for this layout.
+    assert_eq!(detect_outer_edge(area, &rects, 5, 1), None);
+}
+
+// ─── split_intent_for_edge (Issue #245) ────────────────────────
+
+#[test]
+fn split_intent_top_left_place_new_pane_first() {
+    // Top and Left clicks must spawn the new pane in the first
+    // (top / left) slot so the clicked edge becomes the new pane's
+    // edge — the spec's "click on top → new pane appears on top".
+    assert_eq!(
+        split_intent_for_edge(EdgeSide::Top),
+        (SplitDirection::Horizontal, true)
+    );
+    assert_eq!(
+        split_intent_for_edge(EdgeSide::Left),
+        (SplitDirection::Vertical, true)
+    );
+}
+
+#[test]
+fn split_intent_bottom_right_place_new_pane_second() {
+    // Bottom and Right clicks place the new pane in the trailing
+    // slot, matching the historical Ctrl+D / Ctrl+E placement.
+    assert_eq!(
+        split_intent_for_edge(EdgeSide::Bottom),
+        (SplitDirection::Horizontal, false)
+    );
+    assert_eq!(
+        split_intent_for_edge(EdgeSide::Right),
+        (SplitDirection::Vertical, false)
+    );
+}

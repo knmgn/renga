@@ -59,6 +59,7 @@ impl App {
             overlay: None,
             saved_overlay_drafts: HashMap::new(),
             last_tab_click: None,
+            last_edge_click: None,
             selection: None,
             version_info: {
                 let info = crate::version_check::VersionInfo::new();

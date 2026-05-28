@@ -87,6 +87,21 @@ impl App {
         direction: SplitDirection,
         cwd_override: Option<PathBuf>,
     ) -> Result<Option<usize>> {
+        self.split_focused_pane_with_position(direction, false, cwd_override)
+    }
+
+    /// Like [`Self::split_focused_pane`] but lets the caller place the
+    /// new pane on the first (top / left) side instead of the default
+    /// second (bottom / right). Used by the outer-edge double-click
+    /// path so a click on the top or left edge spawns the new pane on
+    /// the clicked side. All min-size / MAX_PANES guards match
+    /// `split_focused_pane`.
+    pub(crate) fn split_focused_pane_with_position(
+        &mut self,
+        direction: SplitDirection,
+        new_pane_first: bool,
+        cwd_override: Option<PathBuf>,
+    ) -> Result<Option<usize>> {
         if self.ws().layout.pane_count() >= Self::MAX_PANES {
             return Ok(None);
         }
@@ -124,7 +139,8 @@ impl App {
         let pane = Pane::new_with_cwd(new_id, 10, 40, self.event_tx.clone(), cwd)?;
         let ws = self.ws_mut();
         ws.panes.insert(new_id, pane);
-        ws.layout.split_pane(ws.focused_pane_id, new_id, direction);
+        ws.layout
+            .split_pane_with_position(ws.focused_pane_id, new_id, direction, new_pane_first);
         ws.focused_pane_id = new_id;
 
         self.mark_layout_change();
