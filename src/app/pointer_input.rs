@@ -30,10 +30,14 @@ pub(crate) fn detect_outer_edge(
     if pane_area.width == 0 || pane_area.height == 0 {
         return None;
     }
+    // Saturating math keeps detection deterministic at u16 edges
+    // (`pane_local_coords` follows the same convention).
+    let bottom = pane_area.y.saturating_add(pane_area.height);
+    let right = pane_area.x.saturating_add(pane_area.width);
     let on_top = row == pane_area.y;
-    let on_bottom = row + 1 == pane_area.y + pane_area.height;
+    let on_bottom = row.saturating_add(1) == bottom;
     let on_left = col == pane_area.x;
-    let on_right = col + 1 == pane_area.x + pane_area.width;
+    let on_right = col.saturating_add(1) == right;
     let side_count = on_top as u8 + on_bottom as u8 + on_left as u8 + on_right as u8;
     if side_count != 1 {
         // Either not on the outer edge, or on a corner (two sides).
@@ -48,18 +52,36 @@ pub(crate) fn detect_outer_edge(
     } else {
         EdgeSide::Right
     };
+    // Reject the intersection of an outer edge and a shared internal
+    // boundary. Example: a vertical split at col 50 makes col 50 both
+    // the top-edge row and the internal boundary; without this guard
+    // the function would target the right pane and break the
+    // "shared boundaries take precedence" rule the resize-drag path
+    // depends on.
+    let on_internal_v = pane_rects.iter().any(|(_, r)| {
+        let r_right = r.x.saturating_add(r.width);
+        (r.x == col && r.x != pane_area.x) || (r_right == col.saturating_add(1) && r_right != right)
+    });
+    let on_internal_h = pane_rects.iter().any(|(_, r)| {
+        let r_bottom = r.y.saturating_add(r.height);
+        (r.y == row && r.y != pane_area.y)
+            || (r_bottom == row.saturating_add(1) && r_bottom != bottom)
+    });
+    match side {
+        EdgeSide::Top | EdgeSide::Bottom if on_internal_v => return None,
+        EdgeSide::Left | EdgeSide::Right if on_internal_h => return None,
+        _ => {}
+    }
     let target = pane_rects
         .iter()
-        .find(|(_, r)| match side {
-            EdgeSide::Top => r.y == pane_area.y && col >= r.x && col < r.x + r.width,
-            EdgeSide::Bottom => {
-                r.y + r.height == pane_area.y + pane_area.height
-                    && col >= r.x
-                    && col < r.x + r.width
-            }
-            EdgeSide::Left => r.x == pane_area.x && row >= r.y && row < r.y + r.height,
-            EdgeSide::Right => {
-                r.x + r.width == pane_area.x + pane_area.width && row >= r.y && row < r.y + r.height
+        .find(|(_, r)| {
+            let r_right = r.x.saturating_add(r.width);
+            let r_bottom = r.y.saturating_add(r.height);
+            match side {
+                EdgeSide::Top => r.y == pane_area.y && col >= r.x && col < r_right,
+                EdgeSide::Bottom => r_bottom == bottom && col >= r.x && col < r_right,
+                EdgeSide::Left => r.x == pane_area.x && row >= r.y && row < r_bottom,
+                EdgeSide::Right => r_right == right && row >= r.y && row < r_bottom,
             }
         })
         .map(|(id, _)| *id)?;
@@ -189,6 +211,9 @@ impl App {
                         } else {
                             self.last_tab_click = Some((tab_idx, now));
                         }
+                        // A tab click switches context; any in-flight
+                        // outer-edge double-click attempt is now stale.
+                        self.last_edge_click = None;
                         self.dirty = true;
                         return;
                     }
@@ -204,16 +229,19 @@ impl App {
                         if let Ok(new_id) = self.new_tab() {
                             self.emit_pane_started(new_id);
                         }
+                        self.last_edge_click = None;
                         return;
                     }
                 }
 
                 if self.is_on_file_tree_border(col) {
                     self.dragging = Some(DragTarget::FileTreeBorder);
+                    self.last_edge_click = None;
                     return;
                 }
                 if self.is_on_preview_border(col) {
                     self.dragging = Some(DragTarget::PreviewBorder);
+                    self.last_edge_click = None;
                     return;
                 }
 
@@ -257,14 +285,16 @@ impl App {
                     // on a pane's outer border still focuses that pane,
                     // preserving the historical behavior. (Issue #245)
                     let pane_rects = self.ws().last_pane_rects.clone();
+                    let active_tab = self.active_tab;
                     if let Some((side, target_id)) =
                         detect_outer_edge(pane_area, &pane_rects, col, row)
                     {
                         let now = Instant::now();
                         let is_double = matches!(
                             self.last_edge_click,
-                            Some((prev_col, prev_row, prev_t))
-                                if prev_col == col
+                            Some((prev_tab, prev_col, prev_row, prev_t))
+                                if prev_tab == active_tab
+                                    && prev_col == col
                                     && prev_row == row
                                     && now.duration_since(prev_t).as_millis() < 500
                         );
@@ -282,7 +312,7 @@ impl App {
                             }
                             return;
                         } else {
-                            self.last_edge_click = Some((col, row, now));
+                            self.last_edge_click = Some((active_tab, col, row, now));
                             // Don't return — let the per-pane focus loop
                             // run so a single edge click still selects
                             // the underlying pane.
@@ -314,6 +344,7 @@ impl App {
                                 self.image_picker = picker;
                             }
                         }
+                        self.last_edge_click = None;
                         return;
                     }
                 }
@@ -325,6 +356,7 @@ impl App {
                         && row < rect.y + rect.height
                     {
                         self.ws_mut().focus_target = FocusTarget::Preview;
+                        self.last_edge_click = None;
                         return;
                     }
                 }

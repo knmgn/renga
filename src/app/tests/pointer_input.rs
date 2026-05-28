@@ -180,6 +180,45 @@ fn detect_outer_edge_rejects_shared_internal_boundary_cells() {
 }
 
 #[test]
+fn detect_outer_edge_rejects_outer_edge_x_internal_boundary_intersection() {
+    // The intersection of an outer edge and an internal boundary is
+    // ambiguous: cell (50, 0) in a vertical split sits on both the
+    // top outer edge AND the internal x=50 boundary. In real flow
+    // the boundary-resize hit-test runs first and consumes it, so
+    // this is a defense-in-depth guard — but the helper's contract
+    // ("reject shared boundaries") must hold standalone too.
+    let rects = vec![(1, Rect::new(0, 0, 50, 50)), (2, Rect::new(50, 0, 50, 50))];
+    let area = Rect::new(0, 0, 100, 50);
+    assert_eq!(
+        detect_outer_edge(area, &rects, 50, 0),
+        None,
+        "top edge ∩ internal vertical boundary"
+    );
+    assert_eq!(
+        detect_outer_edge(area, &rects, 50, 49),
+        None,
+        "bottom edge ∩ internal vertical boundary"
+    );
+    // Horizontal split rejects left/right edge ∩ internal horizontal
+    // boundary symmetrically.
+    let rects = vec![
+        (1, Rect::new(0, 0, 100, 25)),
+        (2, Rect::new(0, 25, 100, 25)),
+    ];
+    let area = Rect::new(0, 0, 100, 50);
+    assert_eq!(
+        detect_outer_edge(area, &rects, 0, 25),
+        None,
+        "left edge ∩ internal horizontal boundary"
+    );
+    assert_eq!(
+        detect_outer_edge(area, &rects, 99, 25),
+        None,
+        "right edge ∩ internal horizontal boundary"
+    );
+}
+
+#[test]
 fn detect_outer_edge_picks_correct_pane_in_multi_layout() {
     // Vertical split: top-edge click on the left half must target
     // pane 1, top-edge click on the right half must target pane 2.

@@ -189,13 +189,15 @@ pub struct App {
     /// (tab index, timestamp) of the last left-click on a tab label.
     /// Used to detect a double-click → enter rename mode.
     pub(crate) last_tab_click: Option<(usize, Instant)>,
-    /// (column, row, timestamp) of the last left-click on a pane
-    /// outer edge cell. Used to detect an outer-edge double-click →
-    /// split the underlying pane in that direction. Mirrors the
-    /// `last_tab_click` pattern but tracks the cell rather than a
-    /// logical index so corner-cell rejection and per-side
-    /// double-click detection stay decision-local.
-    pub(crate) last_edge_click: Option<(u16, u16, Instant)>,
+    /// (tab index, column, row, timestamp) of the last left-click on
+    /// a pane outer edge cell. Used to detect an outer-edge
+    /// double-click → split the underlying pane in that direction.
+    /// `active_tab` is part of the key so a tab switch within the
+    /// 500 ms window doesn't promote the first click on the new tab's
+    /// matching cell into a phantom double-click. Cleared on any
+    /// other left-click path (tab/new-tab/file-tree/preview/inner
+    /// pane cell) so unrelated clicks reset the timer.
+    pub(crate) last_edge_click: Option<(usize, u16, u16, Instant)>,
     // Text selection
     pub selection: Option<TextSelection>,
     // Version check (background)
