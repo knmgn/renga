@@ -53,23 +53,30 @@ pub(crate) fn detect_outer_edge(
         EdgeSide::Right
     };
     // Reject the intersection of an outer edge and a shared internal
-    // boundary. Example: a vertical split at col 50 makes col 50 both
-    // the top-edge row and the internal boundary; without this guard
-    // the function would target the right pane and break the
-    // "shared boundaries take precedence" rule the resize-drag path
-    // depends on.
-    let on_internal_v = pane_rects.iter().any(|(_, r)| {
+    // boundary, but only when the boundary actually spans the clicked
+    // row/col. A nested layout (e.g., top: full-width pane, bottom:
+    // split left/right) places an internal vertical boundary only in
+    // the lower half — a top-edge click at the same column is still
+    // a legitimate outer-edge click on the top pane.
+    let v_boundary_at_row = pane_rects.iter().any(|(_, r)| {
         let r_right = r.x.saturating_add(r.width);
-        (r.x == col && r.x != pane_area.x) || (r_right == col.saturating_add(1) && r_right != right)
-    });
-    let on_internal_h = pane_rects.iter().any(|(_, r)| {
         let r_bottom = r.y.saturating_add(r.height);
-        (r.y == row && r.y != pane_area.y)
-            || (r_bottom == row.saturating_add(1) && r_bottom != bottom)
+        let spans_row = row >= r.y && row < r_bottom;
+        spans_row
+            && ((r.x == col && r.x != pane_area.x)
+                || (r_right == col.saturating_add(1) && r_right != right))
+    });
+    let h_boundary_at_col = pane_rects.iter().any(|(_, r)| {
+        let r_right = r.x.saturating_add(r.width);
+        let r_bottom = r.y.saturating_add(r.height);
+        let spans_col = col >= r.x && col < r_right;
+        spans_col
+            && ((r.y == row && r.y != pane_area.y)
+                || (r_bottom == row.saturating_add(1) && r_bottom != bottom))
     });
     match side {
-        EdgeSide::Top | EdgeSide::Bottom if on_internal_v => return None,
-        EdgeSide::Left | EdgeSide::Right if on_internal_h => return None,
+        EdgeSide::Top | EdgeSide::Bottom if v_boundary_at_row => return None,
+        EdgeSide::Left | EdgeSide::Right if h_boundary_at_col => return None,
         _ => {}
     }
     let target = pane_rects

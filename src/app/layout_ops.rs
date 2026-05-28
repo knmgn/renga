@@ -74,6 +74,10 @@ impl App {
         if prev_active != self.active_tab {
             self.suspend_overlay();
         }
+        // Tab indices shift after removal; any pending outer-edge
+        // double-click is keyed by the pre-removal index and would
+        // now point at a different workspace.
+        self.last_edge_click = None;
         self.mark_layout_change();
         for (pid, name, role) in to_emit {
             self.emit_pane_exited(pid, name, role);

@@ -180,6 +180,41 @@ fn detect_outer_edge_rejects_shared_internal_boundary_cells() {
 }
 
 #[test]
+fn detect_outer_edge_nested_layout_does_not_overreject() {
+    // Codex round 2: the boundary check must consider whether the
+    // internal boundary actually spans the clicked outer row/col.
+    // Layout: full-width top pane, bottom split left/right at col 50.
+    //   A (0,0,100,25)
+    //   B (0,25,50,25)  |  C (50,25,50,25)
+    // A click at (50, 0) is on the top outer edge of pane A. The
+    // x=50 vertical boundary only exists in the lower half, so it
+    // must NOT block the click from registering as A's top edge.
+    let rects = vec![
+        (1, Rect::new(0, 0, 100, 25)),
+        (2, Rect::new(0, 25, 50, 25)),
+        (3, Rect::new(50, 25, 50, 25)),
+    ];
+    let area = Rect::new(0, 0, 100, 50);
+    assert_eq!(
+        detect_outer_edge(area, &rects, 50, 0),
+        Some((EdgeSide::Top, 1)),
+        "nested-bottom boundary at col 50 must not over-reject top-edge click"
+    );
+    // Symmetric: full-width bottom pane, top split left/right.
+    let rects = vec![
+        (1, Rect::new(0, 0, 50, 25)),
+        (2, Rect::new(50, 0, 50, 25)),
+        (3, Rect::new(0, 25, 100, 25)),
+    ];
+    let area = Rect::new(0, 0, 100, 50);
+    assert_eq!(
+        detect_outer_edge(area, &rects, 50, 49),
+        Some((EdgeSide::Bottom, 3)),
+        "nested-top boundary at col 50 must not over-reject bottom-edge click"
+    );
+}
+
+#[test]
 fn detect_outer_edge_rejects_outer_edge_x_internal_boundary_intersection() {
     // The intersection of an outer edge and an internal boundary is
     // ambiguous: cell (50, 0) in a vertical split sits on both the
