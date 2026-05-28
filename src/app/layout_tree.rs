@@ -7,6 +7,30 @@ pub enum SplitDirection {
     Horizontal,
 }
 
+/// One internal split divider, used for resize / hover hit-testing.
+/// `position` is the screen column (for a `Vertical` split) or row (for
+/// a `Horizontal` split) the divider sits on; `path` identifies the
+/// owning `Split` node for [`LayoutNode::update_ratio`]. `span` is the
+/// divider's perpendicular extent — `(start, end)` half-open rows for a
+/// `Vertical` split, columns for a `Horizontal` one. Before #247 the
+/// hit-test assumed every divider spanned the whole pane area, so a
+/// nested divider (e.g. a left/right split living only in the bottom
+/// half) wrongly claimed clicks that shared its column but fell in the
+/// unrelated top pane. Carrying `span` closes that gap.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SplitBoundary {
+    pub position: u16,
+    pub direction: SplitDirection,
+    pub path: Vec<bool>,
+    pub span: (u16, u16),
+    /// The owning `Split` node's own rendered rect. Resize-drag ratios
+    /// must be measured against this sub-region, not the whole pane
+    /// area — otherwise a divider nested inside one half of the layout
+    /// jumps when dragged (the ratio would be taken relative to the
+    /// full width/height instead of the node's slice).
+    pub area: Rect,
+}
+
 /// Binary tree node for pane layout.
 #[derive(Debug)]
 pub enum LayoutNode {
@@ -117,9 +141,11 @@ impl LayoutNode {
         }
     }
 
-    /// Find the split boundary position and direction for hit testing.
-    /// Returns a list of (boundary_position, direction, depth) for each Split node.
-    pub fn split_boundaries(&self, area: Rect) -> Vec<(u16, SplitDirection, Vec<bool>)> {
+    /// Find every internal split divider for hit testing. Each
+    /// [`SplitBoundary`] carries its screen position, direction, tree
+    /// path, and perpendicular span (the rows/cols it actually
+    /// occupies, so nested dividers don't over-claim — see #247).
+    pub fn split_boundaries(&self, area: Rect) -> Vec<SplitBoundary> {
         let mut result = Vec::new();
         self.collect_boundaries(area, &mut Vec::new(), &mut result);
         result
@@ -129,7 +155,7 @@ impl LayoutNode {
         &self,
         area: Rect,
         path: &mut Vec<bool>, // false=first, true=second
-        result: &mut Vec<(u16, SplitDirection, Vec<bool>)>,
+        result: &mut Vec<SplitBoundary>,
     ) {
         if let LayoutNode::Split {
             direction,
@@ -145,7 +171,20 @@ impl LayoutNode {
                 SplitDirection::Vertical => first_area.x + first_area.width,
                 SplitDirection::Horizontal => first_area.y + first_area.height,
             };
-            result.push((boundary, *direction, path.clone()));
+            // The divider runs perpendicular to the split: a vertical
+            // split's divider spans this node's rows, a horizontal
+            // split's spans its columns.
+            let span = match direction {
+                SplitDirection::Vertical => (area.y, area.y.saturating_add(area.height)),
+                SplitDirection::Horizontal => (area.x, area.x.saturating_add(area.width)),
+            };
+            result.push(SplitBoundary {
+                position: boundary,
+                direction: *direction,
+                path: path.clone(),
+                span,
+                area,
+            });
 
             path.push(false);
             first.collect_boundaries(first_area, path, result);

@@ -4,7 +4,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
 use ratatui::Frame;
 
-use crate::app::{App, DragTarget, FocusTarget};
+use crate::app::{App, DragTarget, FocusTarget, SplitDirection};
 
 // ─── Theme (Claude-inspired) ──────────────────────────────
 const BG: Color = Color::Rgb(0x0d, 0x11, 0x17);
@@ -666,6 +666,52 @@ fn render_panes(app: &mut App, frame: &mut Frame, area: Rect) {
             );
             let claude_state = app.claude_monitor.state(pane_id);
             render_single_pane(pane, is_focused, pane_sel, &claude_state, frame, rect);
+        }
+    }
+
+    render_boundary_tint(app, frame, area);
+}
+
+/// Tint the shared internal divider that's being hovered or dragged so
+/// it reads as draggable / double-clickable, matching the file-tree and
+/// preview border affordance. The divider's two border columns (or
+/// rows) are already painted by the adjacent panes; we just recolor
+/// them over the divider's span. (Issue #247)
+fn render_boundary_tint(app: &mut App, frame: &mut Frame, area: Rect) {
+    let Some(DragTarget::PaneSplit(path, _, _)) =
+        app.dragging.as_ref().or(app.hover_border.as_ref())
+    else {
+        return;
+    };
+    let path = path.clone();
+    let Some(boundary) = app
+        .ws()
+        .layout
+        .split_boundaries(area)
+        .into_iter()
+        .find(|b| b.path == path)
+    else {
+        return;
+    };
+    let buf = frame.buffer_mut();
+    match boundary.direction {
+        SplitDirection::Vertical => {
+            for cx in [boundary.position.saturating_sub(1), boundary.position] {
+                for y in boundary.span.0..boundary.span.1 {
+                    if let Some(cell) = buf.cell_mut((cx, y)) {
+                        cell.set_fg(ACCENT_GREEN);
+                    }
+                }
+            }
+        }
+        SplitDirection::Horizontal => {
+            for cy in [boundary.position.saturating_sub(1), boundary.position] {
+                for x in boundary.span.0..boundary.span.1 {
+                    if let Some(cell) = buf.cell_mut((x, cy)) {
+                        cell.set_fg(ACCENT_GREEN);
+                    }
+                }
+            }
         }
     }
 }

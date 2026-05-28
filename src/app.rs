@@ -38,8 +38,8 @@ use self::layout_ops::{
 pub use self::layout_tree::{LayoutNode, SplitDirection};
 #[cfg(test)]
 use self::pointer_input::{
-    detect_outer_edge, mouse_forward_disabled, pane_local_coords, pane_local_coords_clamped,
-    split_intent_for_edge, EdgeSide,
+    detect_outer_edge, detect_shared_boundary, mouse_forward_disabled, pane_local_coords,
+    pane_local_coords_clamped, split_intent_for_edge, EdgeSide,
 };
 pub use self::selection::{SelectionTarget, TextSelection};
 #[cfg(test)]

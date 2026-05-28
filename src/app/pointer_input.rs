@@ -110,6 +110,61 @@ pub(crate) fn split_intent_for_edge(side: EdgeSide) -> (SplitDirection, bool) {
     }
 }
 
+/// Decide how a double-click on the shared internal boundary at
+/// `(col, row)` should split. Returns `(direction, target_leaf,
+/// new_pane_first)` so the caller can run `split_focused_pane_with_
+/// position` against `target_leaf`; the new pane lands right on the
+/// clicked divider, between the two siblings it separated.
+///
+/// Detection is purely geometric (off `pane_rects`), so it works for
+/// boundaries at any nesting depth — the leaf whose trailing edge
+/// abuts the divider at the clicked row/col is the split target. A
+/// vertical divider splits its left leaf to the right; a horizontal
+/// divider splits its top leaf downward. Junction cells where a
+/// vertical and a horizontal divider cross are ambiguous (which way to
+/// split?) and return `None`, mirroring the corner-cell rejection in
+/// [`detect_outer_edge`]. Cells on the workspace's outer rim are not
+/// shared boundaries and return `None` — those belong to the
+/// outer-edge double-click path (#245).
+pub(crate) fn detect_shared_boundary(
+    pane_area: Rect,
+    pane_rects: &[(usize, Rect)],
+    col: u16,
+    row: u16,
+) -> Option<(SplitDirection, usize, bool)> {
+    if pane_area.width == 0 || pane_area.height == 0 {
+        return None;
+    }
+    let outer_right = pane_area.x.saturating_add(pane_area.width);
+    let outer_bottom = pane_area.y.saturating_add(pane_area.height);
+
+    // A vertical divider sits between a leaf's right border column
+    // (`r_right - 1`) and its right neighbor's left border column
+    // (`r_right`); the resize hit-test treats both as on the divider.
+    // Require `r_right < outer_right` so the workspace's own right rim
+    // (an outer edge, not a shared boundary) is excluded.
+    let vertical = pane_rects.iter().find_map(|(id, r)| {
+        let r_right = r.x.saturating_add(r.width);
+        let on_col = col == r_right.saturating_sub(1) || col == r_right;
+        let spans_row = row >= r.y && row < r.y.saturating_add(r.height);
+        (on_col && spans_row && r_right < outer_right).then_some(*id)
+    });
+    let horizontal = pane_rects.iter().find_map(|(id, r)| {
+        let r_bottom = r.y.saturating_add(r.height);
+        let on_row = row == r_bottom.saturating_sub(1) || row == r_bottom;
+        let spans_col = col >= r.x && col < r.x.saturating_add(r.width);
+        (on_row && spans_col && r_bottom < outer_bottom).then_some(*id)
+    });
+
+    match (vertical, horizontal) {
+        // Crossing dividers: ambiguous, leave it to the resize-drag.
+        (Some(_), Some(_)) => None,
+        (Some(id), None) => Some((SplitDirection::Vertical, id, false)),
+        (None, Some(id)) => Some((SplitDirection::Horizontal, id, false)),
+        (None, None) => None,
+    }
+}
+
 impl App {
     fn scroll_pane_to_click(&self, pane_id: usize, click_row: u16, inner: &Rect) {
         if let Some(pane) = self.ws().panes.get(&pane_id) {
@@ -125,6 +180,55 @@ impl App {
             let mut parser = pane.parser.lock().unwrap_or_else(|e| e.into_inner());
             parser.screen_mut().set_scrollback(target_scroll);
         }
+    }
+
+    /// Bounding box of all pane rects in the active tab — the area the
+    /// layout tree was rendered into. `None` when there are no panes
+    /// yet (before the first frame).
+    fn pane_area(&self) -> Option<Rect> {
+        let rects = &self.ws().last_pane_rects;
+        if rects.is_empty() {
+            return None;
+        }
+        let min_x = rects.iter().map(|(_, r)| r.x).min().unwrap_or(0);
+        let min_y = rects.iter().map(|(_, r)| r.y).min().unwrap_or(0);
+        let max_x = rects.iter().map(|(_, r)| r.x + r.width).max().unwrap_or(0);
+        let max_y = rects.iter().map(|(_, r)| r.y + r.height).max().unwrap_or(0);
+        Some(Rect::new(min_x, min_y, max_x - min_x, max_y - min_y))
+    }
+
+    /// If `(col, row)` lands on a shared internal split divider, return
+    /// the [`DragTarget::PaneSplit`] that would resize it. Honors each
+    /// divider's perpendicular span so a nested divider only claims the
+    /// rows/cols it actually occupies (the gap #246 left open). Shared
+    /// by the resize-drag setup, the double-click classifier, and the
+    /// hover tint so all three agree on what counts as "on a boundary".
+    fn boundary_drag_target(&self, col: u16, row: u16) -> Option<DragTarget> {
+        let pane_area = self.pane_area()?;
+        for b in self.ws().layout.split_boundaries(pane_area) {
+            let on_border = match b.direction {
+                SplitDirection::Vertical => {
+                    col >= b.position.saturating_sub(1)
+                        && col <= b.position
+                        && row >= b.span.0
+                        && row < b.span.1
+                }
+                SplitDirection::Horizontal => {
+                    row >= b.position.saturating_sub(1)
+                        && row <= b.position
+                        && col >= b.span.0
+                        && col < b.span.1
+                }
+            };
+            if on_border {
+                // Store the split node's own rect (not `pane_area`) so
+                // the resize-drag ratio is measured against the region
+                // the divider actually slices — nested dividers would
+                // otherwise jump when dragged.
+                return Some(DragTarget::PaneSplit(b.path, b.direction, b.area));
+            }
+        }
+        None
     }
 
     fn is_on_file_tree_border(&self, col: u16) -> bool {
@@ -219,8 +323,10 @@ impl App {
                             self.last_tab_click = Some((tab_idx, now));
                         }
                         // A tab click switches context; any in-flight
-                        // outer-edge double-click attempt is now stale.
+                        // outer-edge or boundary double-click attempt is
+                        // now stale.
                         self.last_edge_click = None;
+                        self.last_boundary_click = None;
                         self.dirty = true;
                         return;
                     }
@@ -237,6 +343,7 @@ impl App {
                             self.emit_pane_started(new_id);
                         }
                         self.last_edge_click = None;
+                        self.last_boundary_click = None;
                         return;
                     }
                 }
@@ -244,47 +351,64 @@ impl App {
                 if self.is_on_file_tree_border(col) {
                     self.dragging = Some(DragTarget::FileTreeBorder);
                     self.last_edge_click = None;
+                    self.last_boundary_click = None;
                     return;
                 }
                 if self.is_on_preview_border(col) {
                     self.dragging = Some(DragTarget::PreviewBorder);
                     self.last_edge_click = None;
+                    self.last_boundary_click = None;
                     return;
                 }
 
-                if let Some(pane_area) = self.ws().last_pane_rects.first().map(|_| {
-                    let rects = &self.ws().last_pane_rects;
-                    let min_x = rects.iter().map(|(_, r)| r.x).min().unwrap_or(0);
-                    let min_y = rects.iter().map(|(_, r)| r.y).min().unwrap_or(0);
-                    let max_x = rects.iter().map(|(_, r)| r.x + r.width).max().unwrap_or(0);
-                    let max_y = rects.iter().map(|(_, r)| r.y + r.height).max().unwrap_or(0);
-                    Rect::new(min_x, min_y, max_x - min_x, max_y - min_y)
-                }) {
-                    let boundaries = self.ws().layout.split_boundaries(pane_area);
-                    for (boundary, direction, path) in boundaries {
-                        let on_border = match direction {
-                            SplitDirection::Vertical => {
-                                col >= boundary.saturating_sub(1)
-                                    && col <= boundary
-                                    && row >= pane_area.y
-                                    && row < pane_area.y + pane_area.height
+                if let Some(pane_area) = self.pane_area() {
+                    let active_tab = self.active_tab;
+
+                    // Shared internal boundary: classify click vs drag.
+                    // A second click on the same divider cell within
+                    // 500 ms double-clicks it → split the adjacent pane
+                    // and drop the new leaf right on the divider. A
+                    // first (single) click instead arms the timer and
+                    // sets up the resize-drag, so a plain click that
+                    // never moves is a no-op and a click-drag still
+                    // resizes — the historical behavior. (Issue #247)
+                    if let Some(DragTarget::PaneSplit(path, direction, area)) =
+                        self.boundary_drag_target(col, row)
+                    {
+                        let now = Instant::now();
+                        let is_double = matches!(
+                            self.last_boundary_click,
+                            Some((prev_tab, prev_col, prev_row, prev_t))
+                                if prev_tab == active_tab
+                                    && prev_col == col
+                                    && prev_row == row
+                                    && now.duration_since(prev_t).as_millis() < 500
+                        );
+                        // A boundary click breaks any in-flight
+                        // outer-edge double-click intent.
+                        self.last_edge_click = None;
+                        if is_double {
+                            self.last_boundary_click = None;
+                            let pane_rects = self.ws().last_pane_rects.clone();
+                            if let Some((dir, target_id, new_pane_first)) =
+                                detect_shared_boundary(pane_area, &pane_rects, col, row)
+                            {
+                                self.ws_mut().focused_pane_id = target_id;
+                                self.ws_mut().focus_target = FocusTarget::Pane;
+                                if let Ok(Some(new_id)) =
+                                    self.split_focused_pane_with_position(dir, new_pane_first, None)
+                                {
+                                    self.emit_pane_started(new_id);
+                                }
+                                return;
                             }
-                            SplitDirection::Horizontal => {
-                                row >= boundary.saturating_sub(1)
-                                    && row <= boundary
-                                    && col >= pane_area.x
-                                    && col < pane_area.x + pane_area.width
-                            }
-                        };
-                        if on_border {
-                            self.dragging = Some(DragTarget::PaneSplit(path, direction, pane_area));
-                            // A boundary-resize drag interleaved with
-                            // an edge click breaks the double-click
-                            // intent; clear the timer so the next
-                            // outer-edge click starts fresh.
-                            self.last_edge_click = None;
-                            return;
+                            // Ambiguous junction cell — fall through to
+                            // the resize-drag instead of splitting.
+                        } else {
+                            self.last_boundary_click = Some((active_tab, col, row, now));
                         }
+                        self.dragging = Some(DragTarget::PaneSplit(path, direction, area));
+                        return;
                     }
 
                     // Outer-edge double-click → split. The shared-boundary
@@ -297,7 +421,6 @@ impl App {
                     // on a pane's outer border still focuses that pane,
                     // preserving the historical behavior. (Issue #245)
                     let pane_rects = self.ws().last_pane_rects.clone();
-                    let active_tab = self.active_tab;
                     if let Some((side, target_id)) =
                         detect_outer_edge(pane_area, &pane_rects, col, row)
                     {
@@ -329,8 +452,13 @@ impl App {
                             // run so a single edge click still selects
                             // the underlying pane.
                         }
+                        // An outer-edge click is never a boundary click;
+                        // reset the boundary timer so the two paths
+                        // can't cross-trigger.
+                        self.last_boundary_click = None;
                     } else {
                         self.last_edge_click = None;
+                        self.last_boundary_click = None;
                     }
                 }
 
@@ -357,6 +485,7 @@ impl App {
                             }
                         }
                         self.last_edge_click = None;
+                        self.last_boundary_click = None;
                         return;
                     }
                 }
@@ -369,6 +498,7 @@ impl App {
                     {
                         self.ws_mut().focus_target = FocusTarget::Preview;
                         self.last_edge_click = None;
+                        self.last_boundary_click = None;
                         return;
                     }
                 }
@@ -465,6 +595,12 @@ impl App {
                                 }
                             };
                             self.ws_mut().layout.update_ratio(path, new_ratio);
+                            // An actual resize-drag invalidates the
+                            // pending double-click: the next click on
+                            // this cell should arm a fresh timer, not
+                            // promote a just-resized divider into a
+                            // phantom double-click split.
+                            self.last_boundary_click = None;
                         }
                         DragTarget::Scrollbar(pane_id, inner) => {
                             self.scroll_pane_to_click(*pane_id, row, inner);
@@ -642,13 +778,18 @@ impl App {
             }
             MouseEventKind::Moved => {
                 let col = mouse.column;
+                let row = mouse.row;
                 let old_hover = self.hover_border.clone();
                 if self.is_on_file_tree_border(col) {
                     self.hover_border = Some(DragTarget::FileTreeBorder);
                 } else if self.is_on_preview_border(col) {
                     self.hover_border = Some(DragTarget::PreviewBorder);
                 } else {
-                    self.hover_border = None;
+                    // Tint the shared internal divider under the cursor
+                    // so it reads as draggable / double-clickable, the
+                    // same affordance the file-tree and preview borders
+                    // already get. (Issue #247)
+                    self.hover_border = self.boundary_drag_target(col, row);
                 }
                 if self.hover_border != old_hover {
                     self.dirty = true;

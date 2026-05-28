@@ -138,6 +138,7 @@ The first keys to learn. Full tables (Pane / File tree / Preview / Mouse) and th
 |-----|--------|
 | `Ctrl+D` / `Ctrl+E` | Split vertically / horizontally |
 | Double-click pane outer edge | Split toward the clicked side (top/left spawns the new pane on the clicked side, bottom/right behind it) |
+| Double-click shared border | Split the adjacent pane, dropping the new pane on the border between the two siblings (drag still resizes) |
 | `Ctrl+Right` / `Ctrl+Left` | Cycle focus (panes, sidebar, preview) |
 | `Alt+T` / `Alt+1..9` | New tab / jump to tab N |
 | `Alt+P` | Insert peer-enabled `claude …` launch into the focused pane |

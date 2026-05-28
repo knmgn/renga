@@ -345,3 +345,339 @@ fn split_intent_bottom_right_place_new_pane_second() {
         (SplitDirection::Vertical, false)
     );
 }
+
+// ─── detect_shared_boundary (Issue #247) ────────────────────────
+
+#[test]
+fn detect_shared_boundary_vertical_targets_left_leaf() {
+    // [1 | 2] split vertically at x = 50. The divider occupies the
+    // two columns {49, 50}. A double-click anywhere on it splits the
+    // LEFT leaf (1) to its right, so the new pane lands between 1 and
+    // 2. Direction is Vertical, new_pane_first = false.
+    let rects = vec![(1, Rect::new(0, 0, 50, 50)), (2, Rect::new(50, 0, 50, 50))];
+    let area = Rect::new(0, 0, 100, 50);
+    assert_eq!(
+        detect_shared_boundary(area, &rects, 50, 25),
+        Some((SplitDirection::Vertical, 1, false))
+    );
+    assert_eq!(
+        detect_shared_boundary(area, &rects, 49, 25),
+        Some((SplitDirection::Vertical, 1, false)),
+        "the left border column of the divider counts too"
+    );
+}
+
+#[test]
+fn detect_shared_boundary_horizontal_targets_top_leaf() {
+    // [1 / 2] split horizontally at y = 25. The divider occupies rows
+    // {24, 25}. A double-click splits the TOP leaf (1) downward.
+    let rects = vec![
+        (1, Rect::new(0, 0, 100, 25)),
+        (2, Rect::new(0, 25, 100, 25)),
+    ];
+    let area = Rect::new(0, 0, 100, 50);
+    assert_eq!(
+        detect_shared_boundary(area, &rects, 50, 25),
+        Some((SplitDirection::Horizontal, 1, false))
+    );
+    assert_eq!(
+        detect_shared_boundary(area, &rects, 50, 24),
+        Some((SplitDirection::Horizontal, 1, false))
+    );
+}
+
+#[test]
+fn detect_shared_boundary_rejects_outer_rim() {
+    // The workspace's own outer edges are NOT shared boundaries —
+    // those belong to the outer-edge double-click path (#245).
+    let rects = vec![(1, Rect::new(0, 0, 50, 50)), (2, Rect::new(50, 0, 50, 50))];
+    let area = Rect::new(0, 0, 100, 50);
+    assert_eq!(
+        detect_shared_boundary(area, &rects, 0, 25),
+        None,
+        "left rim"
+    );
+    assert_eq!(
+        detect_shared_boundary(area, &rects, 99, 25),
+        None,
+        "right rim"
+    );
+    assert_eq!(detect_shared_boundary(area, &rects, 25, 0), None, "top rim");
+    assert_eq!(
+        detect_shared_boundary(area, &rects, 25, 49),
+        None,
+        "bottom rim"
+    );
+}
+
+#[test]
+fn detect_shared_boundary_nested_hit_test_respects_span() {
+    // Full-width top pane (1) over a bottom left/right split (2 | 3):
+    //   1 → (0,0,100,25)
+    //   2 → (0,25,50,25)   3 → (50,25,50,25)
+    // The nested vertical divider lives only in the bottom half.
+    let rects = vec![
+        (1, Rect::new(0, 0, 100, 25)),
+        (2, Rect::new(0, 25, 50, 25)),
+        (3, Rect::new(50, 25, 50, 25)),
+    ];
+    let area = Rect::new(0, 0, 100, 50);
+    // Click at column 50 but in the TOP pane's rows: not a boundary.
+    // (This is exactly the gap #246 left open and #247 closes.)
+    assert_eq!(
+        detect_shared_boundary(area, &rects, 50, 10),
+        None,
+        "col 50 inside the top pane is not a divider"
+    );
+    // Click at column 50 in the BOTTOM rows: splits the bottom-left
+    // leaf (2) to its right.
+    assert_eq!(
+        detect_shared_boundary(area, &rects, 50, 40),
+        Some((SplitDirection::Vertical, 2, false))
+    );
+}
+
+#[test]
+fn detect_shared_boundary_rejects_ambiguous_junction() {
+    // Where a vertical and a horizontal divider cross, the split
+    // direction is ambiguous, so the helper declines (like a corner
+    // cell) and the click stays a resize-drag.
+    //   1 → (0,0,100,25) full-width top
+    //   2 → (0,25,50,25)   3 → (50,25,50,25)
+    // Cell (50, 25) sits on both pane 1's bottom edge (horizontal
+    // divider) and the 2|3 vertical divider.
+    let rects = vec![
+        (1, Rect::new(0, 0, 100, 25)),
+        (2, Rect::new(0, 25, 50, 25)),
+        (3, Rect::new(50, 25, 50, 25)),
+    ];
+    let area = Rect::new(0, 0, 100, 50);
+    assert_eq!(detect_shared_boundary(area, &rects, 50, 25), None);
+}
+
+// ─── handle_mouse_event boundary click vs drag (Issue #247) ─────
+//
+// These drive the real event handler, which spawns PTYs on split, so
+// each test calls `app.shutdown()` at the end. A two-pane vertical
+// layout is set up by hand: split the focused pane, then publish the
+// rects the renderer would have produced into `last_pane_rects` so the
+// pointer code can hit-test against them.
+
+use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+
+fn boundary_mouse(kind: MouseEventKind, col: u16, row: u16) -> MouseEvent {
+    MouseEvent {
+        kind,
+        column: col,
+        row,
+        modifiers: KeyModifiers::empty(),
+    }
+}
+
+/// Build an app whose active tab holds `[A | B]` split vertically over
+/// a 100×40 area, with `last_pane_rects` published. Returns
+/// `(app, a_id, b_id)`; the divider sits at column 50.
+fn two_pane_vertical_app() -> (App, usize, usize) {
+    let mut app = App::new(40, 100).expect("App::new");
+    let a_id = app.ws().focused_pane_id;
+    app.split_focused_pane_with_position(SplitDirection::Vertical, false, None)
+        .expect("split succeeds")
+        .expect("split not refused");
+    let b_id = app.ws().focused_pane_id;
+    assert_ne!(a_id, b_id);
+    let area = Rect::new(0, 0, 100, 40);
+    let rects = app.ws().layout.calculate_rects(area);
+    app.ws_mut().last_pane_rects = rects;
+    (app, a_id, b_id)
+}
+
+#[test]
+fn boundary_double_click_splits_between_siblings() {
+    let (mut app, a_id, b_id) = two_pane_vertical_app();
+    assert_eq!(app.ws().layout.pane_count(), 2);
+
+    // First click on the divider arms the timer (and sets up a
+    // resize-drag); the release cancels the drag without resizing.
+    app.handle_mouse_event(boundary_mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        50,
+        20,
+    ));
+    app.handle_mouse_event(boundary_mouse(
+        MouseEventKind::Up(MouseButton::Left),
+        50,
+        20,
+    ));
+    assert_eq!(
+        app.ws().layout.pane_count(),
+        2,
+        "a single click must not split"
+    );
+
+    // Second click within 500 ms → double-click → split the left
+    // sibling, dropping the new leaf between A and B.
+    app.handle_mouse_event(boundary_mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        50,
+        20,
+    ));
+    let new_id = app.ws().focused_pane_id;
+    assert_eq!(app.ws().layout.pane_count(), 3, "double-click splits");
+    assert_eq!(
+        app.ws().layout.collect_pane_ids(),
+        vec![a_id, new_id, b_id],
+        "new leaf is inserted between the two siblings"
+    );
+    app.shutdown();
+}
+
+#[test]
+fn boundary_single_click_is_noop() {
+    let (mut app, a_id, b_id) = two_pane_vertical_app();
+    let ids_before = app.ws().layout.collect_pane_ids();
+
+    // A lone down/up on the divider (no second click, no drag) must
+    // leave the layout untouched.
+    app.handle_mouse_event(boundary_mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        50,
+        20,
+    ));
+    app.handle_mouse_event(boundary_mouse(
+        MouseEventKind::Up(MouseButton::Left),
+        50,
+        20,
+    ));
+
+    assert_eq!(app.ws().layout.pane_count(), 2);
+    assert_eq!(app.ws().layout.collect_pane_ids(), ids_before);
+    assert_eq!(ids_before, vec![a_id, b_id]);
+    app.shutdown();
+}
+
+#[test]
+fn boundary_drag_resizes_and_does_not_split() {
+    let (mut app, _a_id, _b_id) = two_pane_vertical_app();
+
+    // Press on the divider, then drag left to x = 30. The drag must
+    // resize (ratio → 0.30) and never split.
+    app.handle_mouse_event(boundary_mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        50,
+        20,
+    ));
+    app.handle_mouse_event(boundary_mouse(
+        MouseEventKind::Drag(MouseButton::Left),
+        30,
+        20,
+    ));
+    app.handle_mouse_event(boundary_mouse(
+        MouseEventKind::Up(MouseButton::Left),
+        30,
+        20,
+    ));
+
+    assert_eq!(app.ws().layout.pane_count(), 2, "a drag must not split");
+    if let LayoutNode::Split { ratio, .. } = &app.ws().layout {
+        assert!(
+            (*ratio - 0.30).abs() < 0.01,
+            "drag to x=30 over a width-100 area resizes to ~0.30, got {ratio}"
+        );
+    } else {
+        panic!("layout should still be a single split");
+    }
+    app.shutdown();
+}
+
+#[test]
+fn boundary_drag_then_click_does_not_phantom_split() {
+    // After a resize-drag, the pending double-click candidate must be
+    // dropped — otherwise a click on the same cell within 500 ms would
+    // be misread as a double-click and split. (Codex review, #247)
+    let (mut app, _a_id, _b_id) = two_pane_vertical_app();
+
+    app.handle_mouse_event(boundary_mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        50,
+        20,
+    ));
+    // Drag in place (boundary stays at x=50), then release.
+    app.handle_mouse_event(boundary_mouse(
+        MouseEventKind::Drag(MouseButton::Left),
+        50,
+        20,
+    ));
+    app.handle_mouse_event(boundary_mouse(
+        MouseEventKind::Up(MouseButton::Left),
+        50,
+        20,
+    ));
+    // A follow-up click on the same divider cell must arm a fresh
+    // timer, not split.
+    app.handle_mouse_event(boundary_mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        50,
+        20,
+    ));
+
+    assert_eq!(
+        app.ws().layout.pane_count(),
+        2,
+        "a click after a drag must not phantom-split"
+    );
+    app.shutdown();
+}
+
+#[test]
+fn boundary_drag_ratio_is_relative_to_nested_subregion() {
+    // Layout [A | [B | C]] over a 100×40 area: a top-level vertical
+    // split at x=50, and a nested vertical split (B|C) inside the
+    // right half, with its divider at x=75. Dragging the NESTED
+    // divider must measure the ratio against the right half's own rect
+    // (x∈[50,100)), not the whole pane area — so a drag to x=80 yields
+    // (80-50)/50 = 0.60, not the buggy 80/100 = 0.80. (Codex review)
+    let mut app = App::new(40, 100).expect("App::new");
+    app.split_focused_pane_with_position(SplitDirection::Vertical, false, None)
+        .expect("split A|B")
+        .expect("not refused");
+    app.split_focused_pane_with_position(SplitDirection::Vertical, false, None)
+        .expect("split B|C")
+        .expect("not refused");
+    assert_eq!(app.ws().layout.pane_count(), 3);
+
+    let area = Rect::new(0, 0, 100, 40);
+    app.ws_mut().last_pane_rects = app.ws().layout.calculate_rects(area);
+
+    // The nested divider is at x=75; drag it to x=80.
+    app.handle_mouse_event(boundary_mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        75,
+        20,
+    ));
+    app.handle_mouse_event(boundary_mouse(
+        MouseEventKind::Drag(MouseButton::Left),
+        80,
+        20,
+    ));
+    app.handle_mouse_event(boundary_mouse(
+        MouseEventKind::Up(MouseButton::Left),
+        80,
+        20,
+    ));
+
+    assert_eq!(app.ws().layout.pane_count(), 3, "drag must not split");
+    // Walk to the nested split's ratio.
+    if let LayoutNode::Split { second, .. } = &app.ws().layout {
+        if let LayoutNode::Split { ratio, .. } = second.as_ref() {
+            assert!(
+                (*ratio - 0.60).abs() < 0.01,
+                "nested drag should resize relative to the right half, got {ratio}"
+            );
+        } else {
+            panic!("right child should be the nested split");
+        }
+    } else {
+        panic!("root should be a split");
+    }
+    app.shutdown();
+}
