@@ -65,7 +65,7 @@ The full peer-messaging workflow, two-pane example, troubleshooting, and pane-co
 - **Claude Code detection** — Pane border turns orange when Claude Code is running
 - **cd tracking** — File tree and tab name auto-update when you change directories
 - **JP / CJK IME overlay** — Centered composition box with freeze-on-overlay + periodic catch-up so candidate windows anchor to the caret. See [`docs/ime.md`](./docs/ime.md).
-- **Mouse support** — Click to focus, drag borders to resize, scroll history
+- **Mouse support** — Click to focus, double-click a pane's outer edge or a shared border to split, drag borders to resize, scroll history
 - **Scrollback** — 10,000 lines of terminal history per pane
 - **Dark theme** — Claude-inspired color scheme
 - **Cross-platform** — Windows, macOS, Linux
