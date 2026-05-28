@@ -278,6 +278,11 @@ impl App {
                         };
                         if on_border {
                             self.dragging = Some(DragTarget::PaneSplit(path, direction, pane_area));
+                            // A boundary-resize drag interleaved with
+                            // an edge click breaks the double-click
+                            // intent; clear the timer so the next
+                            // outer-edge click starts fresh.
+                            self.last_edge_click = None;
                             return;
                         }
                     }
