@@ -225,3 +225,65 @@ fn split_with_position_horizontal_top_places_new_pane_top() {
     assert_eq!(rects[0], (2, Rect::new(0, 0, 100, 25)));
     assert_eq!(rects[1], (1, Rect::new(0, 25, 100, 25)));
 }
+
+// ─── split_boundaries span (Issue #247) ─────────────────────────
+
+#[test]
+fn split_boundaries_flat_vertical_spans_full_height() {
+    // A single top-level vertical split: the divider sits at x = 50
+    // and spans every row of the area.
+    let layout = LayoutNode::Split {
+        direction: SplitDirection::Vertical,
+        ratio: 0.5,
+        first: Box::new(LayoutNode::Leaf { pane_id: 1 }),
+        second: Box::new(LayoutNode::Leaf { pane_id: 2 }),
+    };
+    let bounds = layout.split_boundaries(Rect::new(0, 0, 100, 50));
+    assert_eq!(bounds.len(), 1);
+    assert_eq!(bounds[0].position, 50);
+    assert_eq!(bounds[0].direction, SplitDirection::Vertical);
+    assert_eq!(bounds[0].span, (0, 50), "vertical divider spans all rows");
+    assert!(bounds[0].path.is_empty());
+}
+
+#[test]
+fn split_boundaries_nested_divider_spans_only_its_subregion() {
+    // Top-level HORIZONTAL split: full-width top pane (1) over a
+    // bottom subtree that is itself a VERTICAL split (2 | 3).
+    //   1 → (0,0,100,25)
+    //   2 → (0,25,50,25)   3 → (50,25,50,25)
+    // The nested vertical divider at x = 50 must report a span of
+    // rows 25..50 — NOT the whole 0..50 height. Before #247 the
+    // hit-test assumed full height, so a click at (50, 10) — inside
+    // the top pane — wrongly registered as a boundary press.
+    let layout = LayoutNode::Split {
+        direction: SplitDirection::Horizontal,
+        ratio: 0.5,
+        first: Box::new(LayoutNode::Leaf { pane_id: 1 }),
+        second: Box::new(LayoutNode::Split {
+            direction: SplitDirection::Vertical,
+            ratio: 0.5,
+            first: Box::new(LayoutNode::Leaf { pane_id: 2 }),
+            second: Box::new(LayoutNode::Leaf { pane_id: 3 }),
+        }),
+    };
+    let bounds = layout.split_boundaries(Rect::new(0, 0, 100, 50));
+    assert_eq!(bounds.len(), 2);
+
+    let top = bounds.iter().find(|b| b.path.is_empty()).expect("root");
+    assert_eq!(top.direction, SplitDirection::Horizontal);
+    assert_eq!(top.position, 25);
+    assert_eq!(top.span, (0, 100), "horizontal divider spans all cols");
+
+    let nested = bounds
+        .iter()
+        .find(|b| b.path == vec![true])
+        .expect("nested vertical divider");
+    assert_eq!(nested.direction, SplitDirection::Vertical);
+    assert_eq!(nested.position, 50);
+    assert_eq!(
+        nested.span,
+        (25, 50),
+        "nested divider must span only the bottom subregion"
+    );
+}

@@ -198,6 +198,14 @@ pub struct App {
     /// other left-click path (tab/new-tab/file-tree/preview/inner
     /// pane cell) so unrelated clicks reset the timer.
     pub(crate) last_edge_click: Option<(usize, u16, u16, Instant)>,
+    /// (tab index, column, row, timestamp) of the last left-click that
+    /// landed on a shared internal split boundary. Mirrors
+    /// [`Self::last_edge_click`] but for the divider between sibling
+    /// panes: a second click on the same divider cell within 500 ms
+    /// double-clicks it and splits the adjacent pane (Issue #247),
+    /// while a single click still falls through to the resize-drag.
+    /// Cleared on the same unrelated click paths as `last_edge_click`.
+    pub(crate) last_boundary_click: Option<(usize, u16, u16, Instant)>,
     // Text selection
     pub selection: Option<TextSelection>,
     // Version check (background)
