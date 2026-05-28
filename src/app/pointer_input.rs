@@ -221,7 +221,11 @@ impl App {
                 }
             };
             if on_border {
-                return Some(DragTarget::PaneSplit(b.path, b.direction, pane_area));
+                // Store the split node's own rect (not `pane_area`) so
+                // the resize-drag ratio is measured against the region
+                // the divider actually slices — nested dividers would
+                // otherwise jump when dragged.
+                return Some(DragTarget::PaneSplit(b.path, b.direction, b.area));
             }
         }
         None
@@ -591,6 +595,12 @@ impl App {
                                 }
                             };
                             self.ws_mut().layout.update_ratio(path, new_ratio);
+                            // An actual resize-drag invalidates the
+                            // pending double-click: the next click on
+                            // this cell should arm a fresh timer, not
+                            // promote a just-resized divider into a
+                            // phantom double-click split.
+                            self.last_boundary_click = None;
                         }
                         DragTarget::Scrollbar(pane_id, inner) => {
                             self.scroll_pane_to_click(*pane_id, row, inner);

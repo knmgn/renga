@@ -23,6 +23,12 @@ pub struct SplitBoundary {
     pub direction: SplitDirection,
     pub path: Vec<bool>,
     pub span: (u16, u16),
+    /// The owning `Split` node's own rendered rect. Resize-drag ratios
+    /// must be measured against this sub-region, not the whole pane
+    /// area — otherwise a divider nested inside one half of the layout
+    /// jumps when dragged (the ratio would be taken relative to the
+    /// full width/height instead of the node's slice).
+    pub area: Rect,
 }
 
 /// Binary tree node for pane layout.
@@ -177,6 +183,7 @@ impl LayoutNode {
                 direction: *direction,
                 path: path.clone(),
                 span,
+                area,
             });
 
             path.push(false);

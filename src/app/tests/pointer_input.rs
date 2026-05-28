@@ -588,3 +588,96 @@ fn boundary_drag_resizes_and_does_not_split() {
     }
     app.shutdown();
 }
+
+#[test]
+fn boundary_drag_then_click_does_not_phantom_split() {
+    // After a resize-drag, the pending double-click candidate must be
+    // dropped — otherwise a click on the same cell within 500 ms would
+    // be misread as a double-click and split. (Codex review, #247)
+    let (mut app, _a_id, _b_id) = two_pane_vertical_app();
+
+    app.handle_mouse_event(boundary_mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        50,
+        20,
+    ));
+    // Drag in place (boundary stays at x=50), then release.
+    app.handle_mouse_event(boundary_mouse(
+        MouseEventKind::Drag(MouseButton::Left),
+        50,
+        20,
+    ));
+    app.handle_mouse_event(boundary_mouse(
+        MouseEventKind::Up(MouseButton::Left),
+        50,
+        20,
+    ));
+    // A follow-up click on the same divider cell must arm a fresh
+    // timer, not split.
+    app.handle_mouse_event(boundary_mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        50,
+        20,
+    ));
+
+    assert_eq!(
+        app.ws().layout.pane_count(),
+        2,
+        "a click after a drag must not phantom-split"
+    );
+    app.shutdown();
+}
+
+#[test]
+fn boundary_drag_ratio_is_relative_to_nested_subregion() {
+    // Layout [A | [B | C]] over a 100×40 area: a top-level vertical
+    // split at x=50, and a nested vertical split (B|C) inside the
+    // right half, with its divider at x=75. Dragging the NESTED
+    // divider must measure the ratio against the right half's own rect
+    // (x∈[50,100)), not the whole pane area — so a drag to x=80 yields
+    // (80-50)/50 = 0.60, not the buggy 80/100 = 0.80. (Codex review)
+    let mut app = App::new(40, 100).expect("App::new");
+    app.split_focused_pane_with_position(SplitDirection::Vertical, false, None)
+        .expect("split A|B")
+        .expect("not refused");
+    app.split_focused_pane_with_position(SplitDirection::Vertical, false, None)
+        .expect("split B|C")
+        .expect("not refused");
+    assert_eq!(app.ws().layout.pane_count(), 3);
+
+    let area = Rect::new(0, 0, 100, 40);
+    app.ws_mut().last_pane_rects = app.ws().layout.calculate_rects(area);
+
+    // The nested divider is at x=75; drag it to x=80.
+    app.handle_mouse_event(boundary_mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        75,
+        20,
+    ));
+    app.handle_mouse_event(boundary_mouse(
+        MouseEventKind::Drag(MouseButton::Left),
+        80,
+        20,
+    ));
+    app.handle_mouse_event(boundary_mouse(
+        MouseEventKind::Up(MouseButton::Left),
+        80,
+        20,
+    ));
+
+    assert_eq!(app.ws().layout.pane_count(), 3, "drag must not split");
+    // Walk to the nested split's ratio.
+    if let LayoutNode::Split { second, .. } = &app.ws().layout {
+        if let LayoutNode::Split { ratio, .. } = second.as_ref() {
+            assert!(
+                (*ratio - 0.60).abs() < 0.01,
+                "nested drag should resize relative to the right half, got {ratio}"
+            );
+        } else {
+            panic!("right child should be the nested split");
+        }
+    } else {
+        panic!("root should be a split");
+    }
+    app.shutdown();
+}
