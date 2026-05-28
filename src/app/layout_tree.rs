@@ -50,21 +50,35 @@ impl LayoutNode {
         }
     }
 
-    pub fn split_pane(
+    /// Split the leaf with id `target_id`, inserting a new leaf
+    /// `new_id`. `new_pane_first` decides whether the new pane lands in
+    /// the first (top/left) or second (bottom/right) child slot.
+    /// `Ctrl+D` / `Ctrl+E` go through `split_focused_pane` with
+    /// `new_pane_first = false` to preserve the historical "new pane
+    /// on the trailing side" placement; outer-edge double-clicks on
+    /// the top/left edges pass `true` so the new pane appears on the
+    /// clicked side.
+    pub fn split_pane_with_position(
         &mut self,
         target_id: usize,
         new_id: usize,
         direction: SplitDirection,
+        new_pane_first: bool,
     ) -> bool {
         match self {
             LayoutNode::Leaf { pane_id } => {
                 if *pane_id == target_id {
                     let old_id = *pane_id;
+                    let (first_id, second_id) = if new_pane_first {
+                        (new_id, old_id)
+                    } else {
+                        (old_id, new_id)
+                    };
                     *self = LayoutNode::Split {
                         direction,
                         ratio: 0.5,
-                        first: Box::new(LayoutNode::Leaf { pane_id: old_id }),
-                        second: Box::new(LayoutNode::Leaf { pane_id: new_id }),
+                        first: Box::new(LayoutNode::Leaf { pane_id: first_id }),
+                        second: Box::new(LayoutNode::Leaf { pane_id: second_id }),
                     };
                     true
                 } else {
@@ -72,8 +86,8 @@ impl LayoutNode {
                 }
             }
             LayoutNode::Split { first, second, .. } => {
-                first.split_pane(target_id, new_id, direction)
-                    || second.split_pane(target_id, new_id, direction)
+                first.split_pane_with_position(target_id, new_id, direction, new_pane_first)
+                    || second.split_pane_with_position(target_id, new_id, direction, new_pane_first)
             }
         }
     }

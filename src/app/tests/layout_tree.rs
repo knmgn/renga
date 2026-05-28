@@ -10,7 +10,7 @@ fn test_layout_single_pane() {
 #[test]
 fn test_layout_split_vertical() {
     let mut layout = LayoutNode::Leaf { pane_id: 1 };
-    layout.split_pane(1, 2, SplitDirection::Vertical);
+    layout.split_pane_with_position(1, 2, SplitDirection::Vertical, false);
     assert_eq!(layout.pane_count(), 2);
     assert_eq!(layout.collect_pane_ids(), vec![1, 2]);
 }
@@ -18,15 +18,15 @@ fn test_layout_split_vertical() {
 #[test]
 fn test_layout_split_horizontal() {
     let mut layout = LayoutNode::Leaf { pane_id: 1 };
-    layout.split_pane(1, 2, SplitDirection::Horizontal);
+    layout.split_pane_with_position(1, 2, SplitDirection::Horizontal, false);
     assert_eq!(layout.pane_count(), 2);
 }
 
 #[test]
 fn test_layout_nested_split() {
     let mut layout = LayoutNode::Leaf { pane_id: 1 };
-    layout.split_pane(1, 2, SplitDirection::Vertical);
-    layout.split_pane(1, 3, SplitDirection::Horizontal);
+    layout.split_pane_with_position(1, 2, SplitDirection::Vertical, false);
+    layout.split_pane_with_position(1, 3, SplitDirection::Horizontal, false);
     assert_eq!(layout.pane_count(), 3);
     assert_eq!(layout.collect_pane_ids(), vec![1, 3, 2]);
 }
@@ -34,7 +34,7 @@ fn test_layout_nested_split() {
 #[test]
 fn test_layout_remove_pane() {
     let mut layout = LayoutNode::Leaf { pane_id: 1 };
-    layout.split_pane(1, 2, SplitDirection::Vertical);
+    layout.split_pane_with_position(1, 2, SplitDirection::Vertical, false);
     layout.remove_pane(2);
     assert_eq!(layout.pane_count(), 1);
     assert_eq!(layout.collect_pane_ids(), vec![1]);
@@ -43,7 +43,7 @@ fn test_layout_remove_pane() {
 #[test]
 fn test_layout_remove_first_pane() {
     let mut layout = LayoutNode::Leaf { pane_id: 1 };
-    layout.split_pane(1, 2, SplitDirection::Vertical);
+    layout.split_pane_with_position(1, 2, SplitDirection::Vertical, false);
     layout.remove_pane(1);
     assert_eq!(layout.collect_pane_ids(), vec![2]);
 }
@@ -171,3 +171,57 @@ fn resolve_by_name_returns_none_when_pane_closed() {
 // milliseconds per pane; in CI it's measurable but acceptable for a
 // handful of tests. Each test calls `app.shutdown()` at the end so
 // the spawned shells don't linger.
+
+// ─── split_pane_with_position (Issue #245) ──────────────────────
+
+#[test]
+fn split_with_position_first_places_new_pane_in_first_slot() {
+    // new_pane_first = true → new pane lands in the first (top / left)
+    // slot. Vertical layout, ratio 0.5: at area (0,0,100,50) the new
+    // pane should occupy the left half.
+    let mut layout = LayoutNode::Leaf { pane_id: 1 };
+    layout.split_pane_with_position(1, 2, SplitDirection::Vertical, true);
+    let rects = layout.calculate_rects(Rect::new(0, 0, 100, 50));
+    assert_eq!(rects.len(), 2);
+    assert_eq!(
+        rects[0],
+        (2, Rect::new(0, 0, 50, 50)),
+        "new pane (2) is first"
+    );
+    assert_eq!(
+        rects[1],
+        (1, Rect::new(50, 0, 50, 50)),
+        "old pane (1) is second"
+    );
+}
+
+#[test]
+fn split_with_position_second_keeps_legacy_placement() {
+    // new_pane_first = false must place the new pane in the second
+    // (bottom / right) child slot — what Ctrl+D / Ctrl+E have always
+    // done. Regression guard for the historical placement.
+    let mut layout = LayoutNode::Leaf { pane_id: 1 };
+    layout.split_pane_with_position(1, 2, SplitDirection::Vertical, false);
+    let rects = layout.calculate_rects(Rect::new(0, 0, 100, 50));
+    assert_eq!(
+        rects[0],
+        (1, Rect::new(0, 0, 50, 50)),
+        "old pane stays first"
+    );
+    assert_eq!(
+        rects[1],
+        (2, Rect::new(50, 0, 50, 50)),
+        "new pane is second"
+    );
+}
+
+#[test]
+fn split_with_position_horizontal_top_places_new_pane_top() {
+    // Top-edge double-click semantics: horizontal split,
+    // new_pane_first = true → new pane occupies the top half.
+    let mut layout = LayoutNode::Leaf { pane_id: 1 };
+    layout.split_pane_with_position(1, 2, SplitDirection::Horizontal, true);
+    let rects = layout.calculate_rects(Rect::new(0, 0, 100, 50));
+    assert_eq!(rects[0], (2, Rect::new(0, 0, 100, 25)));
+    assert_eq!(rects[1], (1, Rect::new(0, 25, 100, 25)));
+}

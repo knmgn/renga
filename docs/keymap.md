@@ -71,6 +71,7 @@ By default macOS terminals bind `Option+<key>` to Unicode input (`å`, `∫`, `�
 | Click tab | Switch tab |
 | Double-click tab | Rename tab |
 | Click `+` | New tab |
+| Double-click pane outer edge | Split toward the clicked side. Top / Left places the new pane on the clicked side; Bottom / Right places it on the trailing side. Corner cells are ignored. Refused when the resulting pane would be smaller than `min_pane_width` / `min_pane_height` or when the workspace is already at the pane cap. |
 | Drag border | Resize panels |
 | Scroll wheel | Scroll file tree / preview / terminal history. In panes running a TUI that subscribed to mouse reporting (Claude Code `/tui fullscreen`, vim, lazygit, less, …) the wheel is forwarded to the app instead. |
 | Click / drag inside a pane | Normally selects text for copy. When the pane is running a mouse-reporting TUI, the click is forwarded to the app so buttons, carets, etc. work. Hold `Shift` to force renga-side text selection (same escape hatch as tmux / alacritty). |
