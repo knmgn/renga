@@ -992,10 +992,23 @@ fn render_terminal_content(
         } else {
             cursor
         };
-        let cursor_x = area.x + target.1;
+        // vt100 reports col == cols while an autowrap (DECAWM) is pending —
+        // i.e. after a glyph lands in the last column but before the next
+        // glyph wraps the line (vt100's `col_inc` advances past the last
+        // column without clamping, so `cursor_position()` returns the
+        // out-of-range column). Real terminals keep the caret visible on the
+        // last cell in that state, so clamp the column instead of letting the
+        // `< area.x + area.width` guard drop the caret entirely. Dropping it
+        // left the host caret unset for the frame; on WSL/conpty the hardware
+        // caret then stayed stranded at the last painted cell — the visible
+        // desync on plain PTY (bash) panes. Claude panes never hit this: their
+        // caret comes from `resolve_claude_caret`, which only ever returns an
+        // in-range column.
         let cursor_y = area.y + target.0;
-        if cursor_x < area.x + area.width && cursor_y < area.y + area.height {
-            frame.set_cursor_position((cursor_x, cursor_y));
+        if let Some(clamped_col) = clamp_caret_col(target.1, area.width) {
+            if cursor_y < area.y + area.height {
+                frame.set_cursor_position((area.x + clamped_col, cursor_y));
+            }
         }
     }
 
@@ -1046,6 +1059,19 @@ fn should_track_claude_caret(
     hide_cursor: bool,
 ) -> bool {
     is_claude_running || (claude_ever_seen && hide_cursor)
+}
+
+/// Map a vt100 cursor column onto a host-caret column inside a pane's inner
+/// area of the given `width`.
+///
+/// vt100 reports `col == cols` while an autowrap (DECAWM) is pending — the
+/// caret has advanced past the last column but no glyph has wrapped the line
+/// yet (vt100's `col_inc` does not clamp). Clamp such an out-of-range column
+/// onto the last visible cell (`width - 1`) so the caret stays visible on the
+/// final cell, matching real terminals, instead of being dropped. Returns
+/// `None` only when the area has zero width (nothing to draw into).
+fn clamp_caret_col(col: u16, width: u16) -> Option<u16> {
+    (width > 0).then(|| col.min(width - 1))
 }
 
 /// Prompt glyphs Claude Code renders at the left edge of its input box.
@@ -1706,7 +1732,29 @@ fn vt100_color_to_ratatui(color: vt100::Color) -> Color {
 
 #[cfg(test)]
 mod overlay_wrap_tests {
-    use super::{should_track_claude_caret, wrap_overlay_buffer};
+    use super::{clamp_caret_col, should_track_claude_caret, wrap_overlay_buffer};
+
+    #[test]
+    fn pending_autowrap_col_clamps_onto_last_cell() {
+        // vt100 reports col == cols (here 80) while a DECAWM autowrap is
+        // pending. The caret must land on the last visible cell (79), not be
+        // dropped — dropping it leaves the host caret desynced on plain PTY
+        // (bash) panes, especially on WSL/conpty.
+        assert_eq!(clamp_caret_col(80, 80), Some(79));
+    }
+
+    #[test]
+    fn in_range_caret_col_is_unchanged() {
+        assert_eq!(clamp_caret_col(0, 80), Some(0));
+        assert_eq!(clamp_caret_col(5, 80), Some(5));
+        assert_eq!(clamp_caret_col(79, 80), Some(79));
+    }
+
+    #[test]
+    fn zero_width_area_has_no_caret() {
+        assert_eq!(clamp_caret_col(0, 0), None);
+        assert_eq!(clamp_caret_col(3, 0), None);
+    }
 
     #[test]
     fn empty_buffer_reports_origin() {
