@@ -439,8 +439,14 @@ fn run_event_loop(
             // Scoped to Windows because conpty is the observed
             // culprit; macOS / Linux terminals don't exhibit the
             // leak, and the gate avoids any unintended side effect.
-            #[cfg(windows)]
-            {
+            //
+            // The same conpty path is in play under WSL: there the renga
+            // binary is Linux (so `cfg(windows)` is false at compile time)
+            // but the outer terminal is still Windows Terminal via conpty,
+            // which leaks intermediate MoveTo the same way. Native Linux /
+            // macOS terminals don't, so gate the Linux side on a runtime WSL
+            // check to avoid changing their behavior.
+            if hide_cursor_during_draw() {
                 let _ = execute!(terminal.backend_mut(), crossterm::cursor::Hide);
             }
             terminal.draw(|frame| {
@@ -542,6 +548,43 @@ fn flush_paste_buffer(app: &mut app::App, buffer: &mut Vec<u8>) -> Result<()> {
     }
     buffer.clear();
     Ok(())
+}
+
+/// Whether the hardware cursor must be force-hidden for the whole draw
+/// transaction to avoid conpty leaking intermediate `MoveTo` to the host
+/// caret (see the call site for the full rationale). Always true on native
+/// Windows; on other targets only under WSL, where the outer terminal is
+/// still Windows Terminal via conpty.
+fn hide_cursor_during_draw() -> bool {
+    #[cfg(windows)]
+    {
+        true
+    }
+    #[cfg(not(windows))]
+    {
+        is_wsl()
+    }
+}
+
+/// Detect WSL once and cache the result. WSL exports `WSL_DISTRO_NAME` /
+/// `WSL_INTEROP`, and its kernel release string contains "microsoft".
+#[cfg(not(windows))]
+fn is_wsl() -> bool {
+    use std::sync::OnceLock;
+    static WSL: OnceLock<bool> = OnceLock::new();
+    *WSL.get_or_init(|| {
+        if std::env::var_os("WSL_DISTRO_NAME").is_some()
+            || std::env::var_os("WSL_INTEROP").is_some()
+        {
+            return true;
+        }
+        std::fs::read_to_string("/proc/sys/kernel/osrelease")
+            .map(|s| {
+                let s = s.to_ascii_lowercase();
+                s.contains("microsoft") || s.contains("wsl")
+            })
+            .unwrap_or(false)
+    })
 }
 
 #[cfg(test)]

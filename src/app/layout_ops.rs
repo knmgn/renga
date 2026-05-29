@@ -111,12 +111,14 @@ impl App {
             return Ok(None);
         }
 
-        if let Some(&(_, rect)) = self
+        let focused_rect = self
             .ws()
             .last_pane_rects
             .iter()
             .find(|(id, _)| *id == self.ws().focused_pane_id)
-        {
+            .map(|&(_, rect)| rect);
+
+        if let Some(rect) = focused_rect {
             match direction {
                 SplitDirection::Vertical => {
                     if rect.width / 2 < self.min_pane_width {
@@ -141,7 +143,24 @@ impl App {
                 .map(|p| p.cwd.clone())
         });
 
-        let pane = Pane::new_with_cwd(new_id, 10, 40, self.event_tx.clone(), cwd)?;
+        // Seed the new PTY with the geometry it will actually get after the
+        // split, minus the 1-cell border on each side. Falling back to a
+        // fixed 10x40 (the old behavior) forced every fresh pane through a
+        // startup resize/reflow once `render_panes` corrected the size, a
+        // contributing factor to caret desync on plain PTY panes. The next
+        // render still calls `pane.resize(...)` with the exact rect, so this
+        // is purely a better first-frame estimate.
+        let (init_rows, init_cols) = match focused_rect {
+            Some(rect) => {
+                let (w, h) = match direction {
+                    SplitDirection::Vertical => (rect.width / 2, rect.height),
+                    SplitDirection::Horizontal => (rect.width, rect.height / 2),
+                };
+                (h.saturating_sub(2).max(1), w.saturating_sub(2).max(1))
+            }
+            None => (10, 40),
+        };
+        let pane = Pane::new_with_cwd(new_id, init_rows, init_cols, self.event_tx.clone(), cwd)?;
         let ws = self.ws_mut();
         ws.panes.insert(new_id, pane);
         ws.layout
