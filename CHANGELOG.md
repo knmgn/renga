@@ -9,6 +9,51 @@ rules in [`docs/semver-policy.md`](./docs/semver-policy.md).
 
 ## [Unreleased]
 
+## [1.3.0] — 2026-05-29
+
+First minor release after the v1.2.x patch line. Adds click-to-split
+panes: a pane can now be split by double-clicking its outer edge, and
+the shared internal divider between two sibling panes can be
+double-clicked to split the adjacent pane right on the divider. The
+frozen v1.0 API surface (MCP wire shape, CLI flags, config keys, env
+vars) is unchanged — this is a new pointer affordance in the input
+handler, added backward-compatibly, so it bumps the minor per
+[`docs/semver-policy.md`](./docs/semver-policy.md).
+
+### Added
+
+- **Double-click a pane's outer edge to split it in that direction.**
+  A second click on the same outer-edge cell within 500 ms splits the
+  pane: top / left clicks place the new pane on the clicked side, while
+  bottom / right clicks place it on the trailing side (matching the
+  historical Ctrl+D / Ctrl+E placement). Corner cells are ignored
+  because their split direction is ambiguous, the double-click timer is
+  scoped to the active tab so switching tabs within the window cannot
+  be misread as the second click, and `MAX_PANES` / minimum pane
+  width-height refusals are inherited from the existing split path.
+  (#245, #246)
+- **Double-click the shared internal divider between sibling panes to
+  split the adjacent pane.** A second click on the same divider cell
+  within 500 ms splits the bordering leaf right on the divider: a
+  vertical divider splits its left leaf to the right, a horizontal
+  divider splits its top leaf downward. A single click still arms the
+  resize-drag and a plain click that never moves stays a no-op, so the
+  resize affordance is preserved; junction cells where two dividers
+  cross decline (like corner cells). The boundary hit-test now claims
+  only the rows / cols a divider actually occupies, so a click that
+  merely shares a nested divider's column but lands inside an unrelated
+  pane no longer registers as a boundary press, and a nested divider's
+  resize ratio is measured against the sub-region it slices rather than
+  the whole pane. Hovering a shared divider tints it to match the
+  file-tree / preview border affordance. (#247, #248)
+
+### Documentation
+
+- **Click-to-split is documented in the README and the Japanese
+  keymap.** The README and `docs/keymap.ja.md` (JA) now describe the
+  outer-edge and shared-divider double-click split gestures alongside
+  the existing keyboard split bindings. (#249)
+
 ## [1.2.3] — 2026-05-14
 
 Patch release. Fixes clipboard copy on WSL when the normal Linux
