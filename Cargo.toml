@@ -206,7 +206,15 @@ name = "renga"
 # pane right on the divider (#247). Minor bump: new user-facing pointer
 # behavior added backward-compatibly; the frozen v1.0 API surface (MCP
 # wire shape, CLI flags, config keys, env vars) is unchanged.
-version = "1.3.0"
+# 1.3.1 fixes caret/cursor desync on plain PTY panes: vt100's pending
+# autowrap column (col == cols) is clamped to cols-1 so the rendered
+# caret no longer drifts past the line end, and the conpty MoveTo-leak
+# Hide guard is switched from a #[cfg(windows)] compile-time gate to a
+# runtime check so the WSL conpty path is covered too (#253). Patch
+# bump: rendering/display bug fix in internal source only; the frozen
+# v1.0 API surface (MCP wire shape, CLI flags, config keys, env vars)
+# is unchanged.
+version = "1.3.1"
 edition = "2021"
 description = "AI-native terminal for orchestrating multiple Claude Code and Codex agents in one workspace"
 
