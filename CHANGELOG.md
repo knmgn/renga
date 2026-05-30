@@ -9,6 +9,40 @@ rules in [`docs/semver-policy.md`](./docs/semver-policy.md).
 
 ## [Unreleased]
 
+## [1.3.1] — 2026-05-30
+
+Patch release. Fixes caret/cursor desync on plain PTY panes — the
+rendered caret could drift past the end of a line, and the conpty
+cursor-leak guard only covered native Windows, leaving the WSL conpty
+path exposed. The frozen v1.0 API surface (MCP wire shape, CLI flags,
+config keys, env vars) is unchanged.
+
+### Fixed
+
+- **The caret no longer drifts past the line end on plain PTY panes.**
+  When vt100 reports the pending-autowrap column (`col == cols`) at the
+  right edge, renga now clamps the drawn cursor to `cols - 1` instead of
+  rendering it one cell beyond the last column. New split panes are also
+  seeded with their post-split geometry (minus the 1-cell border)
+  instead of a fixed 10×40, so a fresh pane no longer takes a startup
+  resize/reflow that contributed to the desync; the next render still
+  resizes to the exact rect, so this is purely a better first frame.
+  (#253)
+- **The conpty cursor-leak guard now also covers the WSL conpty path.**
+  The `Hide` that works around conpty's dropped `MoveTo` was gated to
+  `#[cfg(windows)]` at compile time, so it never fired under WSL even
+  when the conpty backend was in use. The guard is now a runtime check,
+  so the WSL conpty path is protected too. (#253)
+
+### Internal
+
+- **The `gh pr create` PreToolUse hook is scoped to actual
+  `gh pr create` calls.** The hook previously used an unsupported `if`
+  field (silently ignored), so its `--repo` guard ran on every Bash
+  command and blocked unrelated commands; it now exits early unless the
+  command is a real `gh pr create`, preserving the upstream-PR
+  protection. Repo tooling only — no effect on the renga binary. (#251)
+
 ## [1.3.0] — 2026-05-29
 
 First minor release after the v1.2.x patch line. Adds click-to-split
