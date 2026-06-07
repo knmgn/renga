@@ -9,6 +9,32 @@ rules in [`docs/semver-policy.md`](./docs/semver-policy.md).
 
 ## [Unreleased]
 
+## [1.3.2] — 2026-06-07
+
+Patch release. Fixes caret freeze/drift in Claude Code panes on Windows
+under Claude Code v2.1.x, which changed how Claude paints its caret.
+The frozen v1.0 API surface (MCP wire shape, CLI flags, config keys,
+env vars) is unchanged.
+
+### Fixed
+
+- **The caret in Claude Code panes tracks arrow keys and mid-line edits
+  again under Claude Code v2.1.x.** Modern Claude Code (observed
+  v2.1.168) stopped painting its caret as an inverse-video cell and
+  instead parks the visible terminal hardware cursor directly on the
+  edit cell. renga's caret resolver — built for legacy Claude where the
+  inverse cell was authoritative — found no inverse cell, ignored the
+  now-correct cursor, and pinned the drawn caret to end-of-input, so
+  arrow keys appeared dead and mid-line edits landed away from the
+  painted caret. When no inverse cell exists in the input block, the
+  resolver now trusts the visible vt100 cursor if it sits inside the
+  block (clamped for pending-autowrap); the in-block gate preserves the
+  legacy protection against a cursor parked on spinner/streaming rows,
+  and the inverse-cell tier stays first so legacy Claude is unaffected.
+  The IME overlay's own caret-resolution copy gets the same
+  hardware-cursor tier, so opening the overlay with the caret mid-line
+  no longer snaps it to end-of-input. (#257)
+
 ## [1.3.1] — 2026-05-30
 
 Patch release. Fixes caret/cursor desync on plain PTY panes — the

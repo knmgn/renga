@@ -214,7 +214,17 @@ name = "renga"
 # bump: rendering/display bug fix in internal source only; the frozen
 # v1.0 API surface (MCP wire shape, CLI flags, config keys, env vars)
 # is unchanged.
-version = "1.3.1"
+# 1.3.2 fixes caret freeze/drift in Claude Code panes on Windows with
+# Claude Code v2.1.x: modern Claude stopped painting its caret as an
+# inverse-video cell and parks the visible hardware cursor on the edit
+# cell instead, so resolve_claude_caret now trusts the visible vt100
+# cursor when no inverse cell exists in the input block (clamped for
+# pending-autowrap, in-block gated to keep the legacy spinner/streaming
+# protection); the IME overlay bootstrap copy gets the same tier
+# (#257). Patch bump: rendering/display bug fix in internal source
+# only; the frozen v1.0 API surface (MCP wire shape, CLI flags, config
+# keys, env vars) is unchanged.
+version = "1.3.2"
 edition = "2021"
 description = "AI-native terminal for orchestrating multiple Claude Code and Codex agents in one workspace"
 
