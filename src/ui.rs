@@ -955,12 +955,16 @@ fn render_terminal_content(
     let show_cursor = is_focused && (!screen.hide_cursor() || claude_pane);
     if show_cursor {
         let cursor = screen.cursor_position();
-        // Claude paints its visible caret as an inverse-video cell
-        // somewhere at-or-left-of the vt100 cursor. Scan a small
+        // Legacy Claude paints its visible caret as an inverse-video
+        // cell somewhere at-or-left-of the vt100 cursor. Scan a small
         // window left of vt100 each frame for the closest inverse
         // cell — that is Claude's actual visible caret. The exact
         // offset varies by edit context (end-of-input ~1, mid-line
         // 0, post-backspace 2), so detect rather than hard-code.
+        // Modern Claude (v2.1.x+) paints no inverse cell at all and
+        // instead parks the visible hardware cursor on the edit cell;
+        // `resolve_claude_caret` trusts that cursor when it finds no
+        // inverse cell inside the input block.
         //
         // When the scan finds nothing — either Claude is in the
         // OFF phase of caret blink, or vt100 has briefly jumped to
@@ -1234,9 +1238,19 @@ fn pick_caret_col_on_row(screen: &vt100::Screen, row: u16) -> u16 {
 ///      bottom-most row with an inverse cell keeps the end-of-input
 ///      case (caret on last wrapped line) working while also handling
 ///      ← navigation back to earlier wrapped lines.
-///   4. When no row in the block has an inverse cell (caret blink
-///      OFF, or text-only state), fall back to the 3-tier column
-///      search on `input_row_last`.
+///   4. When no row in the block has an inverse cell, trust the
+///      VISIBLE vt100 hardware cursor if it sits inside the input
+///      block. Modern Claude Code (observed on v2.1.x, Windows
+///      native) stopped painting an inverse caret cell entirely: it
+///      positions the terminal cursor at the edit point (DECTCEM
+///      visible) and lets the host terminal draw the caret. Without
+///      this tier the resolver pinned the caret to "rightmost
+///      non-blank + 1", so ←/→ appeared dead and mid-line edits
+///      landed away from the drawn caret. Gating on the input block
+///      preserves the #131/#133 protection: a cursor parked on a
+///      remote row (spinner / streaming repaint) is still ignored.
+///   5. Otherwise fall back to the 3-tier column search on
+///      `input_row_last`.
 ///
 /// Returns `None` when no prompt row is visible; callers fall back to
 /// `claude_caret_cache` and finally to the raw vt100 cursor.
@@ -1249,6 +1263,17 @@ fn resolve_claude_caret(screen: &vt100::Screen) -> Option<(u16, u16)> {
             if screen.cell(row, col).is_some_and(|c| c.inverse()) {
                 return Some((row, col));
             }
+        }
+    }
+    // Tier 4: no inverse caret anywhere in the input block — modern
+    // Claude Code drives the hardware cursor instead. Trust it while
+    // it's visible and inside the block. Clamp a pending-autowrap
+    // column (vt100 reports col == cols) onto the last cell so this
+    // function keeps its "only returns in-range columns" contract.
+    if !screen.hide_cursor() {
+        let (cur_row, cur_col) = screen.cursor_position();
+        if (prompt_row..=last).contains(&cur_row) {
+            return Some((cur_row, cur_col.min(cols.saturating_sub(1))));
         }
     }
     Some((last, pick_caret_col_on_row(screen, last)))
@@ -1934,6 +1959,100 @@ mod claude_caret_tests {
     }
 
     #[test]
+    fn visible_cursor_inside_input_box_is_trusted_without_inverse_cell() {
+        // Regression (Windows native, Claude Code v2.1.x): modern Claude
+        // paints NO inverse caret cell — it parks the visible hardware
+        // cursor on the edit cell instead. Mid-line ←-navigation: text
+        // `> hello world`, cursor moved back to col 8. The resolver must
+        // return the cursor cell, not "rightmost non-blank + 1" (which
+        // pinned the caret to end-of-input and made ←/→ look dead).
+        let mut bytes = at(2, 0);
+        bytes.extend_from_slice(b"> hello world");
+        bytes.extend_from_slice(&at(2, 8));
+        let p = make_screen(5, 20, &bytes);
+        let screen = p.screen();
+
+        assert_eq!(resolve_claude_caret(screen), Some((2, 8)));
+    }
+
+    #[test]
+    fn visible_cursor_on_continuation_row_is_trusted_without_inverse_cell() {
+        // Same as above, but the cursor sits mid-text on a wrapped
+        // continuation row.
+        let mut bytes = at(2, 0);
+        bytes.extend_from_slice(b"> aaaaaaaa");
+        bytes.extend_from_slice(&at(3, 0));
+        bytes.extend_from_slice(b"  bbb");
+        bytes.extend_from_slice(&at(3, 3));
+        let p = make_screen(5, 10, &bytes);
+        let screen = p.screen();
+
+        assert_eq!(resolve_claude_caret(screen), Some((3, 3)));
+    }
+
+    #[test]
+    fn hidden_cursor_inside_input_box_keeps_text_fallback() {
+        // DECTCEM-hidden cursor (legacy Claude hides it while painting
+        // its own inverse caret; also streaming repaints) must NOT be
+        // trusted even when parked inside the input box.
+        let mut bytes = at(2, 0);
+        bytes.extend_from_slice(b"> hello world");
+        bytes.extend_from_slice(&at(2, 8));
+        bytes.extend_from_slice(b"\x1b[?25l");
+        let p = make_screen(5, 20, &bytes);
+        let screen = p.screen();
+
+        // Falls back to last non-blank (`d` at col 12) + 1.
+        assert_eq!(resolve_claude_caret(screen), Some((2, 13)));
+    }
+
+    #[test]
+    fn visible_cursor_outside_input_box_keeps_text_fallback() {
+        // #131/#133 protection: a visible cursor parked on a remote row
+        // (spinner / streaming repaint) is not the input caret. Keep the
+        // text-derived fallback on the input row.
+        let mut bytes = at(2, 0);
+        bytes.extend_from_slice(b"> hello");
+        bytes.extend_from_slice(&at(0, 5));
+        let p = make_screen(5, 20, &bytes);
+        let screen = p.screen();
+
+        // Last non-blank on row 2 is `o` at col 6; fallback lands at 7.
+        assert_eq!(resolve_claude_caret(screen), Some((2, 7)));
+    }
+
+    #[test]
+    fn inverse_cell_wins_over_visible_cursor() {
+        // Legacy Claude paints the inverse caret cell and the vt100
+        // cursor can sit 1-2 cells away (#129). The painted cell stays
+        // authoritative when both signals are present.
+        let mut bytes = at(2, 0);
+        bytes.extend_from_slice(b"> hi");
+        bytes.extend_from_slice(INV_ON);
+        bytes.extend_from_slice(b" ");
+        bytes.extend_from_slice(INV_OFF);
+        bytes.extend_from_slice(&at(2, 1));
+        let p = make_screen(5, 20, &bytes);
+        let screen = p.screen();
+
+        assert_eq!(resolve_claude_caret(screen), Some((2, 4)));
+    }
+
+    #[test]
+    fn pending_wrap_cursor_inside_input_box_clamps_to_last_col() {
+        // Typing into the last cell leaves vt100 in pending-autowrap
+        // state reporting col == cols. The resolver must clamp onto the
+        // last visible cell to keep its in-range contract.
+        let mut bytes = at(2, 0);
+        bytes.extend_from_slice(b"> aaaaaaaa"); // exactly fills width 10
+        let p = make_screen(5, 10, &bytes);
+        let screen = p.screen();
+
+        assert_eq!(screen.cursor_position(), (2, 10), "pending-wrap premise");
+        assert_eq!(resolve_claude_caret(screen), Some((2, 9)));
+    }
+
+    #[test]
     fn hint_row_stops_the_downward_walk() {
         // Hint `? for shortcuts` below the input row must NOT be
         // included — the caret stays on the prompt row.
@@ -2039,14 +2158,26 @@ mod claude_caret_tests {
 
     #[test]
     fn empty_input_row_places_caret_right_after_prompt() {
-        // `> ` with no text, no inverse cell. The trailing space is a
-        // real cell and our non-blank search skips spaces, so the
-        // last-non-blank fallback anchors on the `>` at col 0 and
-        // places the caret at col 1 (directly after the prompt). The
-        // hard-coded `2` fallback only fires when the row has zero
-        // non-blank cells — see `fully_blank_prompt_row_falls_back_to_col_two`.
+        // `> ` with no text, no inverse cell. With the cursor visible
+        // inside the input box (modern Claude), the resolver trusts it:
+        // after printing `> ` the cursor sits at col 2 — exactly where
+        // real Claude parks the caret of an empty input box.
         let mut bytes = at(2, 0);
         bytes.extend_from_slice(b"> ");
+        let p = make_screen(4, 10, &bytes);
+        let screen = p.screen();
+
+        let (r, c) = resolve_claude_caret(screen).unwrap();
+        assert_eq!((r, c), (2, 2));
+
+        // With the cursor hidden (legacy Claude), the text-derived
+        // fallback takes over: the trailing space is a real cell and
+        // the non-blank search skips spaces, so it anchors on the `>`
+        // at col 0 and places the caret at col 1. The hard-coded `2`
+        // fallback only fires when the row has zero non-blank cells —
+        // see `fully_blank_prompt_row_falls_back_to_col_two`.
+        let mut bytes = at(2, 0);
+        bytes.extend_from_slice(b"> \x1b[?25l");
         let p = make_screen(4, 10, &bytes);
         let screen = p.screen();
 
