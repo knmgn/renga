@@ -482,10 +482,18 @@ fn resolve_claude_caret(screen: &vt100::Screen) -> Option<(u16, u16)> {
     // the block so the overlay bootstrap captures the real mid-line
     // cursor instead of snapping to end-of-input. Mirrors the same
     // tier in `ui.rs::resolve_claude_caret` — keep the two in sync.
+    //
+    // Unlike the ui.rs copy, do NOT clamp a pending-autowrap column
+    // (vt100 reports col == cols after typing into the last cell):
+    // `snapshot_visible_input_from_screen` consumes this column as the
+    // EXCLUSIVE bound of `count_chars_before_col`, so the raw value is
+    // the correct logical position — clamping would drop the caret one
+    // character left of end-of-input. The drawing path clamps because
+    // its contract is an on-screen cell; this path wants a text offset.
     if !screen.hide_cursor() {
         let (cur_row, cur_col) = screen.cursor_position();
         if (prompt_row..=last).contains(&cur_row) {
-            return Some((cur_row, cur_col.min(cols.saturating_sub(1))));
+            return Some((cur_row, cur_col));
         }
     }
     Some((last, pick_caret_col_on_row(screen, last)))
@@ -1022,6 +1030,32 @@ mod tests {
             VisibleInputSnapshot {
                 buffer: "hello world".into(),
                 cursor: 6,
+            }
+        );
+    }
+
+    #[test]
+    fn snapshot_visible_input_pending_wrap_cursor_keeps_end_of_input() {
+        // Typing into the last cell leaves vt100 in pending-autowrap:
+        // cursor_position() reports col == cols. As the exclusive bound
+        // of count_chars_before_col that raw column means "after the
+        // last char" — the snapshot must restore the caret at
+        // end-of-input, not one character short (codex round-2 Major).
+        let mut bytes = at(2, 0);
+        bytes.extend_from_slice(b"> aaaaaaaa"); // exactly fills width 10
+        let parser = make_screen(5, 10, &bytes);
+        assert_eq!(
+            parser.screen().cursor_position(),
+            (2, 10),
+            "pending-wrap premise"
+        );
+
+        let snapshot = snapshot_visible_input_from_screen(parser.screen()).unwrap();
+        assert_eq!(
+            snapshot,
+            VisibleInputSnapshot {
+                buffer: "aaaaaaaa".into(),
+                cursor: 8,
             }
         );
     }
