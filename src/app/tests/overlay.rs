@@ -95,7 +95,11 @@ fn hotkey_mode_bootstraps_visible_claude_input_into_overlay() {
         .get_mut(&pane_id)
         .expect("focused pane exists");
     let mut parser = pane.parser.lock().unwrap_or_else(|e| e.into_inner());
-    parser.process(b"\x1b[2J\x1b[H> draft text\x1b[1;12H");
+    // Park the visible cursor at end-of-input (col 12, right after the
+    // final 't'), like real Claude does after typing. The caret
+    // resolver trusts a visible in-block cursor (modern Claude paints
+    // no inverse cell), so its position now shapes `overlay.cursor`.
+    parser.process(b"\x1b[2J\x1b[H> draft text\x1b[1;13H");
     drop(parser);
 
     let open = KeyEvent::new(KeyCode::Char(';'), KeyModifiers::CONTROL);
