@@ -1298,9 +1298,50 @@ fn debug_log_caret_scan(
         }
         bottom_chars.push(' ');
     }
+
+    // Re-derive the same intermediate facts `resolve_claude_caret`
+    // used so a captured log can tell the caret-jitter triggers apart
+    // (Issue #260): A = vt100 cursor jumping between frames, C = the
+    // in-block inverse cell appearing/disappearing across blink, E =
+    // the input-block boundary shifting under streaming repaint. None
+    // of this changes behavior — it only mirrors the resolver's reads.
+    let raw_cursor = screen.cursor_position();
+    let hide_cursor = screen.hide_cursor();
+    let prompt_row = find_prompt_row(screen);
+    let (block, inverse, tier) = match prompt_row {
+        // No prompt row visible → `resolve_claude_caret` returns None
+        // and the caller falls back to cache / raw vt100 cursor.
+        None => (None, None, "none"),
+        Some(pr) => {
+            let last = resolve_input_row_last(screen, pr);
+            // Rightmost inverse cell scanned bottom-to-top across the
+            // whole block — identical order to the resolver's tier 1-3.
+            let mut inv: Option<(u16, u16)> = None;
+            'scan: for row in (pr..=last).rev() {
+                for col in (0..cols).rev() {
+                    if screen.cell(row, col).is_some_and(|c| c.inverse()) {
+                        inv = Some((row, col));
+                        break 'scan;
+                    }
+                }
+            }
+            // Mirror the resolver's branch selection: inverse cell wins,
+            // else the trusted in-block hardware cursor (tier 4), else
+            // the 3-tier column fallback on the last row (tier 5).
+            let tier = if inv.is_some() {
+                "inverse"
+            } else if !hide_cursor && (pr..=last).contains(&raw_cursor.0) {
+                "cursor"
+            } else {
+                "fallback"
+            };
+            (Some((pr, last)), inv, tier)
+        }
+    };
     let line = format!(
-        "[renga dbg] resolved={:?} bottom: {}\n",
-        resolved, bottom_chars
+        "[renga dbg] resolved={resolved:?} raw_cursor={raw_cursor:?} \
+         hide_cursor={hide_cursor} block={block:?} inverse={inverse:?} \
+         tier={tier} bottom: {bottom_chars}\n"
     );
     if let Ok(mut f) = std::fs::OpenOptions::new()
         .create(true)
