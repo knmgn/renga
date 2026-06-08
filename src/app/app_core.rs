@@ -47,6 +47,7 @@ impl App {
             paste_cooldown: 0,
             resize_cooldown: 0,
             last_term_size: (cols, rows),
+            deferred_caret: None,
             file_tree_width: 20,
             preview_width: 40,
             layout_swapped: true,

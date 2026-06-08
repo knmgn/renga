@@ -452,6 +452,24 @@ fn run_event_loop(
             terminal.draw(|frame| {
                 ui::render(app, frame);
             })?;
+            // Apply the caret AFTER the draw, while the cursor is still hidden
+            // from the pre-draw `Hide`. On conpty, `ui::render` deferred the
+            // caret here instead of calling `frame.set_cursor_position`, so
+            // ratatui left the frame cursor hidden at frame end rather than
+            // re-showing it at its stale post-paint position (the one-frame
+            // flicker onto Claude's spinner row, #260). MoveTo first, then
+            // Show, so the cursor only becomes visible at its final position.
+            // Gated identically to the pre-draw Hide; non-conpty targets keep
+            // the original in-frame `set_cursor_position` path (#253).
+            if hide_cursor_during_draw() {
+                if let Some((x, y)) = app.deferred_caret.take() {
+                    let _ = execute!(
+                        terminal.backend_mut(),
+                        crossterm::cursor::MoveTo(x, y),
+                        crossterm::cursor::Show
+                    );
+                }
+            }
         }
 
         if app.should_quit {
@@ -555,7 +573,7 @@ fn flush_paste_buffer(app: &mut app::App, buffer: &mut Vec<u8>) -> Result<()> {
 /// caret (see the call site for the full rationale). Always true on native
 /// Windows; on other targets only under WSL, where the outer terminal is
 /// still Windows Terminal via conpty.
-fn hide_cursor_during_draw() -> bool {
+pub(crate) fn hide_cursor_during_draw() -> bool {
     #[cfg(windows)]
     {
         true
