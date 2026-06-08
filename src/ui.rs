@@ -54,6 +54,10 @@ fn file_icon(name: &str) -> (&'static str, Color) {
 pub fn render(app: &mut App, frame: &mut Frame) {
     let area = frame.area();
     app.last_term_size = (area.width, area.height);
+    // Cleared every frame; re-populated below only on conpty when a caret is
+    // resolved. Keeps a stale position from a prior frame out of the deferred
+    // apply (see the field doc on `App::deferred_caret` and #260).
+    app.deferred_caret = None;
 
     if area.width < MIN_TERMINAL_WIDTH || area.height < MIN_TERMINAL_HEIGHT {
         let msg = Paragraph::new("Terminal too small")
@@ -88,7 +92,7 @@ pub fn render(app: &mut App, frame: &mut Frame) {
         .split(area);
 
     render_tab_bar(app, frame, chunks[0]);
-    render_main_area(app, frame, chunks[1]);
+    let pane_caret = render_main_area(app, frame, chunks[1]);
     if show_macos_tip {
         render_macos_tip(app, frame, chunks[2]);
     }
@@ -100,10 +104,31 @@ pub fn render(app: &mut App, frame: &mut Frame) {
     // having claimed a layout slot. Using the full terminal `area`
     // (not `chunks[1]`) keeps it visually centered on the whole
     // window even when the status bar is visible.
-    if show_overlay {
-        render_ime_overlay(app, frame, area);
+    let overlay_caret = if show_overlay {
+        render_ime_overlay(app, frame, area)
     } else if show_codex_peer_notification {
         render_codex_peer_notification(app, frame, area);
+        None
+    } else {
+        None
+    };
+
+    // Final hardware-caret position for this frame. The overlay caret wins
+    // over the pane caret when the overlay is open, reproducing the historical
+    // last-write-wins ordering (the overlay previously called
+    // `set_cursor_position` after the panes).
+    let caret = overlay_caret.or(pane_caret);
+
+    // Caret delivery. On conpty (Windows / WSL) defer the caret so the main
+    // loop applies MoveTo->Show after `terminal.draw`, while the cursor is
+    // still hidden. Letting ratatui set the frame cursor would instead make it
+    // re-show the caret at its stale post-paint position before moving it,
+    // leaking a one-frame flicker onto Claude's spinner row (#260). On every
+    // other target keep the original `set_cursor_position` path (#253).
+    if crate::hide_cursor_during_draw() {
+        app.deferred_caret = caret;
+    } else if let Some(pos) = caret {
+        frame.set_cursor_position(pos);
     }
 }
 
@@ -202,11 +227,11 @@ fn render_codex_peer_notification(app: &mut App, frame: &mut Frame, area: Rect) 
     frame.render_widget(Paragraph::new(lines).block(block), box_rect);
 }
 
-fn render_ime_overlay(app: &mut App, frame: &mut Frame, area: Rect) {
-    let overlay = match app.overlay.as_ref() {
-        Some(o) => o,
-        None => return,
-    };
+/// Returns the caret anchor the overlay wants, or `None` when it does not
+/// render (no overlay, or the terminal is too small to fit the box). The
+/// caller decides how to deliver the caret (see `render`'s delivery policy).
+fn render_ime_overlay(app: &mut App, frame: &mut Frame, area: Rect) -> Option<(u16, u16)> {
+    let overlay = app.overlay.as_ref()?;
 
     // Box width: 60% of the terminal, clamped. Plus-2 for the border
     // columns. Collapse if the terminal is smaller than the minimum.
@@ -214,7 +239,7 @@ fn render_ime_overlay(app: &mut App, frame: &mut Frame, area: Rect) {
     let box_w = pct_w.clamp(OVERLAY_MIN_WIDTH, OVERLAY_MAX_WIDTH);
     let box_w = box_w.min(area.width);
     if box_w < OVERLAY_MIN_INNER_WIDTH + 2 {
-        return;
+        return None;
     }
     let inner_w = box_w - 2;
 
@@ -234,7 +259,7 @@ fn render_ime_overlay(app: &mut App, frame: &mut Frame, area: Rect) {
     let inner_h_wanted = OVERLAY_MAX_INNER_HEIGHT;
     let box_h = (inner_h_wanted + 2).min(area.height);
     if box_h < OVERLAY_MIN_INNER_HEIGHT + 2 {
-        return;
+        return None;
     }
     let inner_h = box_h - 2;
 
@@ -299,7 +324,7 @@ fn render_ime_overlay(app: &mut App, frame: &mut Frame, area: Rect) {
     // than to leak it outside the border.
     let caret_x = caret_x.min(box_x + box_w.saturating_sub(2));
     let caret_y = caret_y.min(box_y + box_h.saturating_sub(2));
-    frame.set_cursor_position((caret_x, caret_y));
+    Some((caret_x, caret_y))
 }
 
 /// Split `buffer` into display rows that fit within `inner_w` cols.
@@ -457,7 +482,10 @@ fn render_tab_bar(app: &mut App, frame: &mut Frame, area: Rect) {
 
 // ─── Main area ────────────────────────────────────────────
 
-fn render_main_area(app: &mut App, frame: &mut Frame, area: Rect) {
+/// Returns the focused pane's caret anchor, threaded up from
+/// `render_terminal_content` so `render` can apply the caret-delivery policy
+/// once at the top level.
+fn render_main_area(app: &mut App, frame: &mut Frame, area: Rect) -> Option<(u16, u16)> {
     let tree_width = app.file_tree_width;
     let preview_width = app.preview_width;
 
@@ -510,7 +538,7 @@ fn render_main_area(app: &mut App, frame: &mut Frame, area: Rect) {
         idx += 1;
     }
 
-    render_panes(app, frame, chunks[idx]);
+    let pane_caret = render_panes(app, frame, chunks[idx]);
     idx += 1;
 
     if !swapped && has_preview {
@@ -521,6 +549,8 @@ fn render_main_area(app: &mut App, frame: &mut Frame, area: Rect) {
     if !has_preview {
         app.ws_mut().last_preview_rect = None;
     }
+
+    pane_caret
 }
 
 // ─── File tree ────────────────────────────────────────────
@@ -628,7 +658,9 @@ fn render_file_tree(app: &mut App, frame: &mut Frame, area: Rect) {
 
 // ─── Panes ────────────────────────────────────────────────
 
-fn render_panes(app: &mut App, frame: &mut Frame, area: Rect) {
+/// Returns the focused pane's caret anchor (the only pane that resolves one),
+/// captured outside the per-pane borrow so it can be threaded up to `render`.
+fn render_panes(app: &mut App, frame: &mut Frame, area: Rect) -> Option<(u16, u16)> {
     let rects = app.ws().layout.calculate_rects(area);
     app.ws_mut().last_pane_rects = rects.clone();
 
@@ -658,6 +690,7 @@ fn render_panes(app: &mut App, frame: &mut Frame, area: Rect) {
     let focused_id = app.ws().focused_pane_id;
     let focus_target = app.ws().focus_target;
     let selection = app.selection.clone();
+    let mut caret: Option<(u16, u16)> = None;
     for (pane_id, rect) in rects {
         if let Some(pane) = app.ws().panes.get(&pane_id) {
             let is_focused = pane_id == focused_id && focus_target == FocusTarget::Pane;
@@ -665,11 +698,17 @@ fn render_panes(app: &mut App, frame: &mut Frame, area: Rect) {
                 |s| matches!(s.target, crate::app::SelectionTarget::Pane(id) if id == pane_id),
             );
             let claude_state = app.claude_monitor.state(pane_id);
-            render_single_pane(pane, is_focused, pane_sel, &claude_state, frame, rect);
+            let pane_caret =
+                render_single_pane(pane, is_focused, pane_sel, &claude_state, frame, rect);
+            if is_focused {
+                caret = pane_caret;
+            }
         }
     }
 
     render_boundary_tint(app, frame, area);
+
+    caret
 }
 
 /// Tint the shared internal divider that's being hovered or dragged so
@@ -716,6 +755,8 @@ fn render_boundary_tint(app: &mut App, frame: &mut Frame, area: Rect) {
     }
 }
 
+/// Returns the caret anchor resolved by `render_terminal_content`, or `None`
+/// when the pane isn't focused / has exited / has no visible caret this frame.
 fn render_single_pane(
     pane: &crate::pane::Pane,
     is_focused: bool,
@@ -723,7 +764,7 @@ fn render_single_pane(
     claude_state: &crate::claude_monitor::ClaudeState,
     frame: &mut Frame,
     area: Rect,
-) {
+) -> Option<(u16, u16)> {
     // Cosmetic indicators (border accent, pane label) consume the
     // sticky `*_ever_seen()` latches, not the live title check —
     // Claude and Codex both rewrite their OSC titles to in-flight
@@ -862,18 +903,25 @@ fn render_single_pane(
             .style(Style::default().fg(TEXT_DIM).bg(BG))
             .alignment(Alignment::Center);
         frame.render_widget(msg, inner);
+        None
     } else {
-        render_terminal_content(pane, is_focused, selection, frame, inner);
+        render_terminal_content(pane, is_focused, selection, frame, inner)
     }
 }
 
+/// Paints the pane's vt100 grid and returns the focused caret anchor (in
+/// terminal coordinates) when one is resolved this frame, or `None`. The
+/// caller (`render`) decides how to deliver it; this function no longer calls
+/// `frame.set_cursor_position` itself, so on conpty the caret can be applied
+/// after `terminal.draw` without ratatui re-showing it at a stale position
+/// (#260).
 fn render_terminal_content(
     pane: &crate::pane::Pane,
     is_focused: bool,
     selection: Option<&crate::app::TextSelection>,
     frame: &mut Frame,
     area: Rect,
-) {
+) -> Option<(u16, u16)> {
     let parser = pane.parser.lock().unwrap_or_else(|e| e.into_inner());
     let screen = parser.screen();
 
@@ -952,6 +1000,7 @@ fn render_terminal_content(
         pane.claude_ever_seen(),
         screen.hide_cursor(),
     );
+    let mut caret: Option<(u16, u16)> = None;
     let show_cursor = is_focused && (!screen.hide_cursor() || claude_pane);
     if show_cursor {
         let cursor = screen.cursor_position();
@@ -1011,7 +1060,10 @@ fn render_terminal_content(
         let cursor_y = area.y + target.0;
         if let Some(clamped_col) = clamp_caret_col(target.1, area.width) {
             if cursor_y < area.y + area.height {
-                frame.set_cursor_position((area.x + clamped_col, cursor_y));
+                // Surfaced to `render` instead of set on the frame here, so the
+                // out-of-range pending-wrap case still yields no caret (`None`)
+                // exactly as before — preserving #253's plain-PTY behavior.
+                caret = Some((area.x + clamped_col, cursor_y));
             }
         }
     }
@@ -1055,6 +1107,8 @@ fn render_terminal_content(
             }
         }
     }
+
+    caret
 }
 
 fn should_track_claude_caret(

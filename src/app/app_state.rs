@@ -156,6 +156,16 @@ pub struct App {
     /// `relayout_panes()` so layout-change handlers can resize PTYs
     /// without needing a Frame reference.
     pub last_term_size: (u16, u16),
+    /// Final hardware-caret position deferred for the main loop to apply
+    /// AFTER `terminal.draw`, used only on conpty (Windows / WSL). ratatui's
+    /// frame-end cursor handling re-shows the cursor at its stale post-paint
+    /// position before moving it, leaking a one-frame caret flicker onto the
+    /// Claude spinner row through conpty (#260). On those targets `ui::render`
+    /// stashes the caret here instead of calling `frame.set_cursor_position`,
+    /// so the loop can `MoveTo` then `Show` while the cursor is still hidden.
+    /// Always `None` on non-conpty targets (the original `set_cursor_position`
+    /// path is preserved there — see #253). Refreshed every render.
+    pub deferred_caret: Option<(u16, u16)>,
     // Shared settings
     pub file_tree_width: u16,
     pub preview_width: u16,
