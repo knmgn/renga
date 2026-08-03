@@ -254,6 +254,15 @@ impl App {
     }
 
     pub fn handle_mouse_event(&mut self, mouse: MouseEvent) {
+        // Close confirmation swallows the pointer entirely (Issue
+        // #285). Down / drag / scroll would otherwise be forwarded to
+        // a mouse-reporting TUI as control sequences, or move focus
+        // out from under the pinned target — neither is acceptable
+        // while a modal is asking a yes/no question.
+        if self.close_confirm.is_some() {
+            return;
+        }
+
         if matches!(mouse.kind, MouseEventKind::Down(_)) && self.rename_input.is_some() {
             let needs_relayout = !self.status_bar_visible;
             self.rename_input = None;

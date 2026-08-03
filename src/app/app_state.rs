@@ -133,6 +133,38 @@ pub enum AppEvent {
 pub(crate) const CLAUDE_PEER_LAUNCH_CMD: &str =
     "claude --dangerously-load-development-channels server:renga-peers";
 
+/// Pending Ctrl+W close confirmation (Issue #285).
+///
+/// The variants pin down *what* the user asked to close at request
+/// time. Deliberately **not** expressed as "the focused pane" / "the
+/// active tab": between the request and the `y` keystroke an MCP
+/// client can move focus, close panes, split, or shift tab indices, so
+/// re-reading `focused_pane_id` / `active_tab` on confirm could destroy
+/// something the user never looked at. Everything needed to re-find
+/// (and re-validate) the original target is captured here instead.
+///
+/// This is *only* reachable from the TUI key path. The MCP
+/// `close_pane` tool keeps going straight through
+/// [`App::handle_close`] — automation must never block on a human
+/// keystroke.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CloseConfirm {
+    /// Close one pane out of a multi-pane tab.
+    Pane { pane_id: usize },
+    /// Close a whole tab (Ctrl+W on a tab that holds a single pane).
+    ///
+    /// `anchor_pane_id` re-locates the workspace without trusting the
+    /// tab index, which shifts whenever an earlier tab closes.
+    /// `expected_pane_ids` is the sorted pane-id snapshot taken at
+    /// request time: if an MCP `split_pane` grew the tab while the
+    /// prompt was up, confirming would silently destroy panes the user
+    /// never saw, so the mismatch cancels instead.
+    Tab {
+        anchor_pane_id: usize,
+        expected_pane_ids: Vec<usize>,
+    },
+}
+
 pub struct App {
     pub workspaces: Vec<Workspace>,
     pub active_tab: usize,
@@ -192,6 +224,13 @@ pub struct App {
     /// composed text to the target pane via the existing
     /// bracketed-paste path; `Esc` / `Ctrl+C` cancels.
     pub overlay: Option<OverlayState>,
+    /// Pending Ctrl+W close confirmation. When `Some`, a centered
+    /// modal is drawn and **every** key / paste / mouse event is
+    /// consumed by the confirmation handler — nothing reaches the PTY
+    /// (Ctrl+Q remains the one escape hatch, checked before this).
+    /// See [`CloseConfirm`] for why the target is pinned rather than
+    /// re-derived from focus on confirm.
+    pub(crate) close_confirm: Option<CloseConfirm>,
     /// Saved IME overlay drafts keyed by target pane. Closing the
     /// overlay temporarily stashes the draft here so reopening on the
     /// same pane can resume composition.

@@ -9,6 +9,20 @@ rules in [`docs/semver-policy.md`](./docs/semver-policy.md).
 
 ## [Unreleased]
 
+### Changed
+
+- **`Ctrl+W` now asks before closing.** A centered modal (`Close this
+  pane? y / n`) holds every key, paste, and mouse event until you
+  answer: `y` closes, `n` / `Esc` cancels, any other key is swallowed
+  with the prompt left up, so nothing leaks into the shell behind it.
+  `Ctrl+Q` remains an unconditional escape hatch. The confirmation
+  pins the pane (or the tab plus its exact pane set) at the moment you
+  press `Ctrl+W`, so focus moves, tab-index shifts, or a concurrent
+  MCP `close_pane` / `split_pane` can never redirect the `y` onto a
+  different target — the prompt expires instead. The MCP `close_pane`
+  tool is deliberately **not** affected and still closes immediately.
+  (#285)
+
 ## [1.4.0] — 2026-07-29
 
 First minor release after the v1.3.x patch line. `inspect_pane` /

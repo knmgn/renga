@@ -10,7 +10,7 @@ Full keybinding reference. The README only carries a "first 5–8 keys" cheat sh
 |-----|--------|
 | `Ctrl+D` | Split vertically |
 | `Ctrl+E` | Split horizontally |
-| `Ctrl+W` | Close pane / tab |
+| `Ctrl+W` | Close pane / tab — asks first. A centered `Close this pane? y / n` box appears and holds all input until you answer: `y` closes, `n` / `Esc` cancels, every other key is ignored (nothing reaches the shell underneath). `Ctrl+Q` still quits. The MCP `close_pane` tool is unaffected and closes immediately. |
 | `Alt+T` / `Ctrl+T` | New tab |
 | `Alt+1..9` | Jump to tab N |
 | `Alt+Left/Right` | Previous / next tab |
