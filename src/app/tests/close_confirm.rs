@@ -35,6 +35,48 @@ fn app_with_two_panes() -> App {
     app
 }
 
+/// Two side-by-side panes with pane rects published the way the
+/// renderer publishes them, so pointer coordinates in these tests
+/// resolve against real geometry. Mirrors the helper in
+/// `tests::pointer_input`; the divider sits at column 50.
+fn two_pane_app_with_rects() -> (App, usize, usize) {
+    let mut app = App::new(40, 100).expect("App::new");
+    let left = app.ws().focused_pane_id;
+    app.split_focused_pane_with_position(SplitDirection::Vertical, false, None)
+        .expect("split succeeds")
+        .expect("split not refused");
+    let right = app.ws().focused_pane_id;
+    assert_ne!(left, right);
+    let rects = app.ws().layout.calculate_rects(Rect::new(0, 0, 100, 40));
+    app.ws_mut().last_pane_rects = rects;
+    (app, left, right)
+}
+
+fn mouse_at(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
+    MouseEvent {
+        kind,
+        column,
+        row,
+        modifiers: KeyModifiers::NONE,
+    }
+}
+
+/// A cell well inside the given pane's published rect.
+fn interior_of(app: &App, pane: usize) -> (u16, u16) {
+    let rect = app
+        .ws()
+        .last_pane_rects
+        .iter()
+        .find(|(id, _)| *id == pane)
+        .map(|&(_, r)| r)
+        .expect("pane rect published");
+    assert!(
+        rect.width > 2 && rect.height > 2,
+        "pane must have an interior to click"
+    );
+    (rect.x + rect.width / 2, rect.y + rect.height / 2)
+}
+
 fn key(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::NONE)
 }
@@ -237,33 +279,78 @@ fn paste_is_swallowed_while_confirming() {
 
 #[test]
 fn mouse_is_swallowed_while_confirming() {
-    // Clicks would otherwise move focus (changing nothing about the
-    // pinned target, but confusing) or be forwarded to a
-    // mouse-reporting TUI as control bytes.
-    let mut app = app_with_two_panes();
-    let focused = app.ws().focused_pane_id;
+    // Clicks would otherwise move focus, or be forwarded to a
+    // mouse-reporting TUI as control bytes — into the very pane the
+    // user is being asked about.
+    //
+    // The coordinates have to land inside real published geometry or
+    // this test proves nothing: every pointer event outside
+    // `last_pane_rects` is a no-op with or without the guard. The
+    // cancel-and-retry at the end is the control that proves the cell
+    // is live.
+    let (mut app, left, right) = two_pane_app_with_rects();
+    assert_eq!(app.ws().focused_pane_id, right);
+    let (col, row) = interior_of(&app, left);
+
     app.handle_key_event(ctrl('w')).expect("ctrl+w");
     let armed = app.close_confirm.clone();
 
     for kind in [
         MouseEventKind::Down(MouseButton::Left),
         MouseEventKind::Drag(MouseButton::Left),
+        MouseEventKind::Up(MouseButton::Left),
         MouseEventKind::ScrollUp,
         MouseEventKind::ScrollDown,
     ] {
-        app.handle_mouse_event(MouseEvent {
-            kind,
-            column: 2,
-            row: 2,
-            modifiers: KeyModifiers::NONE,
-        });
-        assert_eq!(app.close_confirm, armed);
+        app.handle_mouse_event(mouse_at(kind, col, row));
+        assert_eq!(app.close_confirm, armed, "{kind:?} must not answer");
         assert_eq!(
             app.ws().focused_pane_id,
-            focused,
-            "{kind:?} must not move focus"
+            right,
+            "{kind:?} must not move focus off the pinned target"
         );
     }
+
+    // Control: the same click on the same cell *does* move focus once
+    // the prompt is gone. Without this, a geometry mistake above would
+    // make the loop pass vacuously.
+    app.handle_key_event(key(KeyCode::Char('n'))).expect("n");
+    app.handle_mouse_event(mouse_at(MouseEventKind::Down(MouseButton::Left), col, row));
+    assert_eq!(
+        app.ws().focused_pane_id,
+        left,
+        "the click must be geometrically live — otherwise the loop above proves nothing"
+    );
+    app.shutdown();
+}
+
+#[test]
+fn a_release_while_confirming_still_ends_the_in_flight_drag() {
+    // Swallowing the pointer must not swallow the *release*: `Up` is
+    // the only event that clears `self.dragging`, so dropping it
+    // strands a drag target that hijacks the next unrelated gesture
+    // (and leaves a mouse-reporting pane with an unbalanced press).
+    let (mut app, _left, _right) = two_pane_app_with_rects();
+
+    // Press on the divider between the two panes — arms a resize drag.
+    app.handle_mouse_event(mouse_at(MouseEventKind::Down(MouseButton::Left), 50, 20));
+    assert!(
+        matches!(app.dragging, Some(DragTarget::PaneSplit(..))),
+        "divider press must arm a resize drag"
+    );
+
+    app.handle_key_event(ctrl('w')).expect("ctrl+w");
+    app.handle_mouse_event(mouse_at(MouseEventKind::Up(MouseButton::Left), 50, 20));
+
+    assert!(
+        app.dragging.is_none(),
+        "the release must end the drag even though the modal consumed it"
+    );
+    assert!(
+        app.close_confirm.is_some(),
+        "and it must not answer the prompt"
+    );
+    assert_eq!(app.ws().layout.pane_count(), 2, "nothing closed or split");
     app.shutdown();
 }
 
