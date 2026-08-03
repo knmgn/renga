@@ -37,10 +37,12 @@ impl App {
         // shell underneath.
         if self.close_confirm.is_some() {
             // Ctrl+Y / Alt+Y are not "yes". Only an unmodified (or
-            // merely shifted) y/n counts as an answer.
-            let plain = !key
-                .modifiers
-                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER);
+            // merely shifted) y/n counts as an answer. Allowlist rather
+            // than denylist: under crossterm's enhanced keyboard
+            // protocol META and HYPER are reported independently of
+            // ALT / SUPER, and naming the rejected flags one by one
+            // would silently accept whatever the next protocol adds.
+            let plain = key.modifiers.difference(KeyModifiers::SHIFT).is_empty();
             match key.code {
                 KeyCode::Char('y') | KeyCode::Char('Y') if plain => self.confirm_close_now(),
                 KeyCode::Char('n') | KeyCode::Char('N') if plain => self.cancel_close_confirm(),

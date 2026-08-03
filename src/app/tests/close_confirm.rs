@@ -165,14 +165,26 @@ fn y_closes_the_confirmed_pane() {
 
 #[test]
 fn uppercase_y_also_closes() {
-    let mut app = app_with_two_panes();
-    let right = pane_id(&app, "right");
+    // Both spellings a terminal can produce for a shifted `y`: the bare
+    // uppercase char, and the char with an explicit SHIFT flag. The
+    // modifier allowlist must let SHIFT through while rejecting the
+    // rest.
+    for answer in [
+        KeyEvent::new(KeyCode::Char('Y'), KeyModifiers::NONE),
+        KeyEvent::new(KeyCode::Char('Y'), KeyModifiers::SHIFT),
+    ] {
+        let mut app = app_with_two_panes();
+        let right = pane_id(&app, "right");
 
-    app.handle_key_event(ctrl('w')).expect("ctrl+w");
-    app.handle_key_event(key(KeyCode::Char('Y'))).expect("Y");
+        app.handle_key_event(ctrl('w')).expect("ctrl+w");
+        app.handle_key_event(answer).expect("Y");
 
-    assert!(!app.ws().panes.contains_key(&right));
-    app.shutdown();
+        assert!(
+            !app.ws().panes.contains_key(&right),
+            "{answer:?} must confirm"
+        );
+        app.shutdown();
+    }
 }
 
 #[test]
@@ -236,6 +248,13 @@ fn unrelated_keys_are_swallowed_and_keep_the_prompt() {
         ctrl('w'),
         KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL),
         KeyEvent::new(KeyCode::Char('n'), KeyModifiers::ALT),
+        // Under the enhanced keyboard protocol crossterm reports META
+        // / HYPER / SUPER independently of ALT, so a modifier
+        // allowlist — not a denylist — is what keeps these from
+        // reading as consent.
+        KeyEvent::new(KeyCode::Char('y'), KeyModifiers::META),
+        KeyEvent::new(KeyCode::Char('y'), KeyModifiers::HYPER),
+        KeyEvent::new(KeyCode::Char('y'), KeyModifiers::SUPER),
     ] {
         assert!(
             app.handle_key_event(k).expect("key"),
