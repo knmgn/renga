@@ -63,6 +63,30 @@ pub fn render(app: &mut App, frame: &mut Frame) {
     app.deferred_caret = None;
 
     if area.width < MIN_TERMINAL_WIDTH || area.height < MIN_TERMINAL_HEIGHT {
+        // A pending close confirmation is swallowing every key, paste,
+        // and mouse event, so it must stay visible even on a canvas too
+        // small for the real UI — otherwise the app just looks wedged.
+        // It outranks "Terminal too small": the user can resize once
+        // they know which key gets them out. Bare centered text, no
+        // box, because the borders alone can exceed the height here.
+        if let Some((prompt, hint)) = tiny_close_confirm_text(app) {
+            let mut lines = Vec::new();
+            if area.height >= 2 {
+                lines.push(Line::from(Span::styled(
+                    prompt,
+                    Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
+                )));
+            }
+            lines.push(Line::from(Span::styled(
+                hint,
+                Style::default().fg(ACCENT_WARN),
+            )));
+            let msg = Paragraph::new(lines)
+                .style(Style::default().bg(BG))
+                .alignment(Alignment::Center);
+            frame.render_widget(msg, area);
+            return;
+        }
         let msg = Paragraph::new("Terminal too small")
             .style(Style::default().fg(TEXT_DIM).bg(BG))
             .alignment(Alignment::Center);
@@ -171,6 +195,21 @@ const OVERLAY_MIN_WIDTH: u16 = 42;
 
 // ─── Ctrl+W close confirmation (Issue #285) ───────────────
 
+/// The prompt / hint pair to show when the terminal is too small for
+/// the real modal, or `None` when no confirmation is pending.
+///
+/// Split out of [`render`] so the invariant that matters — an armed
+/// confirmation is never invisible, at any terminal size — is testable
+/// without standing up a backend.
+pub(crate) fn tiny_close_confirm_text(app: &App) -> Option<(&'static str, &'static str)> {
+    let msgs = app.messages();
+    let prompt = match app.close_confirm.as_ref()? {
+        CloseConfirm::Pane { .. } => msgs.close_confirm_pane,
+        CloseConfirm::Tab { .. } => msgs.close_confirm_tab,
+    };
+    Some((prompt, msgs.close_confirm_hint))
+}
+
 /// Centered y/n modal for a pending pane / tab close.
 ///
 /// Deliberately a centered box rather than a status-bar line: the
@@ -180,13 +219,8 @@ const OVERLAY_MIN_WIDTH: u16 = 42;
 /// Sized to fit inside `MIN_TERMINAL_WIDTH`/`HEIGHT`, since below that
 /// `render` has already bailed out to "Terminal too small".
 fn render_close_confirm(app: &App, frame: &mut Frame, area: Rect) {
-    let Some(pending) = app.close_confirm.as_ref() else {
+    let Some((prompt, hint_text)) = tiny_close_confirm_text(app) else {
         return;
-    };
-    let msgs = app.messages();
-    let prompt = match pending {
-        CloseConfirm::Pane { .. } => msgs.close_confirm_pane,
-        CloseConfirm::Tab { .. } => msgs.close_confirm_tab,
     };
 
     let box_w = area.width.min(52);
@@ -205,10 +239,7 @@ fn render_close_confirm(app: &App, frame: &mut Frame, area: Rect) {
             .fg(ACCENT_WARN)
             .add_modifier(Modifier::BOLD),
     ));
-    let hint = Line::from(Span::styled(
-        msgs.close_confirm_hint,
-        Style::default().fg(TEXT_DIM),
-    ));
+    let hint = Line::from(Span::styled(hint_text, Style::default().fg(TEXT_DIM)));
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)

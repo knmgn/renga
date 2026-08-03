@@ -354,6 +354,49 @@ fn a_release_while_confirming_still_ends_the_in_flight_drag() {
     app.shutdown();
 }
 
+#[test]
+fn an_armed_prompt_is_never_invisible_even_below_the_minimum_terminal_size() {
+    // `render` bails out to "Terminal too small" below 40x10, before it
+    // would reach the modal. Since the prompt keeps swallowing every
+    // key at that size, a user resizing mid-confirmation would see an
+    // app that looks wedged with no hint about `y` / `n` / `Esc`. The
+    // small-terminal path has to consult the pending state too.
+    let mut app = app_with_two_panes();
+    assert_eq!(
+        crate::ui::tiny_close_confirm_text(&app),
+        None,
+        "nothing to say when no prompt is pending"
+    );
+
+    app.handle_key_event(ctrl('w')).expect("ctrl+w");
+    let (prompt, hint) = crate::ui::tiny_close_confirm_text(&app)
+        .expect("an armed prompt must render something at any terminal size");
+    assert_eq!(prompt, app.messages().close_confirm_pane);
+    assert!(
+        hint.contains('y') && hint.contains('n'),
+        "the fallback must still name the answer keys, got {hint:?}"
+    );
+
+    app.handle_key_event(key(KeyCode::Char('n'))).expect("n");
+    assert_eq!(crate::ui::tiny_close_confirm_text(&app), None);
+    app.shutdown();
+}
+
+#[test]
+fn the_tiny_fallback_names_the_right_target() {
+    let mut app = App::new(40, 80).expect("App::new");
+    app.new_tab().expect("new_tab");
+    app.handle_key_event(ctrl('w')).expect("ctrl+w");
+
+    let (prompt, _) = crate::ui::tiny_close_confirm_text(&app).expect("armed");
+    assert_eq!(
+        prompt,
+        app.messages().close_confirm_tab,
+        "a tab-close prompt must not read as a pane-close prompt"
+    );
+    app.shutdown();
+}
+
 // ─── The pinned target does not drift ─────────────────────
 
 #[test]
