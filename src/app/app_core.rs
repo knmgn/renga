@@ -58,6 +58,7 @@ impl App {
             last_new_tab_rect: None,
             rename_input: None,
             overlay: None,
+            close_confirm: None,
             saved_overlay_drafts: HashMap::new(),
             last_tab_click: None,
             last_edge_click: None,

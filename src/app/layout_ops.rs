@@ -80,6 +80,9 @@ impl App {
         self.last_edge_click = None;
         self.last_boundary_click = None;
         self.mark_layout_change();
+        // A tab that vanished under a pending prompt (MCP close of its
+        // last pane, or the tab itself) can no longer be confirmed.
+        self.revalidate_close_confirm();
         for (pid, name, role) in to_emit {
             self.emit_pane_exited(pid, name, role);
         }
@@ -168,6 +171,9 @@ impl App {
         ws.focused_pane_id = new_id;
 
         self.mark_layout_change();
+        // A split during a single-pane tab-close prompt would widen the
+        // blast radius past what the user agreed to.
+        self.revalidate_close_confirm();
         Ok(Some(new_id))
     }
 
@@ -249,13 +255,147 @@ impl App {
         }
     }
 
-    pub(crate) fn close_focused_pane(&mut self) {
-        let ws_index = self.active_tab;
-        let focused = self.ws().focused_pane_id;
+    // ─── Ctrl+W close confirmation (Issue #285) ───────────
+    //
+    // Two clearly separated routes into the same destructive
+    // primitives:
+    //
+    //   TUI  : `request_close_focused_*` → pending [`CloseConfirm`]
+    //          → (user presses `y`) → `close_*_now`
+    //   MCP  : `handle_close` → immediate close, no pending state
+    //
+    // The MCP contract is "close_pane closes the pane", so automation
+    // never observes — let alone waits on — a human confirmation.
+
+    /// Ctrl+W on a tab with more than one pane: remember the *focused
+    /// pane id* and put up the confirmation. Nothing is destroyed here.
+    pub(crate) fn request_close_focused_pane(&mut self) {
+        let pane_id = self.ws().focused_pane_id;
+        if self.ws().layout.pane_count() <= 1 {
+            return;
+        }
+        self.close_confirm = Some(CloseConfirm::Pane { pane_id });
+        self.dirty = true;
+    }
+
+    /// Ctrl+W on a single-pane tab: remember the tab by an anchor pane
+    /// plus the full pane-id snapshot, so a concurrent split can be
+    /// detected on confirm.
+    pub(crate) fn request_close_focused_tab(&mut self) {
+        if self.workspaces.len() <= 1 {
+            return;
+        }
+        let mut expected_pane_ids = self.ws().layout.collect_pane_ids();
+        expected_pane_ids.sort_unstable();
+        let Some(&anchor_pane_id) = expected_pane_ids.first() else {
+            return;
+        };
+        self.close_confirm = Some(CloseConfirm::Tab {
+            anchor_pane_id,
+            expected_pane_ids,
+        });
+        self.dirty = true;
+    }
+
+    /// `n` / `Esc` (and any other invalidation): drop the prompt.
+    pub(crate) fn cancel_close_confirm(&mut self) {
+        if self.close_confirm.take().is_some() {
+            self.dirty = true;
+        }
+    }
+
+    /// `y`: execute exactly what was pinned at request time, or
+    /// nothing at all if the world moved underneath us.
+    pub(crate) fn confirm_close_now(&mut self) {
+        // Take first: the close primitives call
+        // `revalidate_close_confirm`, which must not see the entry
+        // it is in the middle of executing.
+        let Some(pending) = self.close_confirm.take() else {
+            return;
+        };
+        self.dirty = true;
+        match pending {
+            CloseConfirm::Pane { pane_id } => self.close_pane_now(pane_id),
+            CloseConfirm::Tab {
+                anchor_pane_id,
+                expected_pane_ids,
+            } => self.close_tab_now(anchor_pane_id, &expected_pane_ids),
+        }
+    }
+
+    /// Close one confirmed pane. Re-resolves the workspace from the
+    /// pane id (never `active_tab`) and refuses to escalate: if the
+    /// pane became its tab's only pane while the prompt was up, the
+    /// user's "close this pane" must not silently become "close this
+    /// whole tab".
+    ///
+    /// A pane that exited naturally (`exited = true`) is still in the
+    /// layout, so `y` simply removes it;
+    /// [`Self::remove_pane_from_layout`]'s `exit_event_emitted` guard
+    /// keeps `PaneExited` exactly-once.
+    fn close_pane_now(&mut self, pane_id: usize) {
+        let Some(ws_index) = self.workspace_index_of_pane(pane_id) else {
+            return;
+        };
         if self.workspaces[ws_index].layout.pane_count() <= 1 {
             return;
         }
-        let _ = self.remove_pane_from_layout(ws_index, focused);
+        let _ = self.remove_pane_from_layout(ws_index, pane_id);
+    }
+
+    /// Close one confirmed tab, but only if it is still the same tab
+    /// holding exactly the same panes as when the prompt went up.
+    fn close_tab_now(&mut self, anchor_pane_id: usize, expected_pane_ids: &[usize]) {
+        if self.workspaces.len() <= 1 {
+            return;
+        }
+        let Some(ws_index) = self.workspace_index_of_pane(anchor_pane_id) else {
+            return;
+        };
+        let mut current = self.workspaces[ws_index].layout.collect_pane_ids();
+        current.sort_unstable();
+        if current != expected_pane_ids {
+            return;
+        }
+        self.close_tab(ws_index);
+    }
+
+    pub(crate) fn workspace_index_of_pane(&self, pane_id: usize) -> Option<usize> {
+        self.workspaces
+            .iter()
+            .position(|ws| ws.panes.contains_key(&pane_id))
+    }
+
+    /// Drop a pending confirmation whose target no longer matches
+    /// reality. Called from every layout mutation (MCP close, MCP
+    /// split, tab close) so the modal disappears the moment it stops
+    /// describing something the user can still agree to.
+    pub(crate) fn revalidate_close_confirm(&mut self) {
+        let still_valid = match self.close_confirm.as_ref() {
+            None => return,
+            Some(CloseConfirm::Pane { pane_id }) => self
+                .workspace_index_of_pane(*pane_id)
+                // Not just "does the pane exist": once it is the tab's
+                // only pane the confirmed action is no longer possible.
+                .is_some_and(|i| self.workspaces[i].layout.pane_count() > 1),
+            Some(CloseConfirm::Tab {
+                anchor_pane_id,
+                expected_pane_ids,
+            }) => {
+                self.workspaces.len() > 1
+                    && self
+                        .workspace_index_of_pane(*anchor_pane_id)
+                        .is_some_and(|i| {
+                            let mut current = self.workspaces[i].layout.collect_pane_ids();
+                            current.sort_unstable();
+                            current == *expected_pane_ids
+                        })
+            }
+        };
+        if !still_valid {
+            self.close_confirm = None;
+            self.dirty = true;
+        }
     }
 
     pub(crate) fn remove_pane_from_layout(
@@ -329,6 +469,10 @@ impl App {
         } else {
             self.dirty = true;
         }
+        // An MCP close that removed the confirmation's target — or that
+        // left a pane-close target as its tab's last pane — expires the
+        // prompt rather than silently retargeting it.
+        self.revalidate_close_confirm();
         if let Some((name, role)) = exited_meta {
             self.emit_pane_exited(pane_id, name, role);
         }

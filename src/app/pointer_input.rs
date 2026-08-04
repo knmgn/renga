@@ -253,7 +253,39 @@ impl App {
         }
     }
 
+    /// End an in-flight drag without acting on it: balance a
+    /// forwarded press with a release so the pane's mouse-reporting
+    /// app doesn't stay stuck mid-drag, then drop the drag target.
+    /// Used by the close-confirm swallow path, which consumes every
+    /// pointer event but cannot afford to lose the release.
+    fn release_in_flight_drag(&mut self, mouse: &MouseEvent) {
+        if let Some(DragTarget::PaneMouseReport(ws_idx, pane_id, rect, btn)) = self.dragging.clone()
+        {
+            self.forward_pointer_to_pane(ws_idx, pane_id, rect, btn, PointerAction::Release, mouse);
+        }
+        self.dragging = None;
+    }
+
     pub fn handle_mouse_event(&mut self, mouse: MouseEvent) {
+        // Close confirmation swallows the pointer (Issue #285). Down /
+        // drag / scroll would otherwise be forwarded to a
+        // mouse-reporting TUI as control sequences, or move focus out
+        // from under the pinned target — neither is acceptable while a
+        // modal is asking a yes/no question.
+        //
+        // A *release* is the one event that still has to be observed.
+        // `self.dragging` is only ever cleared on `Up`, and a
+        // `PaneMouseReport` drag owes its PTY the release balancing the
+        // press already forwarded to it. Dropping that event would
+        // strand a drag target to hijack the next unrelated gesture and
+        // leave the pane's TUI stuck mid-drag.
+        if self.close_confirm.is_some() {
+            if matches!(mouse.kind, MouseEventKind::Up(_)) {
+                self.release_in_flight_drag(&mouse);
+            }
+            return;
+        }
+
         if matches!(mouse.kind, MouseEventKind::Down(_)) && self.rename_input.is_some() {
             let needs_relayout = !self.status_bar_visible;
             self.rename_input = None;

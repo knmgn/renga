@@ -152,6 +152,18 @@ pub struct Messages {
     // ── macOS first-launch banner ─────────────────────────
     pub macos_tip_line1: &'static str,
     pub macos_tip_line2: &'static str,
+    // ── Ctrl+W close confirmation ─────────────────────────
+    //
+    // Separate full sentences per target instead of a shared
+    // "Close {}?" template — the JA and EN wordings don't share a
+    // slot position, and a mistranslated noun here closes the wrong
+    // thing in the user's head. The answer keys stay `y` / `n`
+    // regardless of language, so they are not translated. Written as
+    // `y: … n/Esc: …` rather than `[y/N]`, which would imply a default
+    // answer on Enter — Enter is not an answer here.
+    pub close_confirm_pane: &'static str,
+    pub close_confirm_tab: &'static str,
+    pub close_confirm_hint: &'static str,
 }
 
 impl Messages {
@@ -211,6 +223,9 @@ pub static MESSAGES_JA: Messages = Messages {
     macos_tip_line1: "\u{26A0} macOS: Alt+<キー> には端末の Option=Meta 設定が必要です",
     macos_tip_line2:
         "  https://github.com/happy-ryo/renga/blob/main/docs/keymap.md#macos-option-as-meta  (任意のキーで消去)",
+    close_confirm_pane: "このペインを閉じますか？",
+    close_confirm_tab: "このタブを閉じますか？",
+    close_confirm_hint: " y: 閉じる  n/Esc: 取消 ",
 };
 
 pub static MESSAGES_EN: Messages = Messages {
@@ -247,6 +262,9 @@ pub static MESSAGES_EN: Messages = Messages {
     macos_tip_line1: "\u{26A0} macOS: Alt+<key> shortcuts require Option=Meta in your terminal",
     macos_tip_line2:
         "  https://github.com/happy-ryo/renga/blob/main/docs/keymap.md#macos-option-as-meta  (press any key to dismiss)",
+    close_confirm_pane: "Close this pane?",
+    close_confirm_tab: "Close this tab?",
+    close_confirm_hint: " y: close  n/Esc: cancel ",
 };
 
 #[cfg(test)]

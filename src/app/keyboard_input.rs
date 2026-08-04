@@ -25,6 +25,33 @@ impl App {
             return Ok(true);
         }
 
+        // Ctrl+W close confirmation (Issue #285) — a true modal.
+        //
+        // Position is load-bearing: *after* the Ctrl+Q escape hatch
+        // above so a pending prompt can never trap the user, and
+        // *before* the overlay / rename / regular handlers so no
+        // keystroke reaches the PTY while the prompt is up. `y`/`Y`
+        // execute, `n`/`N`/`Esc` cancel, and every other key is
+        // swallowed with the prompt left standing — a stray keypress
+        // must neither close a pane nor leak a character into the
+        // shell underneath.
+        if self.close_confirm.is_some() {
+            // Ctrl+Y / Alt+Y are not "yes". Only an unmodified (or
+            // merely shifted) y/n counts as an answer. Allowlist rather
+            // than denylist: under crossterm's enhanced keyboard
+            // protocol META and HYPER are reported independently of
+            // ALT / SUPER, and naming the rejected flags one by one
+            // would silently accept whatever the next protocol adds.
+            let plain = key.modifiers.difference(KeyModifiers::SHIFT).is_empty();
+            match key.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') if plain => self.confirm_close_now(),
+                KeyCode::Char('n') | KeyCode::Char('N') if plain => self.cancel_close_confirm(),
+                KeyCode::Esc => self.cancel_close_confirm(),
+                _ => {}
+            }
+            return Ok(true);
+        }
+
         // IME composition overlay — route every relevant key into the
         // buffer until the user commits or cancels. Takes precedence
         // over rename and every other handler so composition never
@@ -339,10 +366,14 @@ impl App {
                     self.ws_mut().focus_target = FocusTarget::Pane;
                     Ok(true)
                 } else if multi_pane {
-                    self.close_focused_pane();
+                    // Ask first — the actual close happens in
+                    // `confirm_close_now` once the user presses `y`.
+                    // Closing the preview above stays unconfirmed: it
+                    // destroys no process and reopens with one click.
+                    self.request_close_focused_pane();
                     Ok(true)
                 } else if multi_tab {
-                    self.close_tab(self.active_tab);
+                    self.request_close_focused_tab();
                     Ok(true)
                 } else {
                     Ok(false)
@@ -362,6 +393,14 @@ impl App {
     /// `forward_paste_to_pty`. Centralizing the routing here keeps
     /// `main.rs` from having to reach into overlay internals.
     pub fn handle_paste(&mut self, text: &str) -> Result<bool> {
+        // Close confirmation is modal for pastes too. Drop the whole
+        // payload: a pasted "y" must not read as consent, and letting
+        // the rest through would type into the pane the user is being
+        // asked about. Reported as "handled" so the caller skips the
+        // post-paste render cooldown.
+        if self.close_confirm.is_some() {
+            return Ok(true);
+        }
         if let Some(overlay) = self.overlay.as_mut() {
             overlay.insert_str(text);
             self.dirty = true;

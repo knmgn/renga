@@ -22,6 +22,7 @@ mod selection;
 mod sidebar_input;
 mod workspace_state;
 
+pub(crate) use self::app_state::CloseConfirm;
 pub(crate) use self::app_state::CLAUDE_PEER_LAUNCH_CMD;
 pub use self::app_state::{App, AppCommand, AppEvent};
 #[cfg(test)]

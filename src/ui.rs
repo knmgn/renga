@@ -4,7 +4,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
 use ratatui::Frame;
 
-use crate::app::{App, DragTarget, FocusTarget, SplitDirection};
+use crate::app::{App, CloseConfirm, DragTarget, FocusTarget, SplitDirection};
 
 // ─── Theme (Claude-inspired) ──────────────────────────────
 const BG: Color = Color::Rgb(0x0d, 0x11, 0x17);
@@ -17,6 +17,9 @@ const ACCENT_GREEN: Color = Color::Rgb(0x3f, 0xb9, 0x50);
 const ACCENT_BLUE: Color = Color::Rgb(0x58, 0xa6, 0xff);
 const ACCENT_CLAUDE: Color = Color::Rgb(0xd9, 0x77, 0x57);
 const ACCENT_CODEX: Color = Color::Rgb(0x10, 0xa3, 0x7f);
+/// Amber used by the destructive-action confirmation modal, so it
+/// reads as "stop and answer" rather than as another info popup.
+const ACCENT_WARN: Color = Color::Rgb(0xe3, 0xa0, 0x08);
 const HEADER_BG: Color = Color::Rgb(0x16, 0x1b, 0x22);
 const ACTIVE_TAB_BG: Color = Color::Rgb(0x0d, 0x11, 0x17);
 const ACTIVE_BG: Color = Color::Rgb(0x1c, 0x23, 0x33);
@@ -60,6 +63,30 @@ pub fn render(app: &mut App, frame: &mut Frame) {
     app.deferred_caret = None;
 
     if area.width < MIN_TERMINAL_WIDTH || area.height < MIN_TERMINAL_HEIGHT {
+        // A pending close confirmation is swallowing every key, paste,
+        // and mouse event, so it must stay visible even on a canvas too
+        // small for the real UI — otherwise the app just looks wedged.
+        // It outranks "Terminal too small": the user can resize once
+        // they know which key gets them out. Bare centered text, no
+        // box, because the borders alone can exceed the height here.
+        if let Some((prompt, hint)) = tiny_close_confirm_text(app) {
+            let mut lines = Vec::new();
+            if area.height >= 2 {
+                lines.push(Line::from(Span::styled(
+                    prompt,
+                    Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
+                )));
+            }
+            lines.push(Line::from(Span::styled(
+                hint,
+                Style::default().fg(ACCENT_WARN),
+            )));
+            let msg = Paragraph::new(lines)
+                .style(Style::default().bg(BG))
+                .alignment(Alignment::Center);
+            frame.render_widget(msg, area);
+            return;
+        }
         let msg = Paragraph::new("Terminal too small")
             .style(Style::default().fg(TEXT_DIM).bg(BG))
             .alignment(Alignment::Center);
@@ -78,9 +105,13 @@ pub fn render(app: &mut App, frame: &mut Frame) {
     // one row on narrow terminals because the URL is the whole point
     // — better to let line 2 truncate horizontally than drop it.
     let macos_tip_h: u16 = if show_macos_tip { 2 } else { 0 };
-    let show_overlay = app.overlay.is_some();
+    // The close confirmation outranks every other floating widget: it
+    // is the only one holding a destructive action, and while it is up
+    // no key can reach the others anyway.
+    let show_close_confirm = app.close_confirm.is_some();
+    let show_overlay = !show_close_confirm && app.overlay.is_some();
     let show_codex_peer_notification =
-        !show_overlay && app.visible_codex_peer_notification().is_some();
+        !show_close_confirm && !show_overlay && app.visible_codex_peer_notification().is_some();
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -104,7 +135,10 @@ pub fn render(app: &mut App, frame: &mut Frame) {
     // having claimed a layout slot. Using the full terminal `area`
     // (not `chunks[1]`) keeps it visually centered on the whole
     // window even when the status bar is visible.
-    let overlay_caret = if show_overlay {
+    let overlay_caret = if show_close_confirm {
+        render_close_confirm(app, frame, area);
+        None
+    } else if show_overlay {
         render_ime_overlay(app, frame, area)
     } else if show_codex_peer_notification {
         render_codex_peer_notification(app, frame, area);
@@ -117,7 +151,15 @@ pub fn render(app: &mut App, frame: &mut Frame) {
     // over the pane caret when the overlay is open, reproducing the historical
     // last-write-wins ordering (the overlay previously called
     // `set_cursor_position` after the panes).
-    let caret = overlay_caret.or(pane_caret);
+    // While the close confirmation is up, suppress the hardware caret
+    // entirely. Leaving it blinking inside the pane behind the modal
+    // reads as "you can still type here" — you can't; every key goes
+    // to the y/n prompt.
+    let caret = if show_close_confirm {
+        None
+    } else {
+        overlay_caret.or(pane_caret)
+    };
 
     // Caret delivery. On conpty (Windows / WSL) defer the caret so the main
     // loop applies MoveTo->Show after `terminal.draw`, while the cursor is
@@ -150,6 +192,69 @@ const OVERLAY_MAX_INNER_HEIGHT: u16 = 10;
 const OVERLAY_TARGET_WIDTH_PCT: u16 = 60;
 const OVERLAY_MAX_WIDTH: u16 = 100;
 const OVERLAY_MIN_WIDTH: u16 = 42;
+
+// ─── Ctrl+W close confirmation (Issue #285) ───────────────
+
+/// The prompt / hint pair to show when the terminal is too small for
+/// the real modal, or `None` when no confirmation is pending.
+///
+/// Split out of [`render`] so the invariant that matters — an armed
+/// confirmation is never invisible, at any terminal size — is testable
+/// without standing up a backend.
+pub(crate) fn tiny_close_confirm_text(app: &App) -> Option<(&'static str, &'static str)> {
+    let msgs = app.messages();
+    let prompt = match app.close_confirm.as_ref()? {
+        CloseConfirm::Pane { .. } => msgs.close_confirm_pane,
+        CloseConfirm::Tab { .. } => msgs.close_confirm_tab,
+    };
+    Some((prompt, msgs.close_confirm_hint))
+}
+
+/// Centered y/n modal for a pending pane / tab close.
+///
+/// Deliberately a centered box rather than a status-bar line: the
+/// status bar is hidden by `Alt+S`, competes with the right-hand
+/// session info, and truncates on narrow terminals — none of which is
+/// acceptable for the only prompt that guards a destructive action.
+/// Sized to fit inside `MIN_TERMINAL_WIDTH`/`HEIGHT`, since below that
+/// `render` has already bailed out to "Terminal too small".
+fn render_close_confirm(app: &App, frame: &mut Frame, area: Rect) {
+    let Some((prompt, hint_text)) = tiny_close_confirm_text(app) else {
+        return;
+    };
+
+    let box_w = area.width.min(52);
+    let box_h = area.height.min(3);
+    if box_w < 4 || box_h < 3 {
+        return;
+    }
+    let box_x = area.x + (area.width.saturating_sub(box_w)) / 2;
+    let box_y = area.y + (area.height.saturating_sub(box_h)) / 2;
+    let box_rect = Rect::new(box_x, box_y, box_w, box_h);
+    frame.render_widget(ratatui::widgets::Clear, box_rect);
+
+    let title = Line::from(Span::styled(
+        " \u{26a0} Ctrl+W ",
+        Style::default()
+            .fg(ACCENT_WARN)
+            .add_modifier(Modifier::BOLD),
+    ));
+    let hint = Line::from(Span::styled(hint_text, Style::default().fg(TEXT_DIM)));
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(ACCENT_WARN))
+        .style(Style::default().bg(PANEL_BG))
+        .title(title)
+        .title_bottom(hint);
+    let body = Paragraph::new(Line::from(Span::styled(
+        prompt,
+        Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
+    )))
+    .alignment(Alignment::Center)
+    .block(block);
+    frame.render_widget(body, box_rect);
+}
 
 fn render_codex_peer_notification(app: &mut App, frame: &mut Frame, area: Rect) {
     let Some(notification) = app.visible_codex_peer_notification() else {
