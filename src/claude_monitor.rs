@@ -78,17 +78,24 @@ impl ClaudeState {
     /// into the JSONL, **without** the `[1m]` suffix even when the
     /// session is running the 1M variant. Opus 4.6 ships with a 1M
     /// context by default for Pro / Max users, so it's treated as 1M
-    /// here. Older Opus uses a 500K baseline so the status-bar usage
-    /// ratio better reflects the practical working window on those
-    /// models. Haiku and Sonnet keep their native 200K window — the
-    /// `[1m]` extended variants are still picked up by the explicit
-    /// `[1m]` / `-1m` suffix path above. Unknown models fall back to
-    /// 200K as the safe default.
+    /// here, as are the newer 1M-default tiers: Fable 5 / Mythos 5
+    /// (1M is both default and maximum, no `[1m]` variant exists) and
+    /// Opus 4.7 / 4.8 / 5. Older Opus uses a 500K baseline so the
+    /// status-bar usage ratio better reflects the practical working
+    /// window on those models. Haiku and Sonnet keep their native 200K
+    /// window — the `[1m]` extended variants are still picked up by
+    /// the explicit `[1m]` / `-1m` suffix path above. Unknown models
+    /// fall back to 200K as the safe default.
     pub fn context_limit(&self) -> u64 {
         match self.model.as_deref() {
             Some(m) if m.contains("[1m]") || m.contains("-1m") => 1_000_000,
-            // Opus 4.6+: 1M context is default.
+            // Fable 5 / Mythos 5: 1M context is default and maximum.
+            Some(m) if m.contains("fable") || m.contains("mythos") => 1_000_000,
+            // Opus 4.6+ (4-6 / 4-7 / 4-8 / 5): 1M context is default.
+            // Keep these specific arms before the catch-all `opus` 500K arm.
             Some(m) if m.contains("opus-4-6") => 1_000_000,
+            Some(m) if m.contains("opus-4-7") || m.contains("opus-4-8") => 1_000_000,
+            Some(m) if m.contains("opus-5") => 1_000_000,
             Some(m) if m.contains("haiku") => 200_000,
             Some(m) if m.contains("sonnet") => 200_000,
             Some(m) if m.contains("opus") => 500_000,
@@ -115,6 +122,10 @@ impl ClaudeState {
             Some("sonnet")
         } else if full.contains("haiku") {
             Some("haiku")
+        } else if full.contains("fable") {
+            Some("fable")
+        } else if full.contains("mythos") {
+            Some("mythos")
         } else {
             Some(full)
         }
@@ -626,5 +637,54 @@ mod tests {
         assert_eq!(state.context_limit(), 200_000);
         state.model = Some("claude-haiku-4-5".to_string());
         assert_eq!(state.context_limit(), 200_000);
+    }
+
+    #[test]
+    fn test_context_limit_fable_and_mythos_is_1m() {
+        // Fable 5 / Mythos 5 ship with a 1M context window as both the
+        // default and the maximum (no [1m] variant exists).
+        let mut state = ClaudeState {
+            model: Some("claude-fable-5".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(state.context_limit(), 1_000_000);
+
+        state.model = Some("claude-mythos-5".to_string());
+        assert_eq!(state.context_limit(), 1_000_000);
+    }
+
+    #[test]
+    fn test_context_limit_opus_5_tier_is_1m() {
+        // Opus 5 / 4.7 / 4.8 all ship with 1M context by default and
+        // must not fall through to the catch-all 500K `opus` arm.
+        let mut state = ClaudeState {
+            model: Some("claude-opus-5".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(state.context_limit(), 1_000_000);
+
+        state.model = Some("claude-opus-4-7".to_string());
+        assert_eq!(state.context_limit(), 1_000_000);
+
+        state.model = Some("claude-opus-4-8".to_string());
+        assert_eq!(state.context_limit(), 1_000_000);
+    }
+
+    #[test]
+    fn test_short_model_fable_and_mythos() {
+        let mut state = ClaudeState {
+            model: Some("claude-fable-5".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(state.short_model(), Some("fable"));
+
+        state.model = Some("claude-mythos-5".to_string());
+        assert_eq!(state.short_model(), Some("mythos"));
+
+        // Opus tiers keep the existing short name.
+        state.model = Some("claude-opus-5".to_string());
+        assert_eq!(state.short_model(), Some("opus"));
+        state.model = Some("claude-opus-4-8".to_string());
+        assert_eq!(state.short_model(), Some("opus"));
     }
 }
