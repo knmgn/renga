@@ -356,12 +356,42 @@ impl App {
             return false;
         }
 
-        // Vertical slots still mirror `ui::render` by hand (tab bar,
-        // main area, macOS tip, status bar); only the horizontal split
-        // is shared, via `layout_geometry::compute`. Getting the pane
-        // origin right matters even between renders because the IPC
-        // `list` response and mouse hit-testing both read x/y out of
-        // `last_pane_rects`.
+        let rects = self
+            .ws()
+            .layout
+            .calculate_rects(self.main_area_layout().panes);
+
+        let mut any_changed = false;
+        for (pane_id, rect) in &rects {
+            if let Some(pane) = self.ws_mut().panes.get_mut(pane_id) {
+                let inner_rows = rect.height.saturating_sub(2);
+                let inner_cols = rect.width.saturating_sub(2);
+                if pane.resize(inner_rows, inner_cols).unwrap_or(false) {
+                    any_changed = true;
+                }
+            }
+        }
+
+        self.ws_mut().last_pane_rects = rects;
+        any_changed
+    }
+
+    /// Resolve the main area's geometry from the cached terminal size,
+    /// without needing a `Frame`.
+    ///
+    /// This is what lets non-render code ask "is the file tree actually
+    /// on screen?" — a question the raw `file_tree_visible` flag cannot
+    /// answer once `replace` mode and the narrow-terminal degrade
+    /// ladder are in play, and one that focus and key routing have to
+    /// get right or they hand the keyboard to an invisible panel.
+    /// Reading `last_*_rect` instead would be wrong before the first
+    /// paint and stale right after a resize.
+    ///
+    /// The vertical slots still mirror `ui::render` by hand (tab bar,
+    /// main area, macOS tip, status bar); only the horizontal split is
+    /// shared, via `layout_geometry::compute`.
+    pub(crate) fn main_area_layout(&self) -> layout_geometry::MainAreaLayout {
+        let (cols, rows) = self.last_term_size;
         let tab_h = 1u16;
         let status_h: u16 = if self.status_bar_visible || self.rename_input.is_some() {
             1
@@ -378,25 +408,7 @@ impl App {
         // they are two rows taller than what gets painted.
         let macos_tip_h: u16 = if self.macos_tip_visible { 2 } else { 0 };
         let main_h = rows.saturating_sub(tab_h + status_h + macos_tip_h);
-
-        let layout = crate::app::layout_geometry::compute(
-            self.main_area_input(Rect::new(0, tab_h, cols, main_h)),
-        );
-        let rects = self.ws().layout.calculate_rects(layout.panes);
-
-        let mut any_changed = false;
-        for (pane_id, rect) in &rects {
-            if let Some(pane) = self.ws_mut().panes.get_mut(pane_id) {
-                let inner_rows = rect.height.saturating_sub(2);
-                let inner_cols = rect.width.saturating_sub(2);
-                if pane.resize(inner_rows, inner_cols).unwrap_or(false) {
-                    any_changed = true;
-                }
-            }
-        }
-
-        self.ws_mut().last_pane_rects = rects;
-        any_changed
+        layout_geometry::compute(self.main_area_input(Rect::new(0, tab_h, cols, main_h)))
     }
 
     /// Collect the horizontal-layout inputs for `area`.

@@ -75,24 +75,47 @@ impl App {
         self.org_sidebar_enabled() && self.org_sidebar_visible
     }
 
-    /// Is the active tab's file tree actually on screen?
+    /// Does the file tree own a slot in the layout right now?
     ///
-    /// In `replace` mode the sidebar takes the tree's slot, so
-    /// `file_tree_visible` can be `true` for a tree that is not painted
-    /// at all. Everything that decides *where keystrokes go* has to ask
-    /// this rather than read the raw flag — focus on an invisible panel
-    /// silently eats input, and in the file tree's case bare `c` / `v`
-    /// would spawn Claude panes the user never asked for.
-    ///
-    /// Mirrors the `show_tree` rule in
-    /// [`layout_geometry::compute`](crate::app::layout_geometry::compute);
-    /// the narrow-terminal degrade ladder is deliberately *not* folded
-    /// in here, because that answer is only known after a paint and is
-    /// reported through `last_file_tree_rect`.
-    pub(crate) fn file_tree_painted(&self) -> bool {
+    /// `replace`-mode aware but *not* degrade-aware: in `replace` the
+    /// sidebar takes the tree's slot outright, which is a state the
+    /// user toggles, whereas a tree squeezed out by a narrow terminal
+    /// is still "on" and comes back when the window grows. Toggling
+    /// logic wants this one; anything deciding where keystrokes go
+    /// wants [`Self::file_tree_painted`].
+    pub(crate) fn file_tree_slot_available(&self) -> bool {
         self.ws().file_tree_visible
             && !(self.org_sidebar_mode == crate::config::OrgSidebarMode::Replace
                 && self.org_sidebar_visible)
+    }
+
+    /// Is the active tab's file tree actually on screen?
+    ///
+    /// Everything that decides *where keystrokes go* has to ask this
+    /// rather than read `file_tree_visible`: focus on an invisible
+    /// panel silently eats input, and for the file tree in particular a
+    /// bare `c` / `v` would spawn Claude panes the user never asked
+    /// for. Two things can hide a tree whose flag is set — `replace`
+    /// mode, and the narrow-terminal degrade ladder. Since the sidebar
+    /// now ships on by default it consumes columns the tree and preview
+    /// used to have, so the degrade case went from rare to routine.
+    pub(crate) fn file_tree_painted(&self) -> bool {
+        self.main_area_layout().file_tree.is_some()
+    }
+
+    /// Is the preview actually on screen? Same reasoning as
+    /// [`Self::file_tree_painted`] — the degrade ladder drops the
+    /// preview first, and it is the widest panel, so it is the one most
+    /// often dropped.
+    pub(crate) fn preview_painted(&self) -> bool {
+        self.main_area_layout().preview.is_some()
+    }
+
+    /// Is the sidebar actually on screen? Differs from
+    /// [`Self::org_sidebar_active`] only when the degrade ladder had to
+    /// drop it.
+    pub(crate) fn org_sidebar_painted(&self) -> bool {
+        self.main_area_layout().org_sidebar.is_some()
     }
 
     /// Build the full row list, top to bottom.

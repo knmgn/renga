@@ -579,19 +579,25 @@ impl App {
     /// goes last so the pre-existing `Ctrl+Right` muscle memory
     /// (pane → tree → preview) is untouched.
     fn focus_cycle_targets(&self) -> Vec<FocusTarget> {
+        // Membership is decided by the *resolved layout*, not by the
+        // logical visibility flags. A panel can be flagged on and still
+        // be nowhere on screen — `replace` mode takes the tree's slot,
+        // and the degrade ladder drops the preview, then the tree, on a
+        // narrow terminal. Cycling onto one of those swallows every
+        // later keystroke, and for the file tree a bare `c` / `v` would
+        // split the workspace into a Claude pane nobody asked for. The
+        // sidebar ships on by default, so it eats columns the other two
+        // used to have and makes that degrade case routine rather than
+        // an edge case.
+        let layout = self.main_area_layout();
         let mut targets = Vec::new();
-        // `file_tree_painted`, not the raw `file_tree_visible` flag: in
-        // `replace` mode the sidebar holds the tree's slot, and cycling
-        // focus onto an unpainted tree would swallow every subsequent
-        // keystroke (and turn a bare `c` / `v` into a Claude pane split).
-        if self.file_tree_painted() {
+        if layout.file_tree.is_some() {
             targets.push(FocusTarget::FileTree);
         }
-        let ws = self.ws();
-        if ws.preview.is_active() {
+        if layout.preview.is_some() {
             targets.push(FocusTarget::Preview);
         }
-        if self.org_sidebar_active() {
+        if layout.org_sidebar.is_some() {
             targets.push(FocusTarget::OrgSidebar);
         }
         targets

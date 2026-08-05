@@ -605,18 +605,27 @@ fn render_main_area(app: &mut App, frame: &mut Frame, area: Rect) -> Option<(u16
     // `App::relayout_panes` reports to the PTYs cannot drift apart.
     let layout = crate::app::layout_geometry::compute(app.main_area_input(area));
 
+    // Focus can be left pointing at a panel this frame does not paint —
+    // the degrade ladder just squeezed it out, or `replace` mode took
+    // the tree's slot. Hand it back to the panes rather than let the
+    // panel handlers keep eating keystrokes for an invisible widget.
+    // The key dispatch guards against this too; doing it here as well
+    // means the status bar hints agree with where input is going.
+    let focus_is_painted = match app.ws().focus_target {
+        FocusTarget::OrgSidebar => layout.org_sidebar.is_some(),
+        FocusTarget::FileTree => layout.file_tree.is_some(),
+        FocusTarget::Preview => layout.preview.is_some(),
+        FocusTarget::Pane => true,
+    };
+    if !focus_is_painted {
+        app.ws_mut().focus_target = FocusTarget::Pane;
+    }
+
     app.last_org_sidebar_rect = layout.org_sidebar;
     if let Some(rect) = layout.org_sidebar {
         render_org_sidebar(app, frame, rect, layout.org_sidebar_compact);
     } else {
         app.org_sidebar_row_targets.clear();
-        // Focus can be left pointing at a panel the degrade ladder just
-        // squeezed off screen. Hand it back to the panes rather than
-        // let `handle_org_sidebar_key` keep eating keystrokes for an
-        // invisible widget.
-        if app.ws().focus_target == FocusTarget::OrgSidebar {
-            app.ws_mut().focus_target = FocusTarget::Pane;
-        }
     }
 
     app.ws_mut().last_file_tree_rect = layout.file_tree;

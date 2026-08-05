@@ -270,6 +270,17 @@ impl App {
         self.dirty = true;
     }
 
+    /// Move focus to the file tree, but only if it will actually be
+    /// painted. On a terminal too narrow to fit it, Ctrl+F still flips
+    /// the flag on (so the tree reappears when the window grows) —
+    /// handing focus to a panel with no cells on screen would just
+    /// swallow the user's next keystrokes.
+    fn take_file_tree_focus(&mut self) {
+        if self.file_tree_painted() {
+            self.ws_mut().focus_target = FocusTarget::FileTree;
+        }
+    }
+
     pub(crate) fn toggle_file_tree(&mut self) {
         // In `replace` mode the sidebar occupies the tree's slot, so a
         // tab whose `file_tree_visible` flag is still set can have no
@@ -279,7 +290,12 @@ impl App {
         let suppressed_by_sidebar = self.org_sidebar_mode == crate::config::OrgSidebarMode::Replace
             && self.org_sidebar_visible;
         let sidebar_was_visible = self.org_sidebar_visible;
-        let showing = self.file_tree_painted();
+        // The *slot* predicate, not `file_tree_painted`: a tree the
+        // degrade ladder squeezed out is still logically on, and Ctrl+F
+        // should turn it off rather than "re-open" something that never
+        // closed. `replace` mode is different — there the user really
+        // did give the slot away.
+        let showing = self.file_tree_slot_available();
 
         if showing && self.ws().focus_target == FocusTarget::FileTree {
             let ws = self.ws_mut();
@@ -290,19 +306,18 @@ impl App {
                 FocusTarget::Pane
             };
         } else if showing {
-            self.ws_mut().focus_target = FocusTarget::FileTree;
+            self.take_file_tree_focus();
         } else {
             // Opening the tree in `replace` mode hands the slot back
             // from the sidebar.
             if suppressed_by_sidebar {
                 self.org_sidebar_visible = false;
             }
-            let ws = self.ws_mut();
-            ws.file_tree_visible = true;
-            ws.focus_target = FocusTarget::FileTree;
+            self.ws_mut().file_tree_visible = true;
+            self.take_file_tree_focus();
         }
 
-        let now_showing = self.file_tree_painted();
+        let now_showing = self.file_tree_slot_available();
         if showing != now_showing || sidebar_was_visible != self.org_sidebar_visible {
             self.mark_layout_change();
         }

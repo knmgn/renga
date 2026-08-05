@@ -398,6 +398,79 @@ fn focus_cycle_skips_a_file_tree_that_replace_mode_is_hiding() {
 }
 
 #[test]
+fn focus_cycle_skips_panels_the_narrow_terminal_degrade_ladder_dropped() {
+    // The sibling of the `replace` case, and the one that made the
+    // hazard routine: the sidebar ships on by default, so it eats
+    // columns the tree and preview used to have and they now get
+    // dropped at widths where they previously survived. Cycle
+    // membership therefore has to come from the resolved layout, not
+    // from `file_tree_visible` / `preview.is_active()`.
+    let mut app = app_with_sidebar(40, 60);
+    app.ws_mut().file_tree_visible = true;
+    // Setting `file_path` is what `is_active()` reads; going through
+    // `Preview::load` would drag in a Picker and the message table for
+    // no benefit here (mirrors the ipc_state rect tests).
+    app.ws_mut().preview.file_path = Some(std::path::PathBuf::from("Cargo.toml"));
+
+    let layout = app.main_area_layout();
+    assert!(app.ws().preview.is_active(), "preview is logically on");
+    assert!(layout.preview.is_none(), "…but 60 cols cannot fit it");
+    assert!(layout.file_tree.is_none(), "…nor the tree");
+    assert!(layout.org_sidebar.is_some(), "the sidebar survives");
+
+    app.focus_next_pane();
+    assert_eq!(
+        app.ws().focus_target,
+        FocusTarget::OrgSidebar,
+        "the cycle must skip both dropped panels"
+    );
+}
+
+#[test]
+fn keys_do_not_route_to_a_panel_the_degrade_ladder_dropped() {
+    let mut app = app_with_sidebar(40, 60);
+    app.ws_mut().file_tree_visible = true;
+    app.ws_mut().focus_target = FocusTarget::FileTree;
+    assert!(!app.file_tree_painted());
+    let panes_before = app.ws().layout.pane_count();
+
+    app.handle_key_event(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE))
+        .expect("handle_key_event");
+
+    assert_eq!(app.ws().layout.pane_count(), panes_before);
+}
+
+#[test]
+fn ctrl_f_never_focuses_a_tree_the_terminal_is_too_narrow_to_show() {
+    // On a terminal that cannot fit the tree, Ctrl+F has nothing to
+    // show, so it leaves the flag alone and — the part that matters —
+    // does not hand focus to a panel with no cells on screen. Widening
+    // the window restores the ordinary behaviour.
+    let mut app = app_with_sidebar(40, 60);
+    app.ws_mut().file_tree_visible = true;
+    assert!(
+        !app.file_tree_painted(),
+        "60 cols cannot fit sidebar + tree"
+    );
+
+    app.toggle_file_tree();
+    assert_ne!(
+        app.ws().focus_target,
+        FocusTarget::FileTree,
+        "focus must not land on an unpainted panel"
+    );
+    assert!(app.ws().file_tree_visible, "the flag is left set");
+
+    // Same key, room to draw: normal three-way behaviour returns.
+    app.last_term_size = (160, 40);
+    assert!(app.file_tree_painted());
+    app.toggle_file_tree();
+    assert_eq!(app.ws().focus_target, FocusTarget::FileTree);
+    app.toggle_file_tree();
+    assert!(!app.ws().file_tree_visible);
+}
+
+#[test]
 fn keys_do_not_route_to_a_file_tree_that_replace_mode_is_hiding() {
     // Belt and braces for the above: even if focus lands on the tree
     // some other way, the dispatch must not hand it the keyboard.

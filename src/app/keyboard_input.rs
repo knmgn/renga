@@ -342,19 +342,21 @@ impl App {
         // the pane handlers below. Also gated on `org_sidebar_active`
         // so focus stranded on a panel that has since been toggled off
         // does not swallow input.
-        if self.ws().focus_target == FocusTarget::OrgSidebar && self.org_sidebar_active() {
+        if self.ws().focus_target == FocusTarget::OrgSidebar && self.org_sidebar_painted() {
             return self.handle_org_sidebar_key(key);
         }
 
         // Preview mode
-        if self.ws().focus_target == FocusTarget::Preview {
+        if self.ws().focus_target == FocusTarget::Preview && self.preview_painted() {
             return self.handle_preview_key(key);
         }
 
         // File tree mode. Gated on `file_tree_painted` for the same
-        // reason as the sidebar above — in `replace` mode the tree can
-        // hold focus while not being drawn, and routing keys there
-        // swallows them (and turns a bare `c` / `v` into a pane split).
+        // reason as the sidebar above: a panel can hold focus while
+        // being nowhere on screen — `replace` mode takes the tree's
+        // slot, and the degrade ladder drops it on a narrow terminal —
+        // and routing keys there swallows them (turning a bare `c` /
+        // `v` into a pane split).
         if self.ws().focus_target == FocusTarget::FileTree && self.file_tree_painted() {
             if key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char('f') {
                 self.toggle_file_tree();
