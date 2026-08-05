@@ -591,7 +591,7 @@ these as `[<code>] <human message>` in JSON-RPC error message strings.
 | `last_pane` | `close` | Refused to remove the only pane of the only tab. |
 | `cwd_invalid` | `split`, `new_tab`, `spawn_tab` | `cwd` missing or not a directory. Pre-mutation rejection — no half-mutated layout. |
 | `name_in_use` | `split`, `new_tab`, `set_pane_identity` | Another pane in the same tab holds the requested name. |
-| `name_invalid` | `split`, `new_tab`, `set_pane_identity` | Name empty / all-digits / non-`[A-Za-z0-9_-]`. |
+| `name_invalid` | `split`, `new_tab`, `set_pane_identity`, `spawn_tab` | Name empty / all-digits / non-`[A-Za-z0-9_-]`. `spawn_tab` rejects **before** creating the tab (#290). |
 | `summary_too_long` | `set_summary` | Summary input exceeds 256 Unicode scalar values. Pre-mutation rejection. |
 | `tab_not_found` | `split` with `tab` | Selector's display name matched no tab, or the 0-based index is out of range. Pre-mutation rejection. |
 | `tab_ambiguous` | `split` with `tab` | `{name}` matched several tabs. Labels are not unique; the server never first-matches — re-address via `{index}` or `{pane_id}`. |

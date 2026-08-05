@@ -287,28 +287,7 @@ impl App {
         })?;
 
         if let Some(Some(new_name)) = &name {
-            let trimmed = new_name.trim();
-            if trimmed.is_empty() {
-                return Err(ipc::CodedError::new(
-                    ipc::err_code::NAME_INVALID,
-                    "name must not be empty — pass null to clear",
-                ));
-            }
-            if trimmed.chars().all(|c| c.is_ascii_digit()) {
-                return Err(ipc::CodedError::new(
-                    ipc::err_code::NAME_INVALID,
-                    format!("name {trimmed:?} is all-digits; would collide with numeric pane ids"),
-                ));
-            }
-            if !trimmed
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-            {
-                return Err(ipc::CodedError::new(
-                    ipc::err_code::NAME_INVALID,
-                    format!("name {trimmed:?} has invalid characters; allowed: [A-Za-z0-9_-]"),
-                ));
-            }
+            let trimmed = validate_pane_name(new_name)?;
             let ws = &self.workspaces[ws_idx];
             if let Some(&holder) = ws.pane_names.get(trimmed) {
                 if holder != pane_id {
@@ -664,6 +643,16 @@ impl App {
         from_pane: Option<usize>,
     ) -> std::result::Result<(usize, usize), ipc::CodedError> {
         let caller_ws = self.resolve_caller_workspace(from_pane)?;
+        // Validate the pane name *before* creating anything: an
+        // invalid name must not leave behind a successfully created
+        // tab whose pane can never be addressed by the name the caller
+        // thinks it registered. Empty means "no name", matching
+        // `handle_split` / `handle_new_tab`.
+        let name = match name.as_deref() {
+            None => None,
+            Some(raw) if raw.trim().is_empty() => None,
+            Some(raw) => Some(validate_pane_name(raw)?.to_string()),
+        };
         let base = from_pane
             .and_then(|id| self.workspaces[caller_ws].panes.get(&id))
             .map(|p| p.cwd.clone())
@@ -826,4 +815,37 @@ impl App {
         self.emit_pane_started_in(ws_idx, new_pane_id);
         Ok(new_pane_id)
     }
+}
+
+/// Validate a stable pane name and return its trimmed form: non-empty,
+/// not all-digits (digit strings parse as numeric pane ids, so an
+/// all-digit name could never be addressed), charset `[A-Za-z0-9_-]`.
+/// Shared by `set_pane_identity` and `spawn_tab` so the two paths that
+/// register names cannot drift apart. (`split` / `new_tab` predate the
+/// validation and keep accepting names verbatim — tightening them is a
+/// compat question out of #290's scope.)
+fn validate_pane_name(name: &str) -> std::result::Result<&str, ipc::CodedError> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err(ipc::CodedError::new(
+            ipc::err_code::NAME_INVALID,
+            "name must not be empty — pass null to clear",
+        ));
+    }
+    if trimmed.chars().all(|c| c.is_ascii_digit()) {
+        return Err(ipc::CodedError::new(
+            ipc::err_code::NAME_INVALID,
+            format!("name {trimmed:?} is all-digits; would collide with numeric pane ids"),
+        ));
+    }
+    if !trimmed
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return Err(ipc::CodedError::new(
+            ipc::err_code::NAME_INVALID,
+            format!("name {trimmed:?} has invalid characters; allowed: [A-Za-z0-9_-]"),
+        ));
+    }
+    Ok(trimmed)
 }

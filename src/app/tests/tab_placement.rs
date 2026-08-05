@@ -360,6 +360,23 @@ fn spawn_tab_inherits_the_callers_cwd_when_omitted() {
     app.shutdown();
 }
 
+/// Registering a name the addressing rules can never resolve (an
+/// all-digit string parses as a numeric id) must fail up front — not
+/// leave a successfully created tab behind with a dead alias.
+#[test]
+fn spawn_tab_with_invalid_name_refuses_before_mutation() {
+    let (mut app, caller, _active) = two_tabs();
+    let tabs_before = app.workspaces.len();
+    for bad in ["123", "bad name", "wörker"] {
+        let err = app
+            .handle_spawn_tab(None, Some(bad.into()), None, None, None, Some(caller))
+            .expect_err("invalid pane name");
+        assert_eq!(err.code, Some(ipc::err_code::NAME_INVALID), "name={bad:?}");
+    }
+    assert_eq!(app.workspaces.len(), tabs_before, "no tab was created");
+    app.shutdown();
+}
+
 #[test]
 fn spawn_tab_with_invalid_cwd_refuses_before_mutation() {
     let (mut app, caller, _active) = two_tabs();
