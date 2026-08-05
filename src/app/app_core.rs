@@ -263,11 +263,24 @@ impl App {
         self.min_pane_height = height.max(1);
     }
 
-    /// Emit a [`PaneStarted`] event for the given pane id. Pulls the
-    /// current name/role from the active workspace so subscribers
-    /// receive the metadata that was just attached.
+    /// Emit a [`PaneStarted`] event for a pane in the active workspace.
     pub(crate) fn emit_pane_started(&self, pane_id: usize) {
-        let ws = self.ws();
+        self.emit_pane_started_in(self.active_tab, pane_id);
+    }
+
+    /// Emit a [`PaneStarted`] event for a pane in workspace `ws_index`,
+    /// pulling the name/role that was just attached to it.
+    ///
+    /// The workspace has to be named explicitly: pane ids are unique
+    /// App-wide, so looking one up in the *active* workspace after a
+    /// cross-tab spawn silently finds nothing and emits `name: null,
+    /// role: null` instead of erroring. `poll_events` is process-wide,
+    /// so an orchestrator waiting on the worker it just named by
+    /// `spawn_claude_pane(name = ...)` would never match the event.
+    pub(crate) fn emit_pane_started_in(&self, ws_index: usize, pane_id: usize) {
+        let Some(ws) = self.workspaces.get(ws_index) else {
+            return;
+        };
         let name = ws
             .pane_names
             .iter()
@@ -344,6 +357,12 @@ fn copy_to_windows_clipboard(text: &str) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Terminal dimensions below which the layout pass is skipped
+/// entirely — there is not enough room to place a pane area, a tab bar
+/// and borders.
+const MIN_LAYOUT_COLS: u16 = 20;
+const MIN_LAYOUT_ROWS: u16 = 5;
+
 impl App {
     /// Recompute pane rectangles and apply sizes to every PTY in the
     /// active workspace. Returns `true` if any pane was actually
@@ -351,19 +370,52 @@ impl App {
     /// cooldown). Safe to call without a Frame — uses the cached
     /// `last_term_size`.
     pub fn relayout_panes(&mut self) -> bool {
-        let (cols, rows) = self.last_term_size;
-        if cols < 20 || rows < 5 {
+        self.relayout_workspace(self.active_tab)
+    }
+
+    /// Recompute a workspace's cached rectangles **without touching its
+    /// PTYs**.
+    ///
+    /// This is the half of the layout pass that is safe to run on a
+    /// hidden tab. The other half — [`Self::relayout_workspace`] — calls
+    /// [`Pane::resize`], which clears the vt100 buffer and leaves the
+    /// child to repaint on SIGWINCH. A TUI child does repaint; a plain
+    /// shell does not, so resizing a hidden pane destroys scrollback
+    /// nobody asked to lose and that nothing regenerates. Anything that
+    /// merely wants to *report* a hidden tab's geometry (`list_panes`)
+    /// or *judge* it (the split min-size guard) wants this, not that.
+    pub(crate) fn recompute_workspace_rects(&mut self, ws_index: usize) {
+        if self.workspaces.get(ws_index).is_none() || self.terminal_too_small_for_layout() {
+            return;
+        }
+        let rects = self.workspaces[ws_index]
+            .layout
+            .calculate_rects(self.main_area_layout_for(ws_index).panes);
+        self.workspaces[ws_index].last_pane_rects = rects;
+    }
+
+    /// [`Self::relayout_panes`] for an arbitrary workspace: recompute the
+    /// rectangles *and* push the new sizes into the PTYs.
+    ///
+    /// Reserve this for a workspace whose layout actually changed (a
+    /// split, a pane close) or that is on screen. Resizing clears each
+    /// pane's screen, so calling it speculatively on a hidden tab is a
+    /// destructive read — see [`Self::recompute_workspace_rects`].
+    pub fn relayout_workspace(&mut self, ws_index: usize) -> bool {
+        if self.workspaces.get(ws_index).is_none() {
+            return false;
+        }
+        if self.terminal_too_small_for_layout() {
             return false;
         }
 
-        let rects = self
-            .ws()
+        let rects = self.workspaces[ws_index]
             .layout
-            .calculate_rects(self.main_area_layout().panes);
+            .calculate_rects(self.main_area_layout_for(ws_index).panes);
 
         let mut any_changed = false;
         for (pane_id, rect) in &rects {
-            if let Some(pane) = self.ws_mut().panes.get_mut(pane_id) {
+            if let Some(pane) = self.workspaces[ws_index].panes.get_mut(pane_id) {
                 let inner_rows = rect.height.saturating_sub(2);
                 let inner_cols = rect.width.saturating_sub(2);
                 if pane.resize(inner_rows, inner_cols).unwrap_or(false) {
@@ -372,7 +424,7 @@ impl App {
             }
         }
 
-        self.ws_mut().last_pane_rects = rects;
+        self.workspaces[ws_index].last_pane_rects = rects;
         any_changed
     }
 
@@ -391,6 +443,17 @@ impl App {
     /// main area, macOS tip, status bar); only the horizontal split is
     /// shared, via `layout_geometry::compute`.
     pub(crate) fn main_area_layout(&self) -> layout_geometry::MainAreaLayout {
+        self.main_area_layout_for(self.active_tab)
+    }
+
+    /// [`Self::main_area_layout`] for an arbitrary workspace.
+    ///
+    /// Two of the horizontal inputs — whether the file tree is open and
+    /// whether the preview is active — are per-workspace, so a hidden
+    /// tab's pane area is genuinely not the visible tab's. The PTY
+    /// resize path needs this to size a background tab's panes the way
+    /// rendering *that* tab would (Issue #288).
+    pub(crate) fn main_area_layout_for(&self, ws_index: usize) -> layout_geometry::MainAreaLayout {
         let (cols, rows) = self.last_term_size;
         let tab_h = 1u16;
         let status_h: u16 = if self.status_bar_visible || self.rename_input.is_some() {
@@ -408,7 +471,9 @@ impl App {
         // they are two rows taller than what gets painted.
         let macos_tip_h: u16 = if self.macos_tip_visible { 2 } else { 0 };
         let main_h = rows.saturating_sub(tab_h + status_h + macos_tip_h);
-        layout_geometry::compute(self.main_area_input(Rect::new(0, tab_h, cols, main_h)))
+        layout_geometry::compute(
+            self.main_area_input_for(ws_index, Rect::new(0, tab_h, cols, main_h)),
+        )
     }
 
     /// Collect the horizontal-layout inputs for `area`.
@@ -419,14 +484,26 @@ impl App {
     ///
     /// [`layout_geometry::compute`]: crate::app::layout_geometry::compute
     pub(crate) fn main_area_input(&self, area: Rect) -> layout_geometry::MainAreaInput {
+        self.main_area_input_for(self.active_tab, area)
+    }
+
+    /// [`Self::main_area_input`] for an arbitrary workspace. Falls back
+    /// to the active tab's panel state if `ws_index` is out of range, so
+    /// callers get the pre-#288 answer rather than a panic.
+    pub(crate) fn main_area_input_for(
+        &self,
+        ws_index: usize,
+        area: Rect,
+    ) -> layout_geometry::MainAreaInput {
+        let ws = self.workspaces.get(ws_index).unwrap_or_else(|| self.ws());
         layout_geometry::MainAreaInput {
             area,
             org_sidebar_mode: self.org_sidebar_mode,
             org_sidebar_visible: self.org_sidebar_visible,
             org_sidebar_width: self.org_sidebar_width,
-            file_tree_visible: self.ws().file_tree_visible,
+            file_tree_visible: ws.file_tree_visible,
             file_tree_width: self.file_tree_width,
-            preview_active: self.ws().preview.is_active(),
+            preview_active: ws.preview.is_active(),
             preview_width: self.preview_width,
             layout_swapped: self.layout_swapped,
         }
@@ -540,10 +617,37 @@ impl App {
         self.dirty = true;
     }
 
+    /// Whether the terminal is too small for the layout pass to run at
+    /// all. Below this, [`Self::relayout_workspace`] bails and every
+    /// workspace keeps whatever `last_pane_rects` it last had — so
+    /// anything that would *act* on those rects has to treat them as
+    /// unknown rather than current.
+    pub(crate) fn terminal_too_small_for_layout(&self) -> bool {
+        let (cols, rows) = self.last_term_size;
+        cols < MIN_LAYOUT_COLS || rows < MIN_LAYOUT_ROWS
+    }
+
     /// Called from main.rs on crossterm Resize events so we can update
     /// the cached terminal size and propagate the resize into panes.
+    ///
+    /// Hidden workspaces get their *rectangles* recomputed but their
+    /// PTYs left alone. Pushing the resize into a hidden pane would
+    /// clear its screen, and a plain shell — unlike a TUI — never
+    /// repaints after SIGWINCH, so the output the user had scrolled to
+    /// (and that a caller-scoped `inspect_pane` could still read) would
+    /// simply be gone. The real resize happens when that tab is next
+    /// rendered, which is when someone is actually looking at it.
     pub fn on_terminal_resize(&mut self, cols: u16, rows: u16) {
         self.last_term_size = (cols, rows);
+        for i in 0..self.workspaces.len() {
+            if i != self.active_tab {
+                self.recompute_workspace_rects(i);
+            }
+        }
+        // The active workspace goes through `mark_layout_change` so the
+        // repaint cooldown and selection invalidation stay tied to the
+        // tab actually being painted — and it is on screen, so resizing
+        // its PTYs is exactly right.
         self.mark_layout_change();
     }
 

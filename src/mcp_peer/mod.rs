@@ -389,9 +389,16 @@ Peer messaging tools:\n\
 - send_message: Send a message to another instance by peer ID or name.\n\
 - set_summary: Set a 1-2 sentence summary of what you're working on; surfaced on list_panes / list_peers for other peers.\n\
 - check_messages: Drain any queued peer messages still waiting for this client.\n\n\
-Pane control tools (most are scoped to the current renga tab; the exceptions are close_pane \
-and set_pane_identity, which resolve their targets across all tabs, and new_tab, which \
-creates a whole new tab):\n\
+Pane control tools. For list_panes, spawn_pane, spawn_claude_pane, spawn_codex_pane, \
+focus_pane, inspect_pane and send_keys, \"current tab\" means the tab YOUR pane lives in, \
+not whichever tab the user happens to be looking at — so these stay correct while the user \
+switches tabs. For those seven, relative targets (`focused`, a stable name) never leave your \
+tab; a numeric pane id from another tab does reach across, which is the deliberate escape \
+hatch for orchestrating sibling tabs. TWO TOOLS DO NOT FOLLOW THIS RULE: close_pane and \
+set_pane_identity resolve `focused` and names against the tab the USER is currently viewing, \
+so calling close_pane(target=\"focused\") from a background tab can terminate a pane the \
+user is typing in — always pass an explicit numeric id to those two. new_tab creates a whole \
+new tab:\n\
 - list_panes: Inspect all panes in the current tab, including geometry and the focus flag.\n\
 - spawn_pane: Split an existing pane to create a new one. Optionally runs a startup command, \
 assigns a stable name, attaches a role label, or sets an explicit working directory via \
@@ -408,7 +415,11 @@ shell-quoted Codex commands.\n\
 - close_pane: Close a pane by id or name. The target is resolved across all tabs (names \
 prefer the current tab before searching the others). Refuses when it's the last pane of \
 the last tab.\n\
-- focus_pane: Move keyboard focus to another pane in the same tab.\n\
+- focus_pane: Move keyboard focus to another pane. Whenever the resolved pane is not in the \
+tab the user is currently viewing, this ALSO switches the visible tab to it — the user's \
+screen changes under them. That is by design (focus the keyboard cannot reach is not focus), \
+but it makes focus_pane the most disruptive tool here. Only call it when the user asked to \
+move focus.\n\
 - new_tab: Open a brand-new tab with a fresh pane and switch focus to it. The only tool \
 that creates something outside the current tab. Accepts the same `cwd` option \
 as spawn_pane for setting the new pane's working directory.\n\
@@ -490,7 +501,7 @@ fn tools_spec() -> Value {
         },
         {
             "name": "list_panes",
-            "description": "List every pane in the current renga tab, with stable id, optional name / role, focused flag, terminal geometry, cwd, and when known the peer client kind / receive mode. Complements list_peers (which only returns other panes and hides geometry).",
+            "description": "List every pane in the renga tab THIS pane lives in — not whichever tab the user is currently looking at — with stable id, optional name / role, focused flag, terminal geometry, cwd, and when known the peer client kind / receive mode. Complements list_peers (which only returns other panes and hides geometry).",
             "inputSchema": { "type": "object", "properties": {} }
         },
         {
@@ -624,13 +635,13 @@ fn tools_spec() -> Value {
         },
         {
             "name": "focus_pane",
-            "description": "Move keyboard focus to another pane in the current renga tab. The focused pane is what the user's keystrokes go to, so use sparingly — yanking focus away from the user is disruptive.",
+            "description": "Move keyboard focus to a pane. The focused pane is what the user's keystrokes go to, so use sparingly — yanking focus away from the user is disruptive. Relative targets ('focused', a name) resolve inside your own tab; a numeric id may name a pane in any tab. IMPORTANT: whenever the resolved pane lives outside the tab the user is currently viewing, this also switches the visible tab to it, changing what is on the user's screen. This applies even when the target is in your own tab and the user is looking elsewhere. Only call it when the user asked to move focus.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "target": {
                         "type": "string",
-                        "description": "Pane to focus. Numeric id (from list_panes), stable name, or the literal 'focused' (a no-op, kept for symmetry with the other pane tools). All-digit strings are always interpreted as ids — a pane literally named '7' cannot be addressed by name, use its id instead."
+                        "description": "Pane to focus. Numeric id (from list_panes), stable name, or the literal 'focused' (your own tab's focused pane — note this is no longer a pure no-op: if your tab is not the visible one, it brings your tab forward). Names and 'focused' resolve inside your own tab only; a numeric id may name a pane in any tab. All-digit strings are always interpreted as ids — a pane literally named '7' cannot be addressed by name, use its id instead."
                     }
                 },
                 "required": ["target"]
@@ -1105,11 +1116,17 @@ fn require_connected<'a>(
 }
 
 fn handle_list_panes(id: &Value, ctx: &PeerCtx) -> Value {
-    let (_caller_pane, endpoint) = match require_connected(ctx, id, "list panes") {
+    let (caller_pane, endpoint) = match require_connected(ctx, id, "list panes") {
         Ok(t) => t,
         Err(resp) => return resp,
     };
-    match client::send_request(endpoint, &Request::List) {
+    match client::send_request_requiring(
+        endpoint,
+        &Request::List {
+            from_pane: Some(caller_pane),
+        },
+        crate::ipc::CAP_CALLER_SCOPE,
+    ) {
         Ok(Response::Ok { data }) => match serde_json::from_value::<Vec<PaneInfo>>(data) {
             Ok(panes) => ok_response(id, tool_text_result(&format_pane_list(&panes))),
             Err(e) => err_response(id, -32603, &format!("decode pane list: {e}")),
@@ -1184,7 +1201,13 @@ fn resolve_mcp_cwd(
     // reached renga yet, the resolution uses the stale value. Callers
     // that need strict ordering should send an absolute path instead
     // of trusting "current" cwd.
-    let panes: Vec<PaneInfo> = match client::send_request(endpoint, &Request::List) {
+    let panes: Vec<PaneInfo> = match client::send_request_requiring(
+        endpoint,
+        &Request::List {
+            from_pane: Some(caller_pane),
+        },
+        crate::ipc::CAP_CALLER_SCOPE,
+    ) {
         Ok(Response::Ok { data }) => serde_json::from_value(data)
             .map_err(|e| format!("decode pane list while resolving cwd: {e}"))?,
         Ok(Response::Err { message, code }) => {
@@ -1231,7 +1254,7 @@ fn handle_spawn_pane(id: &Value, args: &Value, ctx: &PeerCtx) -> Value {
         Ok(v) => v,
         Err(msg) => return err_response(id, -32602, &msg),
     };
-    match client::send_request(
+    match client::send_request_requiring(
         endpoint,
         &Request::Split {
             target,
@@ -1240,7 +1263,9 @@ fn handle_spawn_pane(id: &Value, args: &Value, ctx: &PeerCtx) -> Value {
             id: name,
             role,
             cwd,
+            from_pane: Some(caller_pane),
         },
+        crate::ipc::CAP_CALLER_SCOPE,
     ) {
         Ok(Response::Ok { data }) => {
             let new_id = data.get("id").and_then(|v| v.as_u64());
@@ -1603,7 +1628,7 @@ fn handle_spawn_claude_pane(id: &Value, args: &Value, ctx: &PeerCtx) -> Value {
         Ok(v) => v,
         Err(msg) => return err_response(id, -32602, &msg),
     };
-    match client::send_request(
+    match client::send_request_requiring(
         endpoint,
         &Request::Split {
             target,
@@ -1612,7 +1637,9 @@ fn handle_spawn_claude_pane(id: &Value, args: &Value, ctx: &PeerCtx) -> Value {
             id: name,
             role,
             cwd,
+            from_pane: Some(caller_pane),
         },
+        crate::ipc::CAP_CALLER_SCOPE,
     ) {
         Ok(Response::Ok { data }) => {
             let new_id = data.get("id").and_then(|v| v.as_u64());
@@ -1693,7 +1720,7 @@ fn handle_spawn_codex_pane_with(
         Ok(v) => v,
         Err(msg) => return err_response(id, -32602, &msg),
     };
-    match client::send_request(
+    match client::send_request_requiring(
         endpoint,
         &Request::Split {
             target,
@@ -1702,7 +1729,9 @@ fn handle_spawn_codex_pane_with(
             id: name,
             role,
             cwd,
+            from_pane: Some(caller_pane),
         },
+        crate::ipc::CAP_CALLER_SCOPE,
     ) {
         Ok(Response::Ok { data }) => {
             let new_id = data.get("id").and_then(|v| v.as_u64());
@@ -1769,11 +1798,18 @@ fn handle_focus_pane(id: &Value, args: &Value, ctx: &PeerCtx) -> Value {
         );
     }
     let target = parse_target(Some(trimmed));
-    let (_caller_pane, endpoint) = match require_connected(ctx, id, "focus pane") {
+    let (caller_pane, endpoint) = match require_connected(ctx, id, "focus pane") {
         Ok(t) => t,
         Err(resp) => return resp,
     };
-    match client::send_request(endpoint, &Request::Focus { target }) {
+    match client::send_request_requiring(
+        endpoint,
+        &Request::Focus {
+            target,
+            from_pane: Some(caller_pane),
+        },
+        crate::ipc::CAP_CALLER_SCOPE,
+    ) {
         // Focus replies with `ok_unit` per the IPC contract (see
         // `src/ipc/server.rs`), so there's no resolved id to echo.
         // Echoing the trimmed user input is the most informative thing
@@ -2044,18 +2080,20 @@ fn handle_inspect_pane(id: &Value, args: &Value, ctx: &PeerCtx) -> Value {
         Err(msg) => return err_response(id, -32602, &msg),
     };
 
-    let (_caller_pane, endpoint) = match require_connected(ctx, id, "inspect pane") {
+    let (caller_pane, endpoint) = match require_connected(ctx, id, "inspect pane") {
         Ok(t) => t,
         Err(resp) => return resp,
     };
 
-    match client::send_request(
+    match client::send_request_requiring(
         endpoint,
         &Request::Inspect {
             target,
             lines,
             include_cursor,
+            from_pane: Some(caller_pane),
         },
+        crate::ipc::CAP_CALLER_SCOPE,
     ) {
         Ok(Response::Ok { data }) => {
             let text = match format {
@@ -2194,20 +2232,22 @@ fn handle_send_keys(id: &Value, args: &Value, ctx: &PeerCtx) -> Value {
         Err(msg) => return err_response(id, -32602, &msg),
     };
 
-    let (_caller_pane, endpoint) = match require_connected(ctx, id, "send keys") {
+    let (caller_pane, endpoint) = match require_connected(ctx, id, "send keys") {
         Ok(t) => t,
         Err(resp) => return resp,
     };
-    match client::send_request(
+    match client::send_request_requiring(
         endpoint,
         &Request::Send {
             target,
             data: payload,
+            from_pane: Some(caller_pane),
             // We assemble the Enter bit into `payload` above so every
             // call path (text-only / keys-only / combined) takes the
             // same branch server-side. `append_enter` stays false.
             append_enter: false,
         },
+        crate::ipc::CAP_CALLER_SCOPE,
     ) {
         Ok(Response::Ok { .. }) => ok_response(
             id,

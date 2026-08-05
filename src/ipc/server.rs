@@ -241,6 +241,10 @@ fn handle_connection(
             let hello = Response::Hello {
                 server_pid: std::process::id(),
                 session_token: session_token.to_string(),
+                capabilities: super::SERVER_CAPABILITIES
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect(),
             };
             write_response_line(reader.get_mut(), &hello)?;
         }
@@ -368,21 +372,25 @@ fn dispatch_request(req: Request, command_tx: &Sender<AppCommand>) -> Response {
         Request::Hello { .. } => {
             Response::err_coded(err_code::PROTOCOL, "unexpected duplicate hello")
         }
-        Request::List => {
+        Request::List { from_pane } => {
             let (reply_tx, reply_rx) = oneshot::channel();
             if command_tx
-                .send(AppCommand::List { reply: reply_tx })
+                .send(AppCommand::List {
+                    from_pane,
+                    reply: reply_tx,
+                })
                 .is_err()
             {
                 return Response::err_coded(err_code::SHUTTING_DOWN, "app shutting down");
             }
             match reply_rx.recv_timeout(APP_REPLY_TIMEOUT) {
-                Ok(list) => match serde_json::to_value(&list) {
+                Ok(Ok(list)) => match serde_json::to_value(&list) {
                     Ok(v) => Response::ok_value(v),
                     Err(e) => {
                         Response::err_coded(err_code::INTERNAL, format!("serialize pane list: {e}"))
                     }
                 },
+                Ok(Err(err)) => err.into_response(),
                 Err(e) => {
                     Response::err_coded(err_code::APP_TIMEOUT, format!("app did not respond: {e}"))
                 }
@@ -392,14 +400,20 @@ fn dispatch_request(req: Request, command_tx: &Sender<AppCommand>) -> Response {
             target,
             data,
             append_enter,
+            from_pane,
         } => forward_unit(command_tx, |reply| AppCommand::Send {
             target,
             data: data.into_bytes(),
             append_enter,
+            from_pane,
             reply,
         }),
-        Request::Focus { target } => {
-            forward_unit(command_tx, |reply| AppCommand::Focus { target, reply })
+        Request::Focus { target, from_pane } => {
+            forward_unit(command_tx, |reply| AppCommand::Focus {
+                target,
+                from_pane,
+                reply,
+            })
         }
         Request::Close { target } => {
             let (reply_tx, reply_rx) = oneshot::channel();
@@ -429,6 +443,7 @@ fn dispatch_request(req: Request, command_tx: &Sender<AppCommand>) -> Response {
             id,
             role,
             cwd,
+            from_pane,
         } => {
             let (reply_tx, reply_rx) = oneshot::channel();
             if command_tx
@@ -439,6 +454,7 @@ fn dispatch_request(req: Request, command_tx: &Sender<AppCommand>) -> Response {
                     name: id,
                     role,
                     cwd,
+                    from_pane,
                     reply: reply_tx,
                 })
                 .is_err()
@@ -493,6 +509,7 @@ fn dispatch_request(req: Request, command_tx: &Sender<AppCommand>) -> Response {
             target,
             lines,
             include_cursor,
+            from_pane,
         } => {
             let (reply_tx, reply_rx) = oneshot::channel();
             if command_tx
@@ -500,6 +517,7 @@ fn dispatch_request(req: Request, command_tx: &Sender<AppCommand>) -> Response {
                     target,
                     lines,
                     include_cursor,
+                    from_pane,
                     reply: reply_tx,
                 })
                 .is_err()
@@ -642,12 +660,12 @@ mod tests {
         // command off the channel and replies with an empty list.
         let (tx, rx) = mpsc::channel::<AppCommand>();
         let handle = thread::spawn(move || {
-            if let Ok(AppCommand::List { reply }) = rx.recv() {
-                reply.send(Vec::new()).unwrap();
+            if let Ok(AppCommand::List { reply, .. }) = rx.recv() {
+                reply.send(Ok(Vec::new())).unwrap();
             }
         });
 
-        let resp = dispatch_request(Request::List, &tx);
+        let resp = dispatch_request(Request::List { from_pane: None }, &tx);
         handle.join().unwrap();
 
         match resp {
@@ -671,6 +689,7 @@ mod tests {
         let resp = dispatch_request(
             Request::Focus {
                 target: PaneRef::Focused,
+                from_pane: None,
             },
             &tx,
         );
@@ -697,6 +716,7 @@ mod tests {
         let resp = dispatch_request(
             Request::Focus {
                 target: PaneRef::Id(999),
+                from_pane: None,
             },
             &tx,
         );
@@ -724,6 +744,7 @@ mod tests {
         let resp = dispatch_request(
             Request::Focus {
                 target: PaneRef::Id(999),
+                from_pane: None,
             },
             &tx,
         );
@@ -750,6 +771,7 @@ mod tests {
                 id: None,
                 role: None,
                 cwd: None,
+                from_pane: None,
             },
             &tx,
         );
@@ -783,6 +805,7 @@ mod tests {
                 target: PaneRef::Name("engineering".into()),
                 data: "hello".into(),
                 append_enter: true,
+                from_pane: None,
             },
             &tx,
         );
@@ -827,6 +850,7 @@ mod tests {
         let resp = dispatch_request(
             Request::Focus {
                 target: PaneRef::Focused,
+                from_pane: None,
             },
             &tx,
         );
@@ -887,6 +911,7 @@ mod tests {
                 id: None,
                 role: Some("worker".into()),
                 cwd: None,
+                from_pane: None,
             },
             &tx,
         );
@@ -949,6 +974,7 @@ mod tests {
                 target: PaneRef::Name("worker-foo".into()),
                 lines: Some(3),
                 include_cursor: true,
+                from_pane: None,
             },
             &tx,
         );

@@ -384,7 +384,7 @@ impl IpcCommand {
         }
 
         match self {
-            IpcCommand::List => Ok(Request::List),
+            IpcCommand::List => Ok(Request::List { from_pane: None }),
             IpcCommand::NewTab {
                 command,
                 id,
@@ -408,9 +408,14 @@ impl IpcCommand {
                 target: pick_ref(name, id, *focused)?,
                 data: text.clone(),
                 append_enter: *enter,
+                // The CLI is a user typing at a shell, not a pane-bound
+                // agent: "the current tab" is the one on screen, which
+                // is what `from_pane: None` selects.
+                from_pane: None,
             }),
             IpcCommand::Focus { name, id } => Ok(Request::Focus {
                 target: pick_ref(name, id, false)?,
+                from_pane: None,
             }),
             IpcCommand::Close { name, id } => Ok(Request::Close {
                 target: pick_ref(name, id, false)?,
@@ -437,6 +442,7 @@ impl IpcCommand {
                     id: id.clone(),
                     role: role.clone(),
                     cwd: resolve_cli_cwd(cwd.as_deref())?,
+                    from_pane: None,
                 })
             }
             IpcCommand::Rename {
@@ -480,6 +486,7 @@ impl IpcCommand {
                 target: pick_ref(name, id, *focused)?,
                 lines: *lines,
                 include_cursor: *cursor,
+                from_pane: None,
             }),
             IpcCommand::McpPeer => anyhow::bail!(
                 "mcp-peer is a standalone subprocess, not an IPC request; \
@@ -946,6 +953,7 @@ mod tests {
                 target,
                 lines,
                 include_cursor,
+                ..
             } => {
                 assert!(matches!(target, crate::ipc::PaneRef::Id(7)));
                 assert_eq!(lines, Some(2));

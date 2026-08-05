@@ -6,26 +6,37 @@ use super::*;
 #[allow(dead_code)] // constructed by the IPC server (wired in Step 3.3)
 #[derive(Debug)]
 pub enum AppCommand {
-    /// Snapshot the pane list of the active workspace.
+    /// Snapshot the pane list of the caller's workspace — the active
+    /// workspace when `from_pane` is `None` (legacy CLI semantics), the
+    /// workspace owning `from_pane` otherwise. See
+    /// [`ipc::Request`]'s caller-tab scoping notes.
     List {
-        reply: oneshot::Sender<Vec<PaneInfo>>,
+        from_pane: Option<usize>,
+        reply: oneshot::Sender<std::result::Result<Vec<PaneInfo>, ipc::CodedError>>,
     },
-    /// Write `data` to the target pane's PTY.
+    /// Write `data` to the target pane's PTY. `from_pane` scopes target
+    /// resolution; see [`ipc::Request`].
     Send {
         target: PaneRef,
         data: Vec<u8>,
         append_enter: bool,
+        from_pane: Option<usize>,
         reply: oneshot::Sender<std::result::Result<(), ipc::CodedError>>,
     },
-    /// Move keyboard focus to the target pane in the active workspace.
+    /// Move keyboard focus to the target pane. Resolving to a pane in a
+    /// non-visible tab also switches the visible tab — focus that the
+    /// keyboard cannot reach is not focus.
     Focus {
         target: PaneRef,
+        from_pane: Option<usize>,
         reply: oneshot::Sender<std::result::Result<(), ipc::CodedError>>,
     },
     /// Split the target pane. If `command` is given, it's queued on the
     /// new pane and flushed when its shell prompt appears. If `name` is
     /// given, it's registered so later IPC calls can address the pane by
-    /// name. Returns the new pane's id on success.
+    /// name. Returns the new pane's id on success. The split lands in
+    /// the *target's* workspace, which `from_pane` scopes; a split in a
+    /// non-visible tab leaves the visible tab's layout untouched.
     Split {
         target: PaneRef,
         direction: ipc::Direction,
@@ -33,6 +44,7 @@ pub enum AppCommand {
         name: Option<String>,
         role: Option<String>,
         cwd: Option<String>,
+        from_pane: Option<usize>,
         reply: oneshot::Sender<std::result::Result<usize, ipc::CodedError>>,
     },
     /// Open a new tab with a fresh single pane. Focus switches to the
@@ -52,6 +64,7 @@ pub enum AppCommand {
         target: PaneRef,
         lines: Option<usize>,
         include_cursor: bool,
+        from_pane: Option<usize>,
         reply: oneshot::Sender<std::result::Result<serde_json::Value, ipc::CodedError>>,
     },
     /// Close the target pane. Returns the id of the pane that was

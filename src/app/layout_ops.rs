@@ -135,15 +135,51 @@ impl App {
         new_pane_first: bool,
         cwd_override: Option<PathBuf>,
     ) -> Result<Option<usize>> {
-        if self.ws().layout.pane_count() >= Self::MAX_PANES {
+        let ws_index = self.active_tab;
+        let target = self.ws().focused_pane_id;
+        self.split_pane_in_workspace(ws_index, target, direction, new_pane_first, cwd_override)
+    }
+
+    /// Split `target_pane_id` inside workspace `ws_index`, regardless of
+    /// which tab is currently on screen.
+    ///
+    /// Every piece of state this touches — the pane cap, the geometry
+    /// used for the min-size guard and the new PTY's first-frame size,
+    /// the layout tree, the inherited cwd, the post-split focus — is
+    /// per-workspace, so all of it is indexed rather than read through
+    /// `self.ws()`. Splitting a hidden tab must not disturb the visible
+    /// one, which is why the relayout at the end is targeted too:
+    /// `mark_layout_change` (with its repaint cooldown) is only right
+    /// for the tab the user is actually watching.
+    pub(crate) fn split_pane_in_workspace(
+        &mut self,
+        ws_index: usize,
+        target_pane_id: usize,
+        direction: SplitDirection,
+        new_pane_first: bool,
+        cwd_override: Option<PathBuf>,
+    ) -> Result<Option<usize>> {
+        if self.workspaces.get(ws_index).is_none() {
+            return Ok(None);
+        }
+        if self.workspaces[ws_index].layout.pane_count() >= Self::MAX_PANES {
             return Ok(None);
         }
 
-        let focused_rect = self
-            .ws()
+        // Below the layout threshold no workspace has usable rects —
+        // `relayout_workspace` bails, so `last_pane_rects` describes a
+        // terminal that is gone. Refuse rather than judge "is there
+        // room?" against geometry we know is stale; the caller gets
+        // `split_refused`, which is also the honest answer for a
+        // terminal this small.
+        if self.terminal_too_small_for_layout() {
+            return Ok(None);
+        }
+
+        let focused_rect = self.workspaces[ws_index]
             .last_pane_rects
             .iter()
-            .find(|(id, _)| *id == self.ws().focused_pane_id)
+            .find(|(id, _)| *id == target_pane_id)
             .map(|&(_, rect)| rect);
 
         if let Some(rect) = focused_rect {
@@ -165,9 +201,9 @@ impl App {
         self.next_pane_id = self.next_pane_id.wrapping_add(1);
 
         let cwd = cwd_override.or_else(|| {
-            self.ws()
+            self.workspaces[ws_index]
                 .panes
-                .get(&self.ws().focused_pane_id)
+                .get(&target_pane_id)
                 .map(|p| p.cwd.clone())
         });
 
@@ -189,13 +225,36 @@ impl App {
             None => (10, 40),
         };
         let pane = Pane::new_with_cwd(new_id, init_rows, init_cols, self.event_tx.clone(), cwd)?;
-        let ws = self.ws_mut();
+        let ws = &mut self.workspaces[ws_index];
         ws.panes.insert(new_id, pane);
         ws.layout
-            .split_pane_with_position(ws.focused_pane_id, new_id, direction, new_pane_first);
+            .split_pane_with_position(target_pane_id, new_id, direction, new_pane_first);
+        // Focus follows the new pane *within its own tab*. For the
+        // visible tab that is the long-standing behavior; for a hidden
+        // tab it is what the user will find when they switch to it.
         ws.focused_pane_id = new_id;
 
-        self.mark_layout_change();
+        if ws_index == self.active_tab {
+            self.mark_layout_change();
+        } else {
+            // A hidden workspace never passes through `ui::render_panes`,
+            // so nothing else would refresh its `last_pane_rects`. Skip
+            // this and the very next `list_panes` reports the new pane at
+            // 0x0 with zero width/height — geometry the caller would take
+            // at face value. Recompute for that workspace alone: no
+            // repaint cooldown, no effect on the tab on screen.
+            self.relayout_workspace(ws_index);
+            // Only the mutated workspace's geometry moved, so only a
+            // selection anchored *there* is stale. Clearing
+            // unconditionally (what `mark_layout_change` does, correctly,
+            // for the active tab) would make a background agent's spawn
+            // drop the text the user was in the middle of selecting in
+            // the tab they are looking at.
+            if self.selection_belongs_to_workspace(ws_index) {
+                self.selection = None;
+            }
+            self.dirty = true;
+        }
         // A split during a single-pane tab-close prompt would widen the
         // blast radius past what the user agreed to.
         self.revalidate_close_confirm();
@@ -385,6 +444,24 @@ impl App {
         self.close_tab(ws_index);
     }
 
+    /// Whether the live text selection is anchored to something in
+    /// workspace `ws_index`.
+    ///
+    /// A pane selection names its pane, so it can be attributed exactly.
+    /// A preview selection belongs to whichever workspace's preview
+    /// panel is open — the sidebar is per-workspace state, so it is the
+    /// active tab's by construction.
+    pub(crate) fn selection_belongs_to_workspace(&self, ws_index: usize) -> bool {
+        match self.selection.as_ref().map(|s| &s.target) {
+            None => false,
+            Some(SelectionTarget::Pane(pane_id)) => self
+                .workspaces
+                .get(ws_index)
+                .is_some_and(|ws| ws.panes.contains_key(pane_id)),
+            Some(SelectionTarget::Preview) => ws_index == self.active_tab,
+        }
+    }
+
     pub(crate) fn workspace_index_of_pane(&self, pane_id: usize) -> Option<usize> {
         self.workspaces
             .iter()
@@ -492,6 +569,10 @@ impl App {
         if ws_index == self.active_tab {
             self.mark_layout_change();
         } else {
+            // Same rule as a split into a hidden tab: the workspace whose
+            // layout changed refreshes its own rects, because nothing
+            // else will until it is next rendered.
+            self.relayout_workspace(ws_index);
             self.dirty = true;
         }
         // An MCP close that removed the confirmation's target — or that
@@ -529,6 +610,98 @@ impl App {
 
         self.remove_pane_from_layout(ws_index, pane_id)?;
         Ok(pane_id)
+    }
+
+    /// Which workspace an IPC request should be resolved against.
+    ///
+    /// `None` — no `from_pane` on the wire — is the legacy contract the
+    /// `renga` CLI still relies on: "the tab the user is looking at".
+    /// `Some(id)` is the caller's own pane, so the answer is the tab
+    /// that *owns* that pane, which may well not be the visible one
+    /// (Issue #288: a background agent's `send_keys` must not land in
+    /// whatever tab the human happens to have switched to).
+    ///
+    /// A `from_pane` that no longer exists is an error, never a
+    /// fallback: the caller's pane vanishing mid-call is precisely when
+    /// guessing a workspace does the most damage.
+    pub(crate) fn resolve_caller_workspace(
+        &self,
+        from_pane: Option<usize>,
+    ) -> std::result::Result<usize, ipc::CodedError> {
+        match from_pane {
+            None => Ok(self.active_tab),
+            Some(id) => self.workspace_index_of_pane(id).ok_or_else(|| {
+                ipc::CodedError::new(
+                    ipc::err_code::PANE_NOT_FOUND,
+                    format!("caller pane {id} not found in any workspace"),
+                )
+            }),
+        }
+    }
+
+    /// Resolve `target` for a caller sitting in workspace `ws_idx`.
+    ///
+    /// - `Focused` / `Name` stay inside `ws_idx`. Both are *relative*
+    ///   addresses — "the focused pane", "the pane called worker" — and
+    ///   a relative address that silently crosses into another tab is
+    ///   the #288 bug in miniature. `Name` in particular is only unique
+    ///   per tab, so a global search would be ambiguous by design.
+    /// - `Id` searches every workspace. Numeric ids are globally unique
+    ///   and unambiguous, so naming one is an explicit cross-tab
+    ///   request — the same escape hatch [`Self::handle_close`] has
+    ///   offered since it moved to `resolve_pane_across_workspaces`.
+    pub(crate) fn resolve_target_from(
+        &self,
+        ws_idx: usize,
+        target: &PaneRef,
+    ) -> Option<(usize, usize)> {
+        match target {
+            PaneRef::Id(id) => self
+                .workspaces
+                .iter()
+                .enumerate()
+                .find(|(_, ws)| ws.panes.contains_key(id))
+                .map(|(i, _)| (i, *id)),
+            PaneRef::Focused | PaneRef::Name(_) => {
+                let ws = self.workspaces.get(ws_idx)?;
+                ws.resolve_pane_ref(target).map(|id| (ws_idx, id))
+            }
+        }
+    }
+
+    /// The one entry point every pane-targeting IPC handler uses, so
+    /// the caller-scope rules cannot drift apart between `send_keys`,
+    /// `inspect_pane`, `focus_pane` and the three `spawn_*` tools.
+    ///
+    /// Note the ordering: the caller is resolved *first* and its
+    /// failure is fatal, even for an explicit `Id` target that would
+    /// have resolved on its own. A request whose `from_pane` is bogus
+    /// is a request we cannot attribute, and attributing it to the
+    /// visible tab is the failure mode being fixed here.
+    pub(crate) fn resolve_request_target(
+        &self,
+        from_pane: Option<usize>,
+        target: &PaneRef,
+    ) -> std::result::Result<(usize, usize), ipc::CodedError> {
+        let ws_idx = self.resolve_caller_workspace(from_pane)?;
+        let not_found = || {
+            ipc::CodedError::new(
+                ipc::err_code::PANE_NOT_FOUND,
+                format!("pane not found: {target:?}"),
+            )
+        };
+        match from_pane {
+            // Legacy: everything — including `Id` — resolves inside the
+            // active tab, exactly as before #288. Widening `Id` here
+            // would be a silent semantic change for `renga send --id`.
+            None => self.workspaces[ws_idx]
+                .resolve_pane_ref(target)
+                .map(|id| (ws_idx, id))
+                .ok_or_else(not_found),
+            Some(_) => self
+                .resolve_target_from(ws_idx, target)
+                .ok_or_else(not_found),
+        }
     }
 
     pub(crate) fn resolve_pane_across_workspaces(

@@ -61,7 +61,45 @@ pub use events::EventBus;
 /// values beyond what is available.
 pub const INSPECT_MAX_LINES: usize = 2000;
 
+/// Capability token advertised in [`Response::Hello::capabilities`] by
+/// servers that understand the `from_pane` field on [`Request::List`] /
+/// `Send` / `Split` / `Focus` / `Inspect` (Issue #288).
+///
+/// A server that omits this token resolves those requests against the
+/// **active** tab — whichever tab the human is looking at — regardless
+/// of any `from_pane` the client sent. Clients that depend on
+/// caller-tab scoping (the bundled `renga mcp-peer`) must therefore
+/// **fail closed** when the token is absent rather than silently
+/// operating on the wrong tab: a renga binary can be upgraded on disk
+/// while the old server process keeps running, so a new mcp-peer
+/// subprocess talking to an old server is a live scenario, not a
+/// theoretical one.
+pub const CAP_CALLER_SCOPE: &str = "caller_scope";
+
+/// Every capability token this build's server advertises. Additive by
+/// construction — clients match on tokens they know and ignore the
+/// rest.
+pub const SERVER_CAPABILITIES: &[&str] = &[CAP_CALLER_SCOPE];
+
 /// One IPC call from a client to the running renga instance.
+///
+/// # Caller-tab scoping (`from_pane`)
+///
+/// The pane-targeting requests carry an optional `from_pane`: the id of
+/// the pane the *caller itself* runs in (published to every PTY as
+/// `RENGA_PANE_ID`). It is a **new optional input with a
+/// prior-behavior-preserving default**, not a required field — see
+/// `docs/semver-policy.md` §3.
+///
+/// - `from_pane: None` — legacy semantics: everything resolves inside
+///   the **active** workspace. This is what `renga send` / `renga
+///   split` and any pre-#288 client send, and what they keep getting.
+/// - `from_pane: Some(id)` — resolution is scoped to the workspace that
+///   *owns* `id`. `PaneRef::Focused` and `PaneRef::Name` never leave
+///   that tab; `PaneRef::Id` may address a pane in another tab (the
+///   cross-tab escape hatch [`Request::Close`] already established).
+///   An unknown / vanished `from_pane` fails with `pane_not_found`
+///   before the target is even looked at.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "cmd", rename_all = "snake_case")]
 pub enum Request {
@@ -69,8 +107,18 @@ pub enum Request {
     /// token so a stale socket file with a re-used PID cannot be
     /// silently mistaken for a live instance.
     Hello { client_pid: u32 },
-    /// List all panes in the active workspace.
-    List,
+    /// List all panes in the caller's workspace (the active workspace
+    /// when `from_pane` is omitted).
+    ///
+    /// Wire note: this was a unit variant before #288. With
+    /// `skip_serializing_if` on the added field, `List { from_pane:
+    /// None }` still serializes to exactly `{"cmd":"list"}` and the
+    /// bare `{"cmd":"list"}` still deserializes — see
+    /// `list_request_raw_json_shape_is_unchanged_without_from_pane`.
+    List {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from_pane: Option<usize>,
+    },
     /// Write `data` to the target pane's PTY. If `append_enter` is true,
     /// a newline is appended so the shell executes the command.
     Send {
@@ -78,6 +126,8 @@ pub enum Request {
         data: String,
         #[serde(default)]
         append_enter: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from_pane: Option<usize>,
     },
     /// Split the target pane and (optionally) run a command in the new
     /// pane. The new pane is named `id` if provided.
@@ -97,11 +147,26 @@ pub enum Request {
         /// cwd (prior behavior). Fails with `cwd_invalid` before any
         /// layout mutation when the resolved path is missing or not a
         /// directory.
+        ///
+        /// Note that the base for a *relative* path is the **target**
+        /// pane, not the caller: `from_pane` scopes which panes the
+        /// `target` may name, it does not re-base cwd. Clients that
+        /// want caller-relative paths (the MCP `spawn_*` tools) resolve
+        /// them to absolute before sending.
         #[serde(default)]
         cwd: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from_pane: Option<usize>,
     },
-    /// Move keyboard focus to the target pane.
-    Focus { target: PaneRef },
+    /// Move keyboard focus to the target pane. When the resolved pane
+    /// lives in a different tab than the one on screen, the server also
+    /// switches the visible tab — "focus" means the keyboard actually
+    /// lands there, which is impossible for a hidden tab.
+    Focus {
+        target: PaneRef,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from_pane: Option<usize>,
+    },
     /// Close the target pane. Terminates its underlying process, drops
     /// it from the layout, and emits a `PaneExited` event. If the pane
     /// is the only leaf in its workspace and other workspaces exist,
@@ -161,6 +226,8 @@ pub enum Request {
         lines: Option<usize>,
         #[serde(default)]
         include_cursor: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from_pane: Option<usize>,
     },
     /// List peers visible from the caller's pane. Scope is always
     /// "panes in the same workspace as `from_pane`, excluding
@@ -398,6 +465,13 @@ pub enum Response {
     Hello {
         server_pid: u32,
         session_token: String,
+        /// Feature tokens this server understands (see
+        /// [`SERVER_CAPABILITIES`]). Absent / empty on pre-#288
+        /// servers, which is exactly the signal capability-dependent
+        /// clients use to refuse rather than degrade. Additive: unknown
+        /// tokens must be ignored, never rejected.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        capabilities: Vec<String>,
     },
     /// Ack that the connection has entered event-stream mode. The
     /// server follows this with newline-delimited [`Event`] records
@@ -649,9 +723,158 @@ mod tests {
         serde_json::from_str(&s).unwrap()
     }
 
+    // ─── Issue #288 wire compatibility ────────────────────
+    //
+    // `from_pane` is an *optional* addition to five stable requests.
+    // These tests are the proof that `docs/semver-policy.md` §3's
+    // "required-input addition" line was not crossed: byte-identical
+    // output for the old shape in, old input still decoding.
+
+    /// `List` changed from a unit variant to a struct variant. That is
+    /// only safe because a fully-skipped struct variant serializes to
+    /// the same object an internally-tagged unit variant does.
+    #[test]
+    fn list_request_raw_json_shape_is_unchanged_without_from_pane() {
+        let s = serde_json::to_string(&Request::List { from_pane: None }).unwrap();
+        assert_eq!(s, r#"{"cmd":"list"}"#);
+    }
+
+    #[test]
+    fn scoped_list_request_carries_from_pane() {
+        let s = serde_json::to_string(&Request::List { from_pane: Some(7) }).unwrap();
+        assert_eq!(s, r#"{"cmd":"list","from_pane":7}"#);
+    }
+
+    /// Verbatim payloads a pre-#288 client puts on the wire. All must
+    /// decode, and all must land on the legacy `from_pane: None`
+    /// semantics.
+    #[test]
+    fn pre_288_raw_requests_decode_as_legacy_active_tab_scope() {
+        let cases: &[(&str, Request)] = &[
+            (r#"{"cmd":"list"}"#, Request::List { from_pane: None }),
+            (
+                r#"{"cmd":"send","target":"focused","data":"hi","append_enter":true}"#,
+                Request::Send {
+                    target: PaneRef::Focused,
+                    data: "hi".into(),
+                    append_enter: true,
+                    from_pane: None,
+                },
+            ),
+            (
+                r#"{"cmd":"focus","target":{"id":3}}"#,
+                Request::Focus {
+                    target: PaneRef::Id(3),
+                    from_pane: None,
+                },
+            ),
+            (
+                r#"{"cmd":"inspect","target":"focused","lines":10,"include_cursor":false}"#,
+                Request::Inspect {
+                    target: PaneRef::Focused,
+                    lines: Some(10),
+                    include_cursor: false,
+                    from_pane: None,
+                },
+            ),
+            (
+                r#"{"cmd":"split","target":"focused","direction":"vertical"}"#,
+                Request::Split {
+                    target: PaneRef::Focused,
+                    direction: Direction::Vertical,
+                    command: None,
+                    id: None,
+                    role: None,
+                    cwd: None,
+                    from_pane: None,
+                },
+            ),
+        ];
+        for (raw, expected) in cases {
+            let parsed: Request =
+                serde_json::from_str(raw).unwrap_or_else(|e| panic!("decode {raw}: {e}"));
+            assert_eq!(&parsed, expected, "decoding {raw}");
+        }
+    }
+
+    /// Shapes a client can legitimately put on the wire that are
+    /// neither "old" nor "new": an explicit `null`, and a field this
+    /// build does not know. Both must land on the legacy semantics
+    /// rather than erroring — the struct-variant conversion of `List`
+    /// must not have narrowed what the old unit variant accepted.
+    #[test]
+    fn list_tolerates_explicit_null_and_unknown_fields() {
+        for raw in [
+            r#"{"cmd":"list","from_pane":null}"#,
+            r#"{"cmd":"list","some_future_field":1}"#,
+        ] {
+            let parsed: Request =
+                serde_json::from_str(raw).unwrap_or_else(|e| panic!("decode {raw}: {e}"));
+            assert_eq!(parsed, Request::List { from_pane: None }, "decoding {raw}");
+        }
+    }
+
+    #[test]
+    fn scoped_raw_requests_decode_with_from_pane() {
+        let parsed: Request =
+            serde_json::from_str(r#"{"cmd":"send","target":"focused","data":"x","from_pane":4}"#)
+                .unwrap();
+        assert_eq!(
+            parsed,
+            Request::Send {
+                target: PaneRef::Focused,
+                data: "x".into(),
+                append_enter: false,
+                from_pane: Some(4),
+            }
+        );
+    }
+
+    /// A pre-#288 server's hello has no `capabilities` key. It must
+    /// still decode — that empty list is precisely the signal
+    /// capability-gated clients fail closed on.
+    #[test]
+    fn pre_288_hello_response_decodes_with_no_capabilities() {
+        let parsed: Response =
+            serde_json::from_str(r#"{"status":"hello","server_pid":9,"session_token":"t"}"#)
+                .unwrap();
+        match parsed {
+            Response::Hello { capabilities, .. } => assert!(capabilities.is_empty()),
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn hello_response_advertises_caller_scope_and_omits_an_empty_list() {
+        let with = serde_json::to_string(&Response::Hello {
+            server_pid: 1,
+            session_token: "t".into(),
+            capabilities: SERVER_CAPABILITIES.iter().map(|s| s.to_string()).collect(),
+        })
+        .unwrap();
+        assert!(
+            with.contains(CAP_CALLER_SCOPE),
+            "server must advertise caller scope: {with}"
+        );
+
+        let without = serde_json::to_string(&Response::Hello {
+            server_pid: 1,
+            session_token: "t".into(),
+            capabilities: Vec::new(),
+        })
+        .unwrap();
+        assert!(
+            !without.contains("capabilities"),
+            "an empty capability list stays off the wire: {without}"
+        );
+    }
+
     #[test]
     fn list_request_roundtrips() {
-        assert_eq!(roundtrip(&Request::List), Request::List);
+        assert_eq!(
+            roundtrip(&Request::List { from_pane: None }),
+            Request::List { from_pane: None }
+        );
     }
 
     #[test]
@@ -660,6 +883,7 @@ mod tests {
             target: PaneRef::Name("engineering".into()),
             data: "hello".into(),
             append_enter: true,
+            from_pane: None,
         };
         assert_eq!(roundtrip(&r), r);
     }
@@ -673,6 +897,7 @@ mod tests {
             id: Some("engineering".into()),
             role: None,
             cwd: None,
+            from_pane: None,
         };
         assert_eq!(roundtrip(&r), r);
     }
@@ -836,6 +1061,7 @@ mod tests {
             id: None,
             role: None,
             cwd: Some("/tmp/work".into()),
+            from_pane: None,
         };
         assert_eq!(roundtrip(&r), r);
     }
@@ -857,6 +1083,7 @@ mod tests {
         let r = Response::Hello {
             server_pid: 100,
             session_token: "abc".into(),
+            capabilities: Vec::new(),
         };
         let parsed: Response = serde_json::from_str(&serde_json::to_string(&r).unwrap()).unwrap();
         assert_eq!(parsed, r);
@@ -952,6 +1179,7 @@ mod tests {
             id: None,
             role: Some("worker".into()),
             cwd: None,
+            from_pane: None,
         };
         assert_eq!(roundtrip(&r), r);
     }
@@ -1113,6 +1341,7 @@ mod tests {
             target: PaneRef::Focused,
             lines: None,
             include_cursor: false,
+            from_pane: None,
         };
         assert_eq!(roundtrip(&r), r);
     }
@@ -1123,6 +1352,7 @@ mod tests {
             target: PaneRef::Name("worker-foo".into()),
             lines: Some(4),
             include_cursor: true,
+            from_pane: None,
         };
         assert_eq!(roundtrip(&r), r);
     }
@@ -1138,6 +1368,7 @@ mod tests {
                 target: PaneRef::Focused,
                 lines: None,
                 include_cursor: false,
+                from_pane: None,
             } => {}
             other => panic!("expected Inspect defaults, got {other:?}"),
         }
