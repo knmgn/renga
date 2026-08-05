@@ -49,6 +49,30 @@ fn list_rejects_an_unknown_from_pane_instead_of_falling_back() {
     app.shutdown();
 }
 
+/// The geometry fields exist so an agent can act on them. A hidden tab
+/// is not relaid out on a terminal resize, so listing it without
+/// refreshing hands back coordinates from a terminal that is gone.
+#[test]
+fn list_reports_geometry_for_the_current_terminal_not_the_one_at_last_render() {
+    let (mut app, caller, _active) = two_tabs();
+    app.relayout_workspace(0);
+
+    app.on_terminal_resize(60, 20);
+    let infos = app.handle_list(Some(caller)).expect("scoped list");
+    let rect = infos
+        .iter()
+        .find(|p| p.id == caller)
+        .expect("caller in its own list");
+    assert!(
+        rect.width <= 60 && rect.height <= 20,
+        "hidden tab reported {}x{} for a 60x20 terminal",
+        rect.width,
+        rect.height
+    );
+    assert!(rect.width > 0 && rect.height > 0);
+    app.shutdown();
+}
+
 // ─── inspect_pane ─────────────────────────────────────────
 
 #[test]

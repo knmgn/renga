@@ -113,10 +113,20 @@ impl App {
     /// the ids it returned unsafe to feed straight back into
     /// `send_keys`.
     pub(crate) fn handle_list(
-        &self,
+        &mut self,
         from_pane: Option<usize>,
     ) -> std::result::Result<Vec<PaneInfo>, ipc::CodedError> {
         let ws_idx = self.resolve_caller_workspace(from_pane)?;
+        // A hidden workspace's `last_pane_rects` are only refreshed
+        // while it is on screen, so after a terminal resize they still
+        // describe the old terminal — this path would hand the caller
+        // coordinates and sizes that do not fit the current one. The
+        // whole point of the geometry fields is that an agent can act on
+        // them, so refresh before reporting. The active tab is already
+        // accurate; `ui::render_panes` rewrites its rects every frame.
+        if ws_idx != self.active_tab {
+            self.relayout_workspace(ws_idx);
+        }
         Ok(self.pane_infos_for_workspace(ws_idx))
     }
 
