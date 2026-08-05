@@ -444,6 +444,7 @@ fn dispatch_request(req: Request, command_tx: &Sender<AppCommand>) -> Response {
             role,
             cwd,
             from_pane,
+            tab,
         } => {
             let (reply_tx, reply_rx) = oneshot::channel();
             if command_tx
@@ -455,6 +456,7 @@ fn dispatch_request(req: Request, command_tx: &Sender<AppCommand>) -> Response {
                     role,
                     cwd,
                     from_pane,
+                    tab,
                     reply: reply_tx,
                 })
                 .is_err()
@@ -463,6 +465,39 @@ fn dispatch_request(req: Request, command_tx: &Sender<AppCommand>) -> Response {
             }
             match reply_rx.recv_timeout(APP_REPLY_TIMEOUT) {
                 Ok(Ok(new_id)) => Response::ok_value(serde_json::json!({ "id": new_id })),
+                Ok(Err(err)) => err.into_response(),
+                Err(e) => {
+                    Response::err_coded(err_code::APP_TIMEOUT, format!("app did not respond: {e}"))
+                }
+            }
+        }
+        Request::SpawnTab {
+            command,
+            id,
+            label,
+            role,
+            cwd,
+            from_pane,
+        } => {
+            let (reply_tx, reply_rx) = oneshot::channel();
+            if command_tx
+                .send(AppCommand::SpawnTab {
+                    command,
+                    name: id,
+                    label,
+                    role,
+                    cwd,
+                    from_pane,
+                    reply: reply_tx,
+                })
+                .is_err()
+            {
+                return Response::err_coded(err_code::SHUTTING_DOWN, "app shutting down");
+            }
+            match reply_rx.recv_timeout(APP_REPLY_TIMEOUT) {
+                Ok(Ok((new_id, tab_idx))) => {
+                    Response::ok_value(serde_json::json!({ "id": new_id, "tab": tab_idx }))
+                }
                 Ok(Err(err)) => err.into_response(),
                 Err(e) => {
                     Response::err_coded(err_code::APP_TIMEOUT, format!("app did not respond: {e}"))
@@ -772,6 +807,7 @@ mod tests {
                 role: None,
                 cwd: None,
                 from_pane: None,
+                tab: None,
             },
             &tx,
         );
@@ -912,11 +948,82 @@ mod tests {
                 role: Some("worker".into()),
                 cwd: None,
                 from_pane: None,
+                tab: None,
             },
             &tx,
         );
         handle.join().unwrap();
         assert!(matches!(resp, Response::Ok { .. }));
+    }
+
+    #[test]
+    fn dispatch_split_forwards_tab_selector() {
+        let (tx, rx) = mpsc::channel::<AppCommand>();
+        let handle = thread::spawn(move || {
+            if let Ok(AppCommand::Split { tab, reply, .. }) = rx.recv() {
+                assert_eq!(tab, Some(super::super::TabSelector::Name("workers".into())));
+                reply.send(Ok(7)).unwrap();
+            }
+        });
+        let resp = dispatch_request(
+            Request::Split {
+                target: PaneRef::Focused,
+                direction: Direction::Vertical,
+                command: None,
+                id: None,
+                role: None,
+                cwd: None,
+                from_pane: Some(1),
+                tab: Some(super::super::TabSelector::Name("workers".into())),
+            },
+            &tx,
+        );
+        handle.join().unwrap();
+        assert!(matches!(resp, Response::Ok { .. }));
+    }
+
+    #[test]
+    fn dispatch_spawn_tab_returns_pane_id_and_tab_index() {
+        let (tx, rx) = mpsc::channel::<AppCommand>();
+        let handle = thread::spawn(move || {
+            if let Ok(AppCommand::SpawnTab {
+                command,
+                name,
+                label,
+                role,
+                cwd,
+                from_pane,
+                reply,
+            }) = rx.recv()
+            {
+                assert_eq!(command.as_deref(), Some("claude"));
+                assert_eq!(name.as_deref(), Some("worker-a"));
+                assert_eq!(label.as_deref(), Some("workers"));
+                assert_eq!(role.as_deref(), Some("worker"));
+                assert_eq!(cwd.as_deref(), Some("/tmp/work"));
+                assert_eq!(from_pane, Some(2));
+                reply.send(Ok((42, 3))).unwrap();
+            }
+        });
+        let resp = dispatch_request(
+            Request::SpawnTab {
+                command: Some("claude".into()),
+                id: Some("worker-a".into()),
+                label: Some("workers".into()),
+                role: Some("worker".into()),
+                cwd: Some("/tmp/work".into()),
+                from_pane: Some(2),
+            },
+            &tx,
+        );
+        handle.join().unwrap();
+        match resp {
+            Response::Ok { data } => {
+                assert_eq!(data.get("id").and_then(|v| v.as_u64()), Some(42));
+                assert_eq!(data.get("tab").and_then(|v| v.as_u64()), Some(3));
+            }
+            other => panic!("unexpected response: {other:?}"),
+        }
     }
 
     #[test]

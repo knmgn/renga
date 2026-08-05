@@ -83,6 +83,7 @@ fn handle_set_pane_identity_rejects_name_collision() {
             None,
             None,
             None,
+            None,
         )
         .expect("split");
 
@@ -191,6 +192,7 @@ fn handle_split_with_cwd_spawns_pane_in_requested_dir() {
             None,
             Some(canon.to_string_lossy().to_string()),
             None,
+            None,
         )
         .expect("split with cwd succeeds");
 
@@ -226,6 +228,7 @@ fn handle_split_with_invalid_cwd_refuses_before_mutation() {
             Some("should-not-land".into()),
             None,
             Some("/this/path/definitely/does/not/exist/renga-test".into()),
+            None,
             None,
         )
         .expect_err("invalid cwd must be refused");
@@ -293,6 +296,7 @@ fn handle_split_relative_cwd_resolves_against_target_pane_cwd() {
             None,
             None,
             Some("child".into()),
+            None,
             None,
         )
         .expect("relative cwd resolves");
@@ -710,6 +714,7 @@ fn handle_peer_list_surfaces_summary() {
         .handle_split(
             &ipc::PaneRef::Focused,
             ipc::Direction::Vertical,
+            None,
             None,
             None,
             None,

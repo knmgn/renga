@@ -426,6 +426,32 @@ mod tests {
         assert!(require_capability(super::super::CAP_CROSS_TAB_PEERS, &advertised).is_ok());
     }
 
+    /// A #289-era server advertises `caller_scope` and
+    /// `cross_tab_peers` but ignores the unknown `tab` field on a
+    /// split — it would spawn into the caller's tab and report
+    /// success. Tab-directed spawns gate on the distinct `spawn_tab`
+    /// token, so that server must be rejected (Issue #290).
+    #[test]
+    fn require_spawn_tab_fails_closed_against_a_289_server() {
+        let advertised = vec![
+            super::super::CAP_CALLER_SCOPE.to_string(),
+            super::super::CAP_CROSS_TAB_PEERS.to_string(),
+        ];
+        let err = require_capability(super::super::CAP_SPAWN_TAB, &advertised).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("server_too_old"), "got: {msg}");
+        assert!(msg.contains("spawn_tab"), "got: {msg}");
+    }
+
+    #[test]
+    fn require_spawn_tab_accepts_a_290_server() {
+        let advertised: Vec<String> = super::super::SERVER_CAPABILITIES
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert!(require_capability(super::super::CAP_SPAWN_TAB, &advertised).is_ok());
+    }
+
     #[test]
     fn verify_session_token_matches() {
         assert!(verify_session_token("abc-123", Some("abc-123")).is_ok());
@@ -484,6 +510,7 @@ mod tests {
             role: None,
             cwd: None,
             from_pane: None,
+            tab: None,
         };
         let mut out: Vec<u8> = Vec::new();
         write_request_line(&mut out, &req).unwrap();

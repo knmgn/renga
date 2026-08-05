@@ -88,6 +88,8 @@ Claude B の次のターンのコンテキストに `<channel source="renga-peer
 
 > **ペインの `cwd`。** `spawn_pane` / `new_tab` / `renga split --cwd` / `renga new-tab --cwd` / layout TOML `cwd = "..."` で新ペインの作業ディレクトリを指定できます。絶対パスはそのまま、相対パスは呼び出し元ペインの cwd (MCP)、シェルの cwd (CLI)、renga プロセスの cwd (layout TOML) を基準に解決されます。存在しないパスはレイアウト変更前に `cwd_invalid` で失敗するため、half-mutated なレイアウトになりません。`command` に `cd <dir> && ...` を書くと `claude` 自動アップグレードが効かなくなるので、`cwd` フィールドで指定するのが推奨です。
 
+> **タブ配置 (`tab`、Issue #290)。** 3 つの `spawn_*` ツールはオプションの `tab` セレクタを受け付け、新ペインを**どのタブに**作るかを明示できます (上記の数値 id による暗黙の cross-tab とは別の、明示的な機構です)。キーはちょうど 1 つ: `{"name": "workers"}` (表示名の完全一致。0 件は `tab_not_found`、複数件は `tab_ambiguous` — タブ名は一意ではないため renga は推測しません)、`{"index": 2}` (0 始まり。`list_peers` が報告する index と同じ)、`{"pane_id": 17}` (そのペインが属するタブ。id はタブの close や rename でずれない安定アンカー)、`{"new": {}}` / `{"new": {"name": "workers"}}` (単一ペインの**バックグラウンド**新規タブを作成。ユーザーが見ているタブは切り替わらず、新規タブには split 対象が無いため `direction` / `target` の指定は拒否されます)。既存タブのセレクタでは `target` は選択したタブの**内側で**解決され、別タブの数値 target は `target_tab_mismatch` で失敗します。`tab.new` で `cwd` を省略すると呼び出し元ペインの cwd を継承します。`tab` を使うにはサーバが `spawn_tab` capability を広告している必要があり、古い renga プロセスに対しては呼び出し元のタブへ黙って spawn する代わりに `[server_too_old]` で fail closed します。`new_tab` は従来どおり「作成してフォーカス」のままです。またタブ数は MAX_TABS = 16 で上限され、超過は `tab_limit_reached` になります。
+
 ## うまく動かないとき
 
 - **`list_peers` が "renga not reachable from this peer client" を返す** — client が renga の外で起動されたか、renga ペインの環境変数を引き継げていません。renga のペイン内から起動し直してください（Claude は `Alt+P` / `renga split --role claude`、Codex は `renga mcp install --client codex` 後の plain `codex` または `spawn_codex_pane`）。

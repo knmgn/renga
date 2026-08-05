@@ -9,6 +9,32 @@ rules in [`docs/semver-policy.md`](./docs/semver-policy.md).
 
 ## [Unreleased]
 
+### Added
+
+- **`spawn_*` can place workers in another tab — or a new background
+  one.** (#290) The three spawn tools (`spawn_pane` /
+  `spawn_claude_pane` / `spawn_codex_pane`) accept an optional tagged
+  `tab` selector: `{name}` (exact display-name match; zero matches
+  fail `tab_not_found`, several fail `tab_ambiguous` — never
+  first-match), `{index}` (0-based, aligned with `list_peers`),
+  `{pane_id}` (the owning tab — the stable anchor), or `{new: {name?}}`
+  to spawn a fresh single-pane **background** tab: the tab the user is
+  viewing does not change, the hidden tab's geometry (rects + PTY
+  size) is finalized before the success reply, `pane_started` fires
+  exactly once with name/role attached, and an omitted `cwd` inherits
+  the caller pane's cwd. With an existing-tab selector the `target`
+  resolves strictly inside the selected tab (`target_tab_mismatch`
+  otherwise); with `tab.new`, `direction` / `target` are rejected
+  rather than ignored. On the wire this is an optional
+  `tab: TabSelector` on `split` plus a new `spawn_tab` request
+  (replying `{id, tab}`), both additive. Version skew fails closed via
+  a new `spawn_tab` hello capability: any tab-directed spawn against
+  an older server errors with `[server_too_old]` instead of silently
+  spawning into the caller's tab. `new_tab` keeps its create-and-focus
+  contract, and tab creation now caps at MAX_TABS = 16 with a
+  dedicated `tab_limit_reached` error (the api-surface doc wrongly
+  listed `new_tab` under `split_refused`; corrected).
+
 ### Changed
 
 - **BREAKING — peer messaging now crosses tabs.** (#289) `send_message`

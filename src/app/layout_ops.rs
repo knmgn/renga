@@ -6,20 +6,79 @@ impl App {
     }
 
     pub(crate) fn new_tab_with_cwd(&mut self, cwd_override: Option<PathBuf>) -> Result<usize> {
+        self.create_tab_with_cwd(cwd_override, true)
+            .map(|(_, pane_id)| pane_id)
+            // Callers of this legacy wrapper (Alt+T, layout TOML) only
+            // surface the message; the coded form stays available via
+            // `create_tab_with_cwd` for the IPC handlers.
+            .map_err(|e| anyhow::anyhow!(e.to_string()))
+    }
+
+    /// Create a new single-pane tab. `activate: true` is the classic
+    /// "open and focus" behavior (Alt+T, `new_tab`); `activate: false`
+    /// creates the tab in the **background** (Issue #290, the `tab:
+    /// {new: …}` spawn selector): the visible tab is untouched and the
+    /// hidden workspace's geometry — rects *and* PTY size — is
+    /// finalized before returning, so callers never observe the 10x40
+    /// placeholder the pane is born with.
+    ///
+    /// Returns `(ws_idx, pane_id)` of the created tab.
+    pub(crate) fn create_tab_with_cwd(
+        &mut self,
+        cwd_override: Option<PathBuf>,
+        activate: bool,
+    ) -> std::result::Result<(usize, usize), ipc::CodedError> {
+        if self.workspaces.len() >= Self::MAX_TABS {
+            return Err(ipc::CodedError::new(
+                ipc::err_code::TAB_LIMIT_REACHED,
+                format!(
+                    "tab limit reached ({} of {} tabs)",
+                    self.workspaces.len(),
+                    Self::MAX_TABS
+                ),
+            ));
+        }
+        // A background tab must report real geometry in its success
+        // reply — nothing else ever refreshes a hidden workspace —
+        // and below the layout threshold there is no real geometry to
+        // compute (`relayout_workspace` bails). Refuse up front,
+        // mirroring `split_pane_in_workspace`. The activate path
+        // keeps its historic tolerance: the next render lays the now
+        // visible tab out anyway.
+        if !activate && self.terminal_too_small_for_layout() {
+            return Err(ipc::CodedError::new(
+                ipc::err_code::SPLIT_REFUSED,
+                "terminal too small to lay out a new background tab",
+            ));
+        }
         let cwd = cwd_override
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
         let name = dir_name(&cwd);
         let pane_id = self.next_pane_id;
         self.next_pane_id = self.next_pane_id.wrapping_add(1);
 
-        let ws = Workspace::new(name, cwd, pane_id, 10, 40, self.event_tx.clone())?;
+        let ws = Workspace::new(name, cwd, pane_id, 10, 40, self.event_tx.clone())
+            .map_err(|e| ipc::CodedError::new(ipc::err_code::IO_ERROR, e.to_string()))?;
         self.workspaces.push(ws);
-        self.active_tab = self.workspaces.len() - 1;
-        self.suspend_overlay();
+        let ws_idx = self.workspaces.len() - 1;
+        if activate {
+            self.active_tab = ws_idx;
+            self.suspend_overlay();
+        } else {
+            // A hidden workspace never passes through
+            // `ui::render_panes`, so nothing else would size it (see
+            // the sibling branch in `split_pane_in_workspace`).
+            // `suspend_overlay` is deliberately *not* called: the
+            // visible tab did not change, and tearing down the IME
+            // overlay the user is composing in because a background
+            // tab appeared would be a regression.
+            self.relayout_workspace(ws_idx);
+            self.dirty = true;
+        }
         // Sidebar rows are keyed by tab index, so the whole cache is
         // stale the moment the tab set changes.
         self.reset_org_sidebar_caches();
-        Ok(pane_id)
+        Ok((ws_idx, pane_id))
     }
 
     pub(crate) fn close_tab(&mut self, index: usize) {
@@ -114,6 +173,12 @@ impl App {
     }
 
     const MAX_PANES: usize = 16;
+    /// Cap on simultaneously open tabs. Exists for the same reason as
+    /// `MAX_PANES`: automated orchestration (`spawn_*` with `tab:
+    /// {new: …}`) can create tabs in a loop, and every tab carries a
+    /// live PTY. Exceeding it fails with `tab_limit_reached` — never
+    /// `split_refused`, which is about pane capacity *inside* a tab.
+    pub(crate) const MAX_TABS: usize = 16;
 
     pub(crate) fn split_focused_pane(
         &mut self,
@@ -700,6 +765,112 @@ impl App {
                 .ok_or_else(not_found),
             Some(_) => self
                 .resolve_target_from(ws_idx, target)
+                .ok_or_else(not_found),
+        }
+    }
+
+    /// Resolve an explicit `tab` selector (Issue #290) to a workspace
+    /// index. The sibling of [`Self::resolve_caller_workspace`] for
+    /// requests that name their tab instead of defaulting to the
+    /// caller's.
+    ///
+    /// [`ipc::TabSelector::New`] is not resolvable here — creating a
+    /// tab is [`Self::create_tab_with_cwd`]'s job and a `Split` cannot
+    /// land in a tab that has no panes yet — so it fails with
+    /// `protocol` (the MCP layer routes `{new: …}` to `SpawnTab`
+    /// before a `Split` is ever built).
+    pub(crate) fn resolve_tab_selector(
+        &self,
+        selector: &ipc::TabSelector,
+    ) -> std::result::Result<usize, ipc::CodedError> {
+        match selector {
+            ipc::TabSelector::Name(name) => {
+                // Scan all tabs, then judge the count. Labels are not
+                // unique, and a first-match rule would silently pick a
+                // tab the caller never meant — the wrong-tab class of
+                // bug #288/#290 exist to prevent.
+                let matches: Vec<usize> = self
+                    .workspaces
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, ws)| ws.display_name() == name)
+                    .map(|(i, _)| i)
+                    .collect();
+                match matches.as_slice() {
+                    [] => Err(ipc::CodedError::new(
+                        ipc::err_code::TAB_NOT_FOUND,
+                        format!("no tab named {name:?}"),
+                    )),
+                    [only] => Ok(*only),
+                    many => Err(ipc::CodedError::new(
+                        ipc::err_code::TAB_AMBIGUOUS,
+                        format!(
+                            "{} tabs are named {name:?} (indices {many:?}); \
+                             address one with {{index}} or {{pane_id}} instead",
+                            many.len()
+                        ),
+                    )),
+                }
+            }
+            ipc::TabSelector::Index(idx) => {
+                if *idx < self.workspaces.len() {
+                    Ok(*idx)
+                } else {
+                    Err(ipc::CodedError::new(
+                        ipc::err_code::TAB_NOT_FOUND,
+                        format!(
+                            "tab index {idx} out of range ({} tabs, 0-based)",
+                            self.workspaces.len()
+                        ),
+                    ))
+                }
+            }
+            ipc::TabSelector::PaneId(pane_id) => {
+                self.workspace_index_of_pane(*pane_id).ok_or_else(|| {
+                    ipc::CodedError::new(
+                        ipc::err_code::PANE_NOT_FOUND,
+                        format!("tab anchor pane {pane_id} not found in any workspace"),
+                    )
+                })
+            }
+            ipc::TabSelector::New { .. } => Err(ipc::CodedError::new(
+                ipc::err_code::PROTOCOL,
+                "tab.new is not valid for a split request; use spawn_tab",
+            )),
+        }
+    }
+
+    /// Resolve `target` strictly inside tab `ws_idx` — the explicit
+    /// `tab` selector path (Issue #290). Unlike
+    /// [`Self::resolve_target_from`] there is no numeric-id cross-tab
+    /// escape hatch: the caller already said which tab it means, so a
+    /// numeric target living elsewhere is a contradiction between the
+    /// two halves of the request (`target_tab_mismatch`), not an
+    /// implicit redirect.
+    pub(crate) fn resolve_target_in_tab(
+        &self,
+        ws_idx: usize,
+        target: &PaneRef,
+    ) -> std::result::Result<usize, ipc::CodedError> {
+        let not_found = || {
+            ipc::CodedError::new(
+                ipc::err_code::PANE_NOT_FOUND,
+                format!("pane not found: {target:?}"),
+            )
+        };
+        match target {
+            PaneRef::Id(id) => match self.workspace_index_of_pane(*id) {
+                None => Err(not_found()),
+                Some(owner) if owner != ws_idx => Err(ipc::CodedError::new(
+                    ipc::err_code::TARGET_TAB_MISMATCH,
+                    format!("target pane {id} lives in tab {owner}, not the selected tab {ws_idx}"),
+                )),
+                Some(_) => Ok(*id),
+            },
+            PaneRef::Focused | PaneRef::Name(_) => self
+                .workspaces
+                .get(ws_idx)
+                .and_then(|ws| ws.resolve_pane_ref(target))
                 .ok_or_else(not_found),
         }
     }

@@ -34,11 +34,20 @@ impl App {
                 role,
                 cwd,
                 from_pane,
+                tab,
                 reply,
             } => {
                 self.recompute_hidden_rects_for_ipc();
-                let result =
-                    self.handle_split(&target, direction, command, name, role, cwd, from_pane);
+                let result = self.handle_split(
+                    &target,
+                    direction,
+                    command,
+                    name,
+                    role,
+                    cwd,
+                    from_pane,
+                    tab.as_ref(),
+                );
                 let _ = reply.send(result);
             }
             AppCommand::NewTab {
@@ -50,6 +59,18 @@ impl App {
                 reply,
             } => {
                 let result = self.handle_new_tab(command, name, label, role, cwd);
+                let _ = reply.send(result);
+            }
+            AppCommand::SpawnTab {
+                command,
+                name,
+                label,
+                role,
+                cwd,
+                from_pane,
+                reply,
+            } => {
+                let result = self.handle_spawn_tab(command, name, label, role, cwd, from_pane);
                 let _ = reply.send(result);
             }
             AppCommand::Inspect {
@@ -266,28 +287,7 @@ impl App {
         })?;
 
         if let Some(Some(new_name)) = &name {
-            let trimmed = new_name.trim();
-            if trimmed.is_empty() {
-                return Err(ipc::CodedError::new(
-                    ipc::err_code::NAME_INVALID,
-                    "name must not be empty — pass null to clear",
-                ));
-            }
-            if trimmed.chars().all(|c| c.is_ascii_digit()) {
-                return Err(ipc::CodedError::new(
-                    ipc::err_code::NAME_INVALID,
-                    format!("name {trimmed:?} is all-digits; would collide with numeric pane ids"),
-                ));
-            }
-            if !trimmed
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-            {
-                return Err(ipc::CodedError::new(
-                    ipc::err_code::NAME_INVALID,
-                    format!("name {trimmed:?} has invalid characters; allowed: [A-Za-z0-9_-]"),
-                ));
-            }
+            let trimmed = validate_pane_name(new_name)?;
             let ws = &self.workspaces[ws_idx];
             if let Some(&holder) = ws.pane_names.get(trimmed) {
                 if holder != pane_id {
@@ -594,9 +594,10 @@ impl App {
     ) -> std::result::Result<usize, ipc::CodedError> {
         let base = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let cwd_override = resolve_optional_cwd(cwd.as_deref(), &base)?;
-        let new_pane_id = self
-            .new_tab_with_cwd(cwd_override)
-            .map_err(|e| ipc::CodedError::new(ipc::err_code::IO_ERROR, e.to_string()))?;
+        // The coded creation path, not `new_tab_with_cwd`: a full tab
+        // strip must surface as `tab_limit_reached`, not a generic
+        // `io_error`.
+        let (_ws_idx, new_pane_id) = self.create_tab_with_cwd(cwd_override, true)?;
         let effective_command = command.or_else(|| default_command_for_role(role.as_deref()));
         if let Some(pane) = self.ws_mut().panes.get_mut(&new_pane_id) {
             if let Some(cmd) = effective_command {
@@ -619,6 +620,74 @@ impl App {
         self.dirty = true;
         self.emit_pane_started(new_pane_id);
         Ok(new_pane_id)
+    }
+
+    /// Spawn a fresh single-pane tab in the background (Issue #290, the
+    /// `tab: {new: …}` selector of the MCP `spawn_*` tools). The mirror
+    /// of [`Self::handle_new_tab`] with three deliberate differences:
+    /// the active tab does not change, every post-create mutation is
+    /// indexed by the new tab's `ws_idx` (using `ws_mut()` here would
+    /// silently edit whatever tab the human is looking at), and a
+    /// relative / omitted `cwd` follows the **caller pane**, not the
+    /// server process — a spawn places workers relative to the
+    /// orchestrator that asked.
+    ///
+    /// Returns `(new_pane_id, ws_idx)`.
+    pub(crate) fn handle_spawn_tab(
+        &mut self,
+        command: Option<String>,
+        name: Option<String>,
+        label: Option<String>,
+        role: Option<String>,
+        cwd: Option<String>,
+        from_pane: Option<usize>,
+    ) -> std::result::Result<(usize, usize), ipc::CodedError> {
+        let caller_ws = self.resolve_caller_workspace(from_pane)?;
+        // Validate the pane name *before* creating anything: an
+        // invalid name must not leave behind a successfully created
+        // tab whose pane can never be addressed by the name the caller
+        // thinks it registered. Empty means "no name", matching
+        // `handle_split` / `handle_new_tab`.
+        let name = match name.as_deref() {
+            None => None,
+            Some(raw) if raw.trim().is_empty() => None,
+            Some(raw) => Some(validate_pane_name(raw)?.to_string()),
+        };
+        let base = from_pane
+            .and_then(|id| self.workspaces[caller_ws].panes.get(&id))
+            .map(|p| p.cwd.clone())
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+        let cwd_override = resolve_optional_cwd(cwd.as_deref(), &base)?;
+        // `Some(base)` rather than `None`: `create_tab_with_cwd`'s
+        // `None` default is the server process cwd, and the omitted-cwd
+        // contract here is "inherit the caller pane's cwd".
+        let (ws_idx, new_pane_id) =
+            self.create_tab_with_cwd(Some(cwd_override.unwrap_or(base)), false)?;
+        let effective_command = command.or_else(|| default_command_for_role(role.as_deref()));
+        if let Some(pane) = self.workspaces[ws_idx].panes.get_mut(&new_pane_id) {
+            if let Some(cmd) = effective_command {
+                pane.queue_startup_command(&cmd);
+            }
+            if let Some(r) = role {
+                pane.role = Some(r);
+            }
+        }
+        if let Some(name) = name {
+            if !name.is_empty() {
+                self.workspaces[ws_idx].pane_names.insert(name, new_pane_id);
+            }
+        }
+        if let Some(label) = label {
+            if !label.is_empty() {
+                self.workspaces[ws_idx].custom_name = Some(label);
+            }
+        }
+        self.dirty = true;
+        // Indexed and last: geometry is already final
+        // (`create_tab_with_cwd` relaid the hidden workspace out) and
+        // name/role are set, so the single `pane_started` carries them.
+        self.emit_pane_started_in(ws_idx, new_pane_id);
+        Ok((new_pane_id, ws_idx))
     }
 
     pub(crate) fn handle_send(
@@ -679,8 +748,23 @@ impl App {
         role: Option<String>,
         cwd: Option<String>,
         from_pane: Option<usize>,
+        tab: Option<&ipc::TabSelector>,
     ) -> std::result::Result<usize, ipc::CodedError> {
-        let (ws_idx, target_pane_id) = self.resolve_request_target(from_pane, target)?;
+        let (ws_idx, target_pane_id) = match tab {
+            None => self.resolve_request_target(from_pane, target)?,
+            Some(selector) => {
+                // Placement first (Issue #290): resolve the tab, then
+                // resolve `target` strictly inside it. The caller must
+                // still resolve even though the selector, not the
+                // caller's tab, decides placement — an unattributable
+                // request stays an error, the same rule
+                // `resolve_request_target` enforces.
+                self.resolve_caller_workspace(from_pane)?;
+                let ws_idx = self.resolve_tab_selector(selector)?;
+                let pane_id = self.resolve_target_in_tab(ws_idx, target)?;
+                (ws_idx, pane_id)
+            }
+        };
         // A relative `cwd` is resolved against the *target* pane, not
         // the caller: that is the pre-#288 contract for this request and
         // `from_pane` only narrows which panes `target` may name. MCP
@@ -731,4 +815,37 @@ impl App {
         self.emit_pane_started_in(ws_idx, new_pane_id);
         Ok(new_pane_id)
     }
+}
+
+/// Validate a stable pane name and return its trimmed form: non-empty,
+/// not all-digits (digit strings parse as numeric pane ids, so an
+/// all-digit name could never be addressed), charset `[A-Za-z0-9_-]`.
+/// Shared by `set_pane_identity` and `spawn_tab` so the two paths that
+/// register names cannot drift apart. (`split` / `new_tab` predate the
+/// validation and keep accepting names verbatim — tightening them is a
+/// compat question out of #290's scope.)
+fn validate_pane_name(name: &str) -> std::result::Result<&str, ipc::CodedError> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err(ipc::CodedError::new(
+            ipc::err_code::NAME_INVALID,
+            "name must not be empty — pass null to clear",
+        ));
+    }
+    if trimmed.chars().all(|c| c.is_ascii_digit()) {
+        return Err(ipc::CodedError::new(
+            ipc::err_code::NAME_INVALID,
+            format!("name {trimmed:?} is all-digits; would collide with numeric pane ids"),
+        ));
+    }
+    if !trimmed
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return Err(ipc::CodedError::new(
+            ipc::err_code::NAME_INVALID,
+            format!("name {trimmed:?} has invalid characters; allowed: [A-Za-z0-9_-]"),
+        ));
+    }
+    Ok(trimmed)
 }

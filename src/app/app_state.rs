@@ -45,6 +45,10 @@ pub enum AppCommand {
         role: Option<String>,
         cwd: Option<String>,
         from_pane: Option<usize>,
+        /// Tab hosting the split (Issue #290). `None` = prior behavior
+        /// (the target resolves in the caller's tab). See
+        /// [`ipc::Request::Split`].
+        tab: Option<ipc::TabSelector>,
         reply: oneshot::Sender<std::result::Result<usize, ipc::CodedError>>,
     },
     /// Open a new tab with a fresh single pane. Focus switches to the
@@ -57,6 +61,20 @@ pub enum AppCommand {
         role: Option<String>,
         cwd: Option<String>,
         reply: oneshot::Sender<std::result::Result<usize, ipc::CodedError>>,
+    },
+    /// Spawn a fresh single-pane tab in the **background** — the active
+    /// tab does not change (Issue #290, the `tab: {new: …}` selector of
+    /// the MCP `spawn_*` tools). The new tab's geometry is finalized
+    /// (rects + PTY resize) before the reply is sent. Returns the new
+    /// pane's id and the new tab's 0-based index.
+    SpawnTab {
+        command: Option<String>,
+        name: Option<String>,
+        label: Option<String>,
+        role: Option<String>,
+        cwd: Option<String>,
+        from_pane: Option<usize>,
+        reply: oneshot::Sender<std::result::Result<(usize, usize), ipc::CodedError>>,
     },
     /// Snapshot the visible screen of the target pane. See
     /// [`ipc::Request::Inspect`] for the response shape.

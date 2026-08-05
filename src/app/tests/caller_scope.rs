@@ -300,6 +300,7 @@ fn focus_when_the_caller_is_already_visible_switches_nothing() {
             None,
             None,
             Some(a),
+            None,
         )
         .expect("split");
     assert_eq!(app.active_tab, 0);
@@ -401,6 +402,7 @@ fn split_lands_in_the_callers_tab_and_leaves_the_active_one_alone() {
             None,
             None,
             Some(caller),
+            None,
         )
         .expect("split in caller's tab");
 
@@ -442,6 +444,7 @@ fn split_in_a_hidden_tab_reports_real_geometry_not_zeros() {
             None,
             None,
             Some(caller),
+            None,
         )
         .expect("split hidden tab");
 
@@ -478,6 +481,7 @@ fn a_refused_split_leaves_both_workspaces_focus_untouched() {
             None,
             None,
             Some(caller),
+            None,
         )
         .expect_err("split must be refused");
     assert_eq!(err.code, Some(ipc::err_code::SPLIT_REFUSED));
@@ -509,6 +513,7 @@ fn split_inherits_the_target_panes_cwd_across_tabs() {
             // is the caller here. `.` keeps us inside `base`.
             Some(".".into()),
             Some(caller),
+            None,
         )
         .expect("split with relative cwd");
 
@@ -544,6 +549,7 @@ fn a_cross_tab_spawn_emits_pane_started_with_its_name_and_role() {
             Some("worker".into()),
             None,
             Some(caller),
+            None,
         )
         .expect("cross-tab split");
 
@@ -656,6 +662,7 @@ fn a_cross_tab_split_guards_against_the_current_terminal() {
             None,
             None,
             Some(caller),
+            None,
         )
         .expect_err("46 cols cannot hold two 20-column panes");
     assert_eq!(err.code, Some(ipc::err_code::SPLIT_REFUSED));
@@ -680,6 +687,7 @@ fn a_split_is_refused_while_the_terminal_is_too_small_to_lay_out() {
             None,
             None,
             Some(caller),
+            None,
         )
         .expect_err("no usable geometry at 10x3");
     assert_eq!(err.code, Some(ipc::err_code::SPLIT_REFUSED));
@@ -711,6 +719,7 @@ fn a_cross_tab_split_keeps_a_selection_that_belongs_to_another_tab() {
         None,
         None,
         Some(caller),
+        None,
     )
     .expect("split the hidden tab");
     assert!(
@@ -728,6 +737,7 @@ fn a_cross_tab_split_keeps_a_selection_that_belongs_to_another_tab() {
         None,
         None,
         Some(caller),
+        None,
     )
     .expect("second split");
     assert!(

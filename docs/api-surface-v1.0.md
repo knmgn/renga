@@ -147,14 +147,16 @@ calling pane lives in, which is not necessarily the tab on screen: `id`, `name`,
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
-| `direction` | `"vertical"\|"horizontal"` | yes | `vertical` → new pane on the right; `horizontal` → new pane on the bottom. |
-| `target` | string | no | Numeric id, name, or `"focused"`. Default `"focused"`. |
+| `direction` | `"vertical"\|"horizontal"` | conditional | `vertical` → new pane on the right; `horizontal` → new pane on the bottom. Required for every split — i.e. always, except with `tab: {new: …}`, where it is **forbidden** (a fresh tab has nothing to split). |
+| `target` | string | no | Numeric id, name, or `"focused"`. Default `"focused"`. With a `tab` selector it resolves **inside the selected tab** (`"focused"` = that tab's focused pane); a numeric id owned by a different tab fails with `target_tab_mismatch`. Forbidden with `tab: {new: …}`. |
+| `tab` | object | no | Tab placement selector (#290). Exactly one key: `{"name": "<label>"}` — exact display-name match, 0 matches → `tab_not_found`, several → `tab_ambiguous` (labels are not unique; never first-match); `{"index": N}` — 0-based tab index, the same index `list_peers` reports, out of range → `tab_not_found`; `{"pane_id": N}` — the tab owning that pane (stable anchor); `{"new": {}}` / `{"new": {"name": "<label>"}}` — create a fresh single-pane **background** tab: the visible tab does not change, geometry (rects + PTY size) is finalized before the success reply, and omitted `cwd` inherits the **caller pane's** cwd. Sending any `tab` requires the server to advertise `spawn_tab` (§3.4) — the MCP layer fails closed with `server_too_old` otherwise. |
 | `command` | string | no | Startup command. **Bare `claude [...]` is auto-rewritten to the Alt+P peer-enabled form** — see contract note below (Q3). |
 | `name` | string | no | Stable pane name, must satisfy `[A-Za-z0-9_-]`, not all-digits. |
 | `role` | string | no | Free-form label. Non-unique. |
 | `cwd` | string | no | Absolute or relative-to-caller. Validated **before** layout mutation; failure is `cwd_invalid`. |
 
-Returns: text containing the new pane's numeric id.
+Returns: text containing the new pane's numeric id (and, for `tab: {new: …}`,
+the new tab's 0-based index).
 
 **`command` rewrite contract (Q3)**: when `command` starts with the bare token
 `claude` (no `--dangerously-load-development-channels`), renga injects the
@@ -166,7 +168,9 @@ verbatim execution should pick a different leading token (e.g. `bash -c
 
 Errors: `split_refused` (MAX_PANES = 16, or below `min_pane_width` /
 `min_pane_height`), `cwd_invalid`, `pane_not_found`, `name_in_use`,
-`name_invalid`, `io_error`.
+`name_invalid`, `io_error`; with a `tab` selector also `tab_not_found`,
+`tab_ambiguous`, `target_tab_mismatch`, and (for `tab: {new: …}`)
+`tab_limit_reached` (MAX_TABS = 16).
 
 ### 1.7 `spawn_claude_pane` — stable
 
@@ -174,7 +178,7 @@ Same envelope as `spawn_pane` minus `command`, plus structured Claude fields:
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
-| `direction`, `target`, `name`, `role`, `cwd` | as in §1.6 | direction yes | |
+| `direction`, `target`, `tab`, `name`, `role`, `cwd` | as in §1.6 | direction conditional | `tab` (#290) carries over unchanged, including the `{new: …}` background form. |
 | `permission_mode` | string | no | Rendered as `--permission-mode <v>`. Not enum-validated server-side, so new Claude permission modes work without a renga release. |
 | `model` | string | no | Rendered as `--model <v>`. |
 | `args` | string[] | no | Appended after structured fields. Must NOT contain `--dangerously-load-development-channels` / `--permission-mode` / `--model` — rejected with JSON-RPC `-32602` invalid-params. |
@@ -223,6 +227,10 @@ use sparingly.
 
 Returns: numeric pane id of the new tab's initial pane. Focus switches to the
 new tab.
+
+Errors: `tab_limit_reached` (MAX_TABS = 16, #290), `cwd_invalid`, `io_error`.
+For a **background** tab (no focus switch) use `spawn_pane` with
+`tab: {new: …}` (§1.6) — `new_tab` itself keeps its create-and-focus contract.
 
 ### 1.12 `inspect_pane` — stable
 
@@ -418,10 +426,11 @@ Server budgets: 5 s `APP_REPLY_TIMEOUT` (server → app event loop) +
 | `hello` | `client_pid: u32` | Required first message. |
 | `list` | `from_pane?: usize` | `from_pane` added in #288; optional, omitted on the wire when absent, so `{"cmd":"list"}` is unchanged. |
 | `send` | `target: PaneRef`, `data: string`, `append_enter: bool` (default false), `from_pane?: usize` | |
-| `split` | `target: PaneRef`, `direction: vertical\|horizontal`, `command?`, `id?`, `role?`, `cwd?`, `from_pane?: usize` | Relative `cwd` resolves against the **target** pane, not `from_pane`. |
+| `split` | `target: PaneRef`, `direction: vertical\|horizontal`, `command?`, `id?`, `role?`, `cwd?`, `from_pane?: usize`, `tab?: TabSelector` | Relative `cwd` resolves against the **target** pane, not `from_pane`. `tab` (#290) is omitted on the wire when absent; senders must gate it on `spawn_tab` (§3.4). `{new: …}` is not valid here — that is `spawn_tab`'s job. |
 | `focus` | `target: PaneRef`, `from_pane?: usize` | Resolving outside the visible tab switches the visible tab. |
 | `close` | `target: PaneRef` | |
-| `new_tab` | `command?`, `id?`, `label?`, `role?`, `cwd?` | |
+| `new_tab` | `command?`, `id?`, `label?`, `role?`, `cwd?` | Creates **and focuses** — unchanged by #290. |
+| `spawn_tab` | `command?`, `id?`, `label?`, `role?`, `cwd?`, `from_pane?: usize` | #290. Creates a single-pane tab **in the background**: the active tab is untouched, geometry (rects + PTY size) is finalized before the reply, exactly one `pane_started` is emitted after name/role attach. Relative / omitted `cwd` follows the **caller pane** (falls back to the server cwd without `from_pane`). Replies `{ id, tab }` with the new pane id and 0-based tab index. Senders must gate on `spawn_tab` (§3.4). |
 | `subscribe` | — | Switches to event-stream mode after ack. |
 | `inspect` | `target: PaneRef`, `lines?`, `include_cursor: bool` (default false) | `lines` beyond the visible height reads scrollback since v1.4 (#278) — see §1.12. |
 | `peer_list` | `from_pane: usize` | |
@@ -431,6 +440,14 @@ Server budgets: 5 s `APP_REPLY_TIMEOUT` (server → app event loop) +
 | `set_summary` | `from_pane: usize`, `summary: string` | Empty `summary` clears. >256 `chars` rejected with `summary_too_long`. |
 
 `PaneRef` = `{ id: usize } | { name: string } | "focused"`.
+
+`TabSelector` (#290) = `{ name: string } | { index: usize } | { pane_id: usize }
+| { new: { name?: string } }`. Externally tagged like `PaneRef`. `name` is an
+exact display-name match (0 → `tab_not_found`, >1 → `tab_ambiguous`; never
+first-match), `index` is the 0-based tab index `list_peers` reports, `pane_id`
+selects the owning tab (the stable anchor), `new` creates a background tab. A
+tagged object rather than an overloaded string so a tab literally named "new"
+stays addressable.
 
 ### 3.4 Response envelope — stable
 
@@ -461,6 +478,14 @@ mcp-peer requires `cross_tab_peers` for `list_peers` / `send_message` and
 fails closed (`server_too_old`) when it is absent — a #288 server advertises
 `caller_scope` yet still silently drops cross-tab sends, so the two tokens
 are deliberately distinct.
+
+Servers supporting tab-directed spawning additionally advertise `spawn_tab`
+(#290). Any `spawn_*` call carrying a `tab` selector — including one that
+resolves to the caller's own tab — is sent with `spawn_tab` required and
+fails closed (`server_too_old`) when it is absent: `Request` tolerates
+unknown fields, so a #289-era server would silently drop the selector and
+split in the caller's tab, the wrong-tab accident again. Calls without `tab`
+keep requiring only `caller_scope`, so pre-#290 behavior is untouched.
 
 ### 3.5 Event envelope — stable
 
@@ -561,13 +586,17 @@ these as `[<code>] <human message>` in JSON-RPC error message strings.
 | `internal` | every request | Server invariant violation. |
 | `pane_not_found` | pane-targeted requests | `PaneRef` did not resolve. |
 | `pane_vanished` | pane-targeted requests | Resolved then disappeared mid-flight. Rare. |
-| `split_refused` | `split`, `spawn_*`, `new_tab` (and layout TOML apply) | MAX_PANES = 16, or below `min_pane_width` / `min_pane_height`. |
+| `split_refused` | `split`, `spawn_*` (and layout TOML apply); `spawn_tab` only for a terminal below the layout threshold | MAX_PANES = 16, or below `min_pane_width` / `min_pane_height`. Corrected in #290: `new_tab` never returned this — its capacity failure is `tab_limit_reached`. |
 | `io_error` | requests with PTY side-effects | OS-level write/spawn failure. |
 | `last_pane` | `close` | Refused to remove the only pane of the only tab. |
-| `cwd_invalid` | `split`, `new_tab` | `cwd` missing or not a directory. Pre-mutation rejection — no half-mutated layout. |
+| `cwd_invalid` | `split`, `new_tab`, `spawn_tab` | `cwd` missing or not a directory. Pre-mutation rejection — no half-mutated layout. |
 | `name_in_use` | `split`, `new_tab`, `set_pane_identity` | Another pane in the same tab holds the requested name. |
-| `name_invalid` | `split`, `new_tab`, `set_pane_identity` | Name empty / all-digits / non-`[A-Za-z0-9_-]`. |
+| `name_invalid` | `split`, `new_tab`, `set_pane_identity`, `spawn_tab` | Name empty / all-digits / non-`[A-Za-z0-9_-]`. `spawn_tab` rejects **before** creating the tab (#290). |
 | `summary_too_long` | `set_summary` | Summary input exceeds 256 Unicode scalar values. Pre-mutation rejection. |
+| `tab_not_found` | `split` with `tab` | Selector's display name matched no tab, or the 0-based index is out of range. Pre-mutation rejection. |
+| `tab_ambiguous` | `split` with `tab` | `{name}` matched several tabs. Labels are not unique; the server never first-matches — re-address via `{index}` or `{pane_id}`. |
+| `target_tab_mismatch` | `split` with `tab` | Numeric `target` lives in a different tab than the selector picked. The request contradicts itself; refused instead of following either half. |
+| `tab_limit_reached` | `new_tab`, `spawn_tab` | MAX_TABS = 16 tabs already open. Deliberately not `split_refused`, which is about pane capacity inside one tab. |
 | `codex_not_installed` | `spawn_codex_pane` | Codex's `~/.codex/config.toml` is missing the renga-peers entry, the file is unreadable, or the `RENGA_PEER_CLIENT_KIND=codex` env-var passthrough is absent. Surfaced from the MCP layer (not `renga::ipc::err_code`); branch on the `[code]` token same as the others. Run `renga mcp install --client codex` to remediate. |
 
 ### 5.2 JSON-RPC numeric codes (Q9)
@@ -674,9 +703,9 @@ minor release.
 | CLI top-level flags (§2.1) | 11 |
 | CLI IPC subcommands (§2.2) | 13 |
 | Env vars (§2.3) | 6 |
-| IPC `Request` variants (§3.3) | 14 |
+| IPC `Request` variants (§3.3) | 15 |
 | IPC `Response` variants (§3.4) | 4 |
 | IPC `Event` variants (§3.5) | 5 |
-| Error codes (§5.1) | 15 |
+| Error codes (§5.1) | 19 |
 | Config schema sections (§4.1) | 2 |
 | Layout TOML node types (§4.2) | 2 |
