@@ -1,10 +1,10 @@
 # Peer messaging between Claude Code and Codex panes
 
-Mixed Claude Code and Codex instances running in the same renga tab exchange structured messages through the `renga-peers` MCP server, so one agent can ask its sibling to research something, hand off a test failure, or coordinate without the user relaying every message manually. Claude peers receive `<channel source="renga-peers">` tags; Codex peers get a pane-local nudge from renga, then drain the actual queued message body with `check_messages`.
+Mixed Claude Code and Codex instances running under the same renga session exchange structured messages through the `renga-peers` MCP server — across every tab since Issue #289 — so one agent can ask a sibling to research something, hand off a test failure, or coordinate without the user relaying every message manually. Claude peers receive `<channel source="renga-peers">` tags; Codex peers get a pane-local nudge from renga, then drain the actual queued message body with `check_messages`.
 
 This page covers the **operational workflow** — setup, launch, the two-pane example, and troubleshooting. The **canonical MCP tool list, parameter schemas, error codes, and frozen-prefix strings** live in [`api-surface-v1.0.md`](./api-surface-v1.0.md) §1; this doc deliberately does not restate that contract.
 
-> **Why this is different from [`claude-peers-mcp`](https://github.com/happy-ryo/claude-peers-mcp)** — both offer the same tool surface, but `claude-peers-mcp` infers peer scope from `cwd` / `git_root` / `PID` (heuristic, can collide). renga-peers uses the **renga tab** as the authoritative scope — panes the user literally put in the same tab. The two can coexist in the same Claude install; channel names don't collide (`server:renga-peers` vs `server:claude-peers`).
+> **Why this is different from [`claude-peers-mcp`](https://github.com/happy-ryo/claude-peers-mcp)** — both offer the same tool surface, but `claude-peers-mcp` infers peer scope from `cwd` / `git_root` / `PID` (heuristic, can collide). renga-peers uses the **renga session** as the authoritative scope — the panes the user literally put into this renga instance, across all of its tabs (`list_peers` lists your own tab first; other tabs are addressed by numeric pane id). The two can coexist in the same Claude install; channel names don't collide (`server:renga-peers` vs `server:claude-peers`).
 
 ## Setup — one-time
 
@@ -40,12 +40,12 @@ Once Codex is registered, orchestrator panes can also launch it in-band with `sp
 ## Two-pane workflow
 
 ```
-tab A                          tab B (isolated)
+tab A                          tab B
 ┌──────────┬──────────┐        ┌──────────┐
 │ claude-1 │ claude-2 │        │ claude-3 │
 │          │          │        │          │
-│  peers ──┼──▶ ✓     │        │  peers   │  ← cannot see claude-1/2
-│  send ◀──┼── msg    │        │          │
+│  peers ──┼──▶ ✓     │        │    ▲     │
+│  send ◀──┼── msg    │───id=3──────┘     │  ← reachable by numeric id (#289)
 └──────────┴──────────┘        └──────────┘
 ```
 
@@ -53,14 +53,17 @@ In Claude A's chat:
 
 ```
 > call list_peers
-# returns: id=2 (the sibling)
+# returns: id=2 (same-tab sibling, addressable by id or name)
+#          id=3 [tab 1] (other tab — address it by numeric id)
 
 > call send_message with to_id=2 and message="can you read src/app.rs:handle_split and summarise?"
 ```
 
+Since Issue #289 `list_peers` spans every tab (your own tab listed first) and `send_message` delivers across tabs when the target is a **numeric pane id**. A *name* still resolves only inside your own tab — pane names are unique per tab, not globally — and an unresolvable target returns a `pane_not_found` error instead of a fake `Delivered`.
+
 Claude B sees a `<channel source="renga-peers">can you read src/app.rs...</channel>` tag in its next turn, recognises it as a peer request (not user input, thanks to the tag source), does the work, and replies back the same way.
 
-Stable name lookups mean the orchestrator can address peers as `"secretary"` / `"worker-1"` instead of chasing numeric ids; `set_pane_identity` lets it (re)assign a pane's name mid-session if needed. The pushed body is prefixed with a `📡 PEER MESSAGE … NOT FROM USER` banner so an operator scrolling the transcript can tell at a glance that a `Human:`-rendered turn came from a peer rather than the user, and identical re-sends within a few seconds are collapsed server-side to keep the transcript free of phantom duplicate turns ([renga#221](https://github.com/suisya-systems/renga/issues/221)).
+Stable name lookups mean the orchestrator can address same-tab peers as `"secretary"` / `"worker-1"` instead of chasing numeric ids (names never resolve across tabs); `set_pane_identity` lets it (re)assign a pane's name mid-session if needed. The pushed body is prefixed with a `📡 PEER MESSAGE … NOT FROM USER` banner so an operator scrolling the transcript can tell at a glance that a `Human:`-rendered turn came from a peer rather than the user, and identical re-sends within a few seconds are collapsed server-side to keep the transcript free of phantom duplicate turns ([renga#221](https://github.com/suisya-systems/renga/issues/221)).
 
 ## Pane control alongside peer messaging
 

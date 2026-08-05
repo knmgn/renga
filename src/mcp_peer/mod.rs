@@ -472,7 +472,7 @@ fn tools_spec() -> Value {
                     "scope": {
                         "type": "string",
                         "enum": ["machine", "directory", "repo"],
-                        "description": "Accepted for wire-compat with claude-peers-mcp. renga always treats scope as the current tab; this parameter is ignored."
+                        "description": "Accepted for wire-compat with claude-peers-mcp; this parameter is ignored. renga results always span every renga tab."
                     }
                 }
             }

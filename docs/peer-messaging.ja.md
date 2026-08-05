@@ -2,11 +2,11 @@
 
 *Language: [English](./peer-messaging.md) / 日本語*
 
-同じ renga タブに並べた Claude Code と Codex のペイン同士が、`renga-peers` MCP サーバ経由でメッセージを送り合えるようになります。片方のエージェントに「これを調べておいて」と頼んだり、失敗したテストの原因追いを引き継いだりを、ユーザーが手で中継しなくても進められます。Claude は `<channel source="renga-peers">` タグで受け取り、Codex には renga が PTY 経由で `check_messages` を促す nudge を送り、実本文は MCP inbox から読みます。
+同じ renga セッションに並べた Claude Code と Codex のペイン同士が、`renga-peers` MCP サーバ経由でメッセージを送り合えるようになります (Issue #289 以降はタブをまたいで届きます)。片方のエージェントに「これを調べておいて」と頼んだり、失敗したテストの原因追いを引き継いだりを、ユーザーが手で中継しなくても進められます。Claude は `<channel source="renga-peers">` タグで受け取り、Codex には renga が PTY 経由で `check_messages` を促す nudge を送り、実本文は MCP inbox から読みます。
 
 本ページは **運用ワークフロー** を扱います — セットアップ、起動、2 ペイン例、トラブルシュート。**canonical な MCP ツール一覧、パラメータスキーマ、エラーコード、frozen-prefix 文字列**は [`api-surface-v1.0.md`](./api-surface-v1.0.md) §1 (英語のみ) にあります。本ページではそのコントラクトを再掲しません。
 
-> **[`claude-peers-mcp`](https://github.com/happy-ryo/claude-peers-mcp) との違い** — 両者ともツール表面はほぼ同じですが、`claude-peers-mcp` は `cwd` / `git_root` / `PID` からスコープを推測 (ヒューリスティック、衝突しうる) します。renga-peers は **renga タブ** を権威スコープとして使う — ユーザーが文字通り同じタブに置いたペイン群が対象です。両者は同じ Claude install 内で共存できます (チャンネル名が衝突しない: `server:renga-peers` vs `server:claude-peers`)。
+> **[`claude-peers-mcp`](https://github.com/happy-ryo/claude-peers-mcp) との違い** — 両者ともツール表面はほぼ同じですが、`claude-peers-mcp` は `cwd` / `git_root` / `PID` からスコープを推測 (ヒューリスティック、衝突しうる) します。renga-peers は **renga セッション** を権威スコープとして使う — ユーザーが文字通りこの renga インスタンスに置いたペイン群が、全タブ横断で対象です (`list_peers` は自分のタブを先頭に列挙、他タブ宛は数値 pane id で指定)。両者は同じ Claude install 内で共存できます (チャンネル名が衝突しない: `server:renga-peers` vs `server:claude-peers`)。
 
 ## セットアップ (1 回だけ)
 
@@ -42,12 +42,12 @@ Codex を会話の中から増やしたい場合は `spawn_codex_pane(direction,
 ## 2 ペインでのやり取り
 
 ```
-タブ A                         タブ B (独立)
+タブ A                         タブ B
 ┌──────────┬──────────┐        ┌──────────┐
 │ claude-1 │ claude-2 │        │ claude-3 │
 │          │          │        │          │
-│  peers ──┼──▶ ✓     │        │  peers   │  ← claude-1/2 は見えない
-│  send ◀──┼── msg    │        │          │
+│  peers ──┼──▶ ✓     │        │    ▲     │
+│  send ◀──┼── msg    │──id=3───────┘     │  ← 数値 id で届く (#289)
 └──────────┴──────────┘        └──────────┘
 ```
 
@@ -55,14 +55,17 @@ Claude A の会話で:
 
 ```
 > list_peers を呼んで
-# → id=2 (同じタブにいる相方) が返ってくる
+# → id=2 (同じタブの相方 — id でも名前でも指定可)
+#    id=3 [tab 1] (別タブ — 数値 id で指定する)
 
 > send_message を to_id=2, message="src/app.rs の handle_split を読んで要約して" で呼んで
 ```
 
+Issue #289 以降、`list_peers` は全タブを列挙し (自分のタブが先頭)、`send_message` は宛先が**数値 pane id** ならタブをまたいで配送します。**名前**は今も自分のタブ内でしか解決されません (pane 名はタブ内でのみ一意) 。解決できない宛先は偽の `Delivered` を返さず `pane_not_found` エラーになります。
+
 Claude B の次のターンのコンテキストに `<channel source="renga-peers">src/app.rs の handle_split を読んで…</channel>` タグで届き、Claude B は「ユーザーではなく相方からの依頼」と判別 (タグの `source` 属性が決め手) して要件を処理 → 同じ `send_message` で返信します。
 
-安定 name 解決があるので、orchestrator は数値 id を追いかけずに `"secretary"` / `"worker-1"` で peer を指せます。途中で名前を付け替えたい場合は `set_pane_identity` を使います。push される本文には `📡 PEER MESSAGE … NOT FROM USER` バナーが付くので、トランスクリプトを眺める運用者から見ても「`Human:` 風に表示されているターンが peer 由来か user 由来か」を一目で見分けられます。同一本文の数秒以内の連投はサーバ側で 1 通に畳まれるので、トランスクリプトに幻の重複ターンが現れません ([renga#221](https://github.com/suisya-systems/renga/issues/221))。
+安定 name 解決があるので、orchestrator は同じタブの peer なら数値 id を追いかけずに `"secretary"` / `"worker-1"` で指せます (名前はタブを越えて解決されません)。途中で名前を付け替えたい場合は `set_pane_identity` を使います。push される本文には `📡 PEER MESSAGE … NOT FROM USER` バナーが付くので、トランスクリプトを眺める運用者から見ても「`Human:` 風に表示されているターンが peer 由来か user 由来か」を一目で見分けられます。同一本文の数秒以内の連投はサーバ側で 1 通に畳まれるので、トランスクリプトに幻の重複ターンが現れません ([renga#221](https://github.com/suisya-systems/renga/issues/221))。
 
 ## ペイン操作を組み合わせる
 

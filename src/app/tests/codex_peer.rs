@@ -1065,6 +1065,46 @@ fn handle_peer_list_spans_all_tabs_with_caller_tab_first() {
 }
 
 #[test]
+fn handle_peer_list_reorders_middle_tab_caller_ahead_of_lower_tabs() {
+    // With the caller in tab 0 the caller-first order is
+    // indistinguishable from plain index order, so pin the reorder
+    // from a MIDDLE tab: the caller's tab-1 sibling must outrank the
+    // tab-0 pane even though tab 0 comes first by index.
+    let mut app = App::new(40, 80).expect("App::new");
+    let tab0_pane = app.ws().focused_pane_id;
+    let caller_id = app
+        .handle_new_tab(None, None, None, None, None)
+        .expect("second tab");
+    assert_eq!(app.active_tab, 1);
+    let caller_sibling = app
+        .handle_split(
+            &ipc::PaneRef::Focused,
+            ipc::Direction::Vertical,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("split caller tab");
+    let tab2_pane = app
+        .handle_new_tab(None, None, None, None, None)
+        .expect("third tab");
+
+    let peers = app.handle_peer_list(caller_id).expect("peer list");
+    let ids: Vec<usize> = peers.iter().map(|p| p.id).collect();
+    assert_eq!(
+        ids,
+        vec![caller_sibling, tab0_pane, tab2_pane],
+        "caller's own tab leads even when a lower-indexed tab exists"
+    );
+    assert_eq!(peers[0].same_tab, Some(true));
+    assert_eq!(peers[1].tab, Some(0));
+    assert_eq!(peers[2].tab, Some(2));
+    app.shutdown();
+}
+
+#[test]
 fn handle_peer_send_dedupes_identical_payload_within_window() {
     // renga#221 acceptance criterion #2: re-sending the exact same
     // payload from the same peer within the dedupe window must not

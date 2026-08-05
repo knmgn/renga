@@ -47,10 +47,13 @@ must accept these instead of JSON-RPC errors.
 
 | Field | Type | Notes |
 |---|---|---|
-| `scope` (in) | `"machine"\|"directory"\|"repo"` | Optional; **ignored**. Accepted for wire-compat with `claude-peers-mcp`. renga always treats scope as the current tab. |
+| `scope` (in) | `"machine"\|"directory"\|"repo"` | Optional; **ignored**. Accepted for wire-compat with `claude-peers-mcp`. Results always span every renga tab (#289; before that, the caller's tab only). |
 
 Result: text content listing `id`, `name`, `role`, `kind` (`claude`/`codex`),
-`receive_mode` (`push`/`pull`), `cwd`. Empty case: `"No peers in this tab."`.
+`receive_mode` (`push`/`pull`), `cwd`, plus display-only tab metadata
+(`tab` index, `tab_name`, `same_tab`) since #289. Every workspace is
+enumerated, the caller's own tab first. Empty case: `"No peers in any renga
+tab."` (#289; previously `"No peers in this tab."`).
 
 **Detached fallback (frozen prefix)**: `"(no peers — renga not reachable from
 this peer client: <reason>)"`. Downstream may match on this prefix; it is part
@@ -68,9 +71,17 @@ Result on success: `"Delivered to <to_id>."`.
 **Detached fallback (frozen prefix)**: `"(message dropped — renga not
 reachable: <reason>)"`.
 
-**Cross-tab silent no-op**: `peer_send` to a pane on another tab silently
-succeeds with no delivery (Q5). v1.0 keeps this behavior; cross-tab routing is
-deferred to a future minor release.
+**Cross-tab delivery (#289, supersedes the v1.0 Q5 silent no-op)**: a numeric
+`to_id` reaches a pane in any tab and delivers normally. A *name* resolves
+only inside the sender's own tab — pane names are unique per tab, not
+globally, so an unqualified name can never address another tab. An
+unresolvable target now fails with `pane_not_found` instead of silently
+succeeding. This is a deliberate breaking semantic change (see
+`semver-policy.md` §3) shipped without the §4 opt-in-flag window per the
+owner decision on #289: the anti-enumeration rationale for the silent drop
+moved to the security layer outside renga. Version skew fails closed via the
+`cross_tab_peers` capability (§3.4): the bundled mcp-peer refuses `list_peers`
+/ `send_message` against a server that does not advertise it.
 
 **Same-payload dedupe (post-1.1)**: identical `(target, sender, body)` triples
 arriving within a small dedupe window (~5s) are collapsed server-side to a
@@ -414,7 +425,7 @@ Server budgets: 5 s `APP_REPLY_TIMEOUT` (server → app event loop) +
 | `subscribe` | — | Switches to event-stream mode after ack. |
 | `inspect` | `target: PaneRef`, `lines?`, `include_cursor: bool` (default false) | `lines` beyond the visible height reads scrollback since v1.4 (#278) — see §1.12. |
 | `peer_list` | `from_pane: usize` | |
-| `peer_send` | `from_pane: usize`, `target: PaneRef`, `body: string` | Cross-tab silently no-ops (Q5). |
+| `peer_send` | `from_pane: usize`, `target: PaneRef`, `body: string` | Cross-tab ids deliver since #289; names resolve in the sender's tab only; unresolvable targets fail `pane_not_found`. |
 | `peer_register_client` | `pane_id: usize`, `kind: claude\|codex` | Posted by `renga mcp-peer` on startup. |
 | `set_pane_identity` | `target: PaneRef`, `name?`, `role?` (three-state: missing / null / value) | Uses serde `double_option`. |
 | `set_summary` | `from_pane: usize`, `summary: string` | Empty `summary` clears. >256 `chars` rejected with `summary_too_long`. |
@@ -437,7 +448,19 @@ in `peer_list` data):
 `{ id, name?, role?, focused, x, y, width, height, cwd?, kind?, receive_mode?, summary? }`.
 
 `PeerInfo` = `PaneInfo` minus the focused flag and geometry (purposefully
-hidden from cross-pane callers).
+hidden from cross-pane callers), plus — since #289 — optional display-only
+tab metadata: `tab?` (workspace index; shifts when tabs close, never an
+address), `tab_name?` (display label), `same_tab?` (whether the pane shares
+the caller's tab, i.e. is addressable by bare name). All three are additive
+serde (`default` + `skip_serializing_if`), so both old-client × new-server
+and new-client × old-server decode cleanly.
+
+Servers advertising cross-tab peer messaging include `cross_tab_peers` in the
+`hello` capability list (#289), alongside `caller_scope` (#288). The bundled
+mcp-peer requires `cross_tab_peers` for `list_peers` / `send_message` and
+fails closed (`server_too_old`) when it is absent — a #288 server advertises
+`caller_scope` yet still silently drops cross-tab sends, so the two tokens
+are deliberately distinct.
 
 ### 3.5 Event envelope — stable
 
@@ -449,7 +472,7 @@ hidden from cross-pane callers).
 | `pane_exited` | `id`, `name?`, `role?`, `ts_ms` | Exactly once per pane id. |
 | `events_dropped` | `count: u64`, `ts_ms` | Synthesized when a slow subscriber missed events. Per-subscriber. |
 | `heartbeat` | `ts_ms` | Periodic; only purpose is to detect half-closed connections. Buffer cap 256/subscriber. |
-| `peer_inbox` | `target_pane: usize`, `from_pane: usize`, `from_name?`, `from_kind?`, `body`, `ts_ms` | Always intra-tab by construction. Subscribers filter on `target_pane`. |
+| `peer_inbox` | `target_pane: usize`, `from_pane: usize`, `from_name?`, `from_kind?`, `body`, `ts_ms` | May originate from any tab since #289 (previously intra-tab by construction). Subscribers filter on `target_pane`; pane ids are session-unique so the filter needs no tab awareness. |
 
 **`heartbeat` audience (Q10)**: emitted into the subscribe-stream
 (`renga events` / `Request::Subscribe`). The MCP-side `poll_events` consumes
@@ -591,8 +614,11 @@ major version.
   Relative selectors (`"focused"`, a stable name) never leave the caller's tab.
   An explicit **numeric pane id** may address a pane in another tab, matching
   the cross-tab behavior `close_pane` / `set_pane_identity` already had.
-  `focus_pane` additionally switches the visible tab whenever the resolved pane
-  is not in it — focus the keyboard cannot reach would not be focus.
+  For `send_message` / `peer_send` the numeric-id escape hatch actually
+  *delivers* across tabs since #289 (see Q5 below); the relative-selector
+  rule is unchanged. `focus_pane` additionally switches the visible tab
+  whenever the resolved pane is not in it — focus the keyboard cannot reach
+  would not be focus.
 
   Wire-level: the five stable IPC requests (`list`, `send`, `split`, `focus`,
   `inspect`) carry an **optional** `from_pane`. Omitting it preserves the
@@ -600,9 +626,13 @@ major version.
   Servers advertise a `caller_scope` capability in the `hello` reply; clients
   that depend on caller scoping refuse to run against a server that does not
   advertise it rather than degrade silently.
-- **Cross-tab `peer_send` is a silent no-op (Q5)**: no error is raised;
-  delivery silently fails. v1.0 keeps this for backward compat; the
-  cross-tab story is reopened in v1.1+.
+- **Cross-tab `peer_send` delivers (Q5, revised by #289)**: v1.0 froze the
+  cross-tab silent no-op; #289 removed it. A numeric-id target in another tab
+  delivers; an unresolvable target fails `pane_not_found`; `peer_list` spans
+  every tab. Callers must no longer rely on the tab boundary to contain peer
+  discovery or delivery — the anti-enumeration property moved to the security
+  layer outside renga (owner decision on #289). Version skew is fenced by the
+  `cross_tab_peers` capability token (§3.4).
 - **Detached-mode ok-text fallbacks**: `list_peers` and `send_message` return
   the documented ok-text prefixes (§1.1, §1.2) instead of JSON-RPC errors when
   the renga IPC server is unreachable. The prefixes are part of the wire ABI.
@@ -613,9 +643,10 @@ The following are **not** part of the v1.0 frozen surface. They may exist in
 the codebase but downstream must not depend on them; they may change in any
 minor release.
 
-- **Cross-tab selectors** for `list_panes` / `focus_pane` / `send_message`
-  etc. (Q4 → v1.1+). Workers needing cross-tab coordination must continue to
-  use the "all workers in one tab" pattern.
+- **Cross-tab selectors** for `list_panes` / `focus_pane` etc. (Q4 → v1.1+).
+  `send_message` gained cross-tab delivery by numeric id in #289; for the
+  remaining tab-scoped tools, workers needing cross-tab coordination continue
+  to use numeric-id escape hatches or the "all workers in one tab" pattern.
 - **`spawn_pane.command` opt-out flag** for the `claude → claude
   --dangerously-load-...` rewrite (Q3). Callers who need verbatim execution
   must use a non-`claude` leading token (e.g. `bash -c '…'`).
