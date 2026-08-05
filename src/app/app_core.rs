@@ -435,10 +435,7 @@ impl App {
     /// tab's pane area is genuinely not the visible tab's. The PTY
     /// resize path needs this to size a background tab's panes the way
     /// rendering *that* tab would (Issue #288).
-    pub(crate) fn main_area_layout_for(
-        &self,
-        ws_index: usize,
-    ) -> layout_geometry::MainAreaLayout {
+    pub(crate) fn main_area_layout_for(&self, ws_index: usize) -> layout_geometry::MainAreaLayout {
         let (cols, rows) = self.last_term_size;
         let tab_h = 1u16;
         let status_h: u16 = if self.status_bar_visible || self.rename_input.is_some() {
@@ -615,18 +612,20 @@ impl App {
     /// Called from main.rs on crossterm Resize events so we can update
     /// the cached terminal size and propagate the resize into panes.
     ///
-    /// Every workspace is relaid out, not just the visible one. A hidden
-    /// workspace never passes through `ui::render_panes`, so before
-    /// Issue #288 its `last_pane_rects` and PTY sizes simply stayed at
-    /// the old terminal until the user switched to it — harmless while
-    /// nothing could read a hidden tab, and wrong the moment the
-    /// caller-scoped tools could. Refreshing at the one event that
-    /// invalidates every workspace at once keeps that a property of the
-    /// resize rather than something each reader has to remember: the
-    /// alternative, relayouting defensively in `list_panes`, `inspect`
-    /// and `split`, was three chances to forget the fourth. Resizes are
+    /// Every workspace is relaid out, not just the visible one, so a
+    /// hidden pane's child process reflows now rather than on the first
+    /// read or the next tab switch — otherwise switching to that tab
+    /// briefly shows content laid out for the old width. Resizes are
     /// human-paced and `Pane::resize` no-ops when the size is unchanged,
     /// so the extra passes cost nothing measurable.
+    ///
+    /// This is an optimisation, not the correctness mechanism. A resize
+    /// is only one of several things that move every workspace's pane
+    /// area (a status-bar toggle, a sidebar drag and a layout swap do
+    /// too, and those go through `mark_layout_change`, which refreshes
+    /// only the active tab). What guarantees a caller-scoped IPC reader
+    /// never sees stale geometry is
+    /// `App::refresh_hidden_geometry_for_ipc`, at the IPC boundary.
     pub fn on_terminal_resize(&mut self, cols: u16, rows: u16) {
         self.last_term_size = (cols, rows);
         for i in 0..self.workspaces.len() {

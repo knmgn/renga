@@ -4,6 +4,7 @@ impl App {
     pub(crate) fn handle_app_command(&mut self, cmd: AppCommand) {
         match cmd {
             AppCommand::List { from_pane, reply } => {
+                self.refresh_hidden_geometry_for_ipc();
                 let result = self.handle_list(from_pane);
                 let _ = reply.send(result);
             }
@@ -35,6 +36,7 @@ impl App {
                 from_pane,
                 reply,
             } => {
+                self.refresh_hidden_geometry_for_ipc();
                 let result =
                     self.handle_split(&target, direction, command, name, role, cwd, from_pane);
                 let _ = reply.send(result);
@@ -57,6 +59,7 @@ impl App {
                 from_pane,
                 reply,
             } => {
+                self.refresh_hidden_geometry_for_ipc();
                 let result = self.handle_inspect(&target, lines, include_cursor, from_pane);
                 let _ = reply.send(result);
             }
@@ -101,6 +104,38 @@ impl App {
             } => {
                 let result = self.handle_set_summary(pane_id, summary);
                 let _ = reply.send(result);
+            }
+        }
+    }
+
+    /// Bring every non-visible workspace's cached geometry up to date,
+    /// immediately before serving an IPC command whose answer depends on
+    /// it (`List` reports rects, `Split` judges the min-size guard and
+    /// seeds the new PTY, `Inspect` snapshots at the pane's PTY size).
+    /// `Send` and `Focus` read no geometry and skip this.
+    ///
+    /// This is the single chokepoint for the problem, and being single
+    /// is the point. Only the visible workspace is relaid out as the
+    /// layout changes — a terminal resize, a status-bar toggle, a
+    /// sidebar drag, a layout swap all move every workspace's pane area
+    /// but only refresh the active one. Once caller-scoped tools could
+    /// read a background tab, every such reader inherited stale rects;
+    /// refreshing inside each reader meant four places to remember and,
+    /// demonstrably, a fifth to forget. Doing it here instead means a
+    /// new pane-control command cannot miss it.
+    ///
+    /// The eager sweep in [`App::on_terminal_resize`] is kept for a
+    /// different reason: it lets a hidden pane's child process reflow at
+    /// resize time rather than on the next read, so switching to that
+    /// tab does not flash content laid out for the old width.
+    ///
+    /// Cost is bounded and paid on an agent-paced path, never a
+    /// per-frame one: at most a rect walk per workspace, and
+    /// `Pane::resize` no-ops when the size is unchanged.
+    fn refresh_hidden_geometry_for_ipc(&mut self) {
+        for i in 0..self.workspaces.len() {
+            if i != self.active_tab {
+                self.relayout_workspace(i);
             }
         }
     }

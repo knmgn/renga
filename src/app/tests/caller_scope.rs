@@ -431,6 +431,50 @@ fn a_terminal_resize_relayouts_hidden_workspaces_too() {
     app.shutdown();
 }
 
+/// A resize is not the only thing that moves every workspace's pane
+/// area — a status-bar toggle, a sidebar drag and a layout swap do too,
+/// and those refresh only the active tab. The IPC boundary is what
+/// guarantees a background caller never reads the difference, so these
+/// go through `handle_app_command` rather than calling the handler
+/// directly.
+#[test]
+fn a_global_layout_change_does_not_leak_stale_geometry_to_a_background_caller() {
+    let (mut app, caller, _active) = two_tabs();
+    app.relayout_workspace(0);
+    let before = app.workspaces[0]
+        .last_pane_rects
+        .iter()
+        .find(|(id, _)| *id == caller)
+        .map(|(_, r)| r.height)
+        .expect("caller rect");
+
+    // Alt+S: a global metric, refreshed for the active tab only.
+    app.status_bar_visible = !app.status_bar_visible;
+    app.mark_layout_change();
+
+    let (reply_tx, reply_rx) = oneshot::channel();
+    app.handle_app_command(AppCommand::List {
+        from_pane: Some(caller),
+        reply: reply_tx,
+    });
+    let infos = reply_rx.recv().expect("list reply").expect("list ok");
+    let reported = infos
+        .iter()
+        .find(|p| p.id == caller)
+        .map(|p| p.height)
+        .expect("caller listed");
+
+    assert_ne!(
+        before, reported,
+        "precondition: toggling the status bar changes the pane height"
+    );
+    assert_eq!(
+        reported, app.workspaces[0].last_pane_rects[0].1.height,
+        "the reported height is the workspace's current one"
+    );
+    app.shutdown();
+}
+
 /// Consequence of that invariant: a cross-tab split is judged against
 /// the terminal that exists now, so it refuses exactly where the same
 /// split in the visible tab would.
