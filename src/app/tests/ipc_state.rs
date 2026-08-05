@@ -82,6 +82,7 @@ fn handle_set_pane_identity_rejects_name_collision() {
             Some("beta".into()),
             None,
             None,
+            None,
         )
         .expect("split");
 
@@ -189,6 +190,7 @@ fn handle_split_with_cwd_spawns_pane_in_requested_dir() {
             None,
             None,
             Some(canon.to_string_lossy().to_string()),
+            None,
         )
         .expect("split with cwd succeeds");
 
@@ -224,6 +226,7 @@ fn handle_split_with_invalid_cwd_refuses_before_mutation() {
             Some("should-not-land".into()),
             None,
             Some("/this/path/definitely/does/not/exist/renga-test".into()),
+            None,
         )
         .expect_err("invalid cwd must be refused");
     assert_eq!(err.code, Some(ipc::err_code::CWD_INVALID));
@@ -290,6 +293,7 @@ fn handle_split_relative_cwd_resolves_against_target_pane_cwd() {
             None,
             None,
             Some("child".into()),
+            None,
         )
         .expect("relative cwd resolves");
 
@@ -355,8 +359,11 @@ fn list_includes_pane_cwd() {
     let pane_id = app.ws().focused_pane_id;
 
     let (reply_tx, reply_rx) = oneshot::channel();
-    app.handle_app_command(AppCommand::List { reply: reply_tx });
-    let infos = reply_rx.recv().expect("list reply");
+    app.handle_app_command(AppCommand::List {
+        from_pane: None,
+        reply: reply_tx,
+    });
+    let infos = reply_rx.recv().expect("list reply").expect("list ok");
     let info = infos.iter().find(|p| p.id == pane_id).unwrap();
     assert!(
         info.cwd.is_some(),
@@ -379,8 +386,11 @@ fn list_command_includes_rect_from_last_pane_rects() {
     )];
 
     let (reply_tx, reply_rx) = oneshot::channel();
-    app.handle_app_command(AppCommand::List { reply: reply_tx });
-    let infos = reply_rx.recv().expect("list reply");
+    app.handle_app_command(AppCommand::List {
+        from_pane: None,
+        reply: reply_tx,
+    });
+    let infos = reply_rx.recv().expect("list reply").expect("list ok");
 
     assert_eq!(infos.len(), 1);
     let info = &infos[0];
@@ -497,8 +507,11 @@ fn list_command_ignores_stale_rect_entries_for_removed_panes() {
     ];
 
     let (reply_tx, reply_rx) = oneshot::channel();
-    app.handle_app_command(AppCommand::List { reply: reply_tx });
-    let infos = reply_rx.recv().expect("list reply");
+    app.handle_app_command(AppCommand::List {
+        from_pane: None,
+        reply: reply_tx,
+    });
+    let infos = reply_rx.recv().expect("list reply").expect("list ok");
 
     assert_eq!(infos.len(), 1);
     assert_eq!(infos[0].id, pane_id);
@@ -515,8 +528,11 @@ fn list_command_zero_rect_when_pane_not_in_last_pane_rects() {
     app.ws_mut().last_pane_rects.clear();
 
     let (reply_tx, reply_rx) = oneshot::channel();
-    app.handle_app_command(AppCommand::List { reply: reply_tx });
-    let infos = reply_rx.recv().expect("list reply");
+    app.handle_app_command(AppCommand::List {
+        from_pane: None,
+        reply: reply_tx,
+    });
+    let infos = reply_rx.recv().expect("list reply").expect("list ok");
 
     assert_eq!(infos.len(), 1);
     let info = &infos[0];
@@ -533,11 +549,15 @@ fn app_command_channel_sends_and_receives() {
     // but confirming the types fit together catches breakage.
     let (tx, rx) = mpsc::channel::<AppCommand>();
     let (reply_tx, reply_rx) = oneshot::channel();
-    tx.send(AppCommand::List { reply: reply_tx }).unwrap();
+    tx.send(AppCommand::List {
+        from_pane: None,
+        reply: reply_tx,
+    })
+    .unwrap();
     match rx.try_recv() {
-        Ok(AppCommand::List { reply }) => {
-            reply.send(Vec::new()).unwrap();
-            let list = reply_rx.recv().unwrap();
+        Ok(AppCommand::List { reply, .. }) => {
+            reply.send(Ok(Vec::new())).unwrap();
+            let list = reply_rx.recv().unwrap().expect("list ok");
             assert!(list.is_empty());
         }
         other => panic!("unexpected command: {other:?}"),
@@ -566,8 +586,11 @@ fn handle_set_summary_sets_and_reads_back_via_list() {
     // List response must surface the summary so list_panes / list_peers
     // round-trips it to peers.
     let (reply_tx, reply_rx) = oneshot::channel();
-    app.handle_app_command(AppCommand::List { reply: reply_tx });
-    let infos = reply_rx.recv().expect("list reply");
+    app.handle_app_command(AppCommand::List {
+        from_pane: None,
+        reply: reply_tx,
+    });
+    let infos = reply_rx.recv().expect("list reply").expect("list ok");
     let entry = infos
         .iter()
         .find(|p| p.id == pane_id)
@@ -691,6 +714,7 @@ fn handle_peer_list_surfaces_summary() {
             None,
             None,
             None,
+            None,
         )
         .expect("split");
     app.handle_set_summary(b_id, "running tests".into())
@@ -745,7 +769,7 @@ fn handle_inspect_lines_beyond_height_reaches_scrollback() {
 
     let want = height + 20;
     let payload = app
-        .handle_inspect(&ipc::PaneRef::Focused, Some(want), false)
+        .handle_inspect(&ipc::PaneRef::Focused, Some(want), false, None)
         .expect("inspect succeeds");
 
     assert_eq!(
@@ -788,7 +812,7 @@ fn handle_inspect_small_n_stays_on_screen_grid() {
     seed_numbered_lines(&mut app, height + 40);
 
     let payload = app
-        .handle_inspect(&ipc::PaneRef::Focused, Some(3), false)
+        .handle_inspect(&ipc::PaneRef::Focused, Some(3), false, None)
         .expect("inspect succeeds");
 
     assert_eq!(payload["screen"]["line_count"].as_u64(), Some(3));
@@ -820,7 +844,7 @@ fn handle_inspect_is_pinned_to_live_tail_and_preserves_scroll() {
     app.ws().panes.get(&pane_id).expect("pane").scroll_up(10);
 
     let payload = app
-        .handle_inspect(&ipc::PaneRef::Focused, None, false)
+        .handle_inspect(&ipc::PaneRef::Focused, None, false, None)
         .expect("inspect succeeds");
 
     // The last seeded line sits at the live bottom. A view-anchored
@@ -859,6 +883,7 @@ fn handle_inspect_clamps_at_inspect_max_lines() {
             &ipc::PaneRef::Focused,
             Some(ipc::INSPECT_MAX_LINES + 3000),
             false,
+            None,
         )
         .expect("inspect succeeds");
 

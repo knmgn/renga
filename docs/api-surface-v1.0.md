@@ -127,7 +127,8 @@ the recipient to treat each body as an *instruction*, not transcript text.
 
 Input: `{}`.
 
-Result: text describing every pane in the **current tab** (Q4): `id`, `name`,
+Result: text describing every pane in the **caller's tab** (Q4) — the tab the
+calling pane lives in, which is not necessarily the tab on screen: `id`, `name`,
 `role`, `focused`, geometry (`x`, `y`, `width`, `height`), `cwd`, `kind`,
 `receive_mode`. Geometry fields are `0` before the first layout pass.
 
@@ -404,10 +405,10 @@ Server budgets: 5 s `APP_REPLY_TIMEOUT` (server → app event loop) +
 | Variant | Fields | Notes |
 |---|---|---|
 | `hello` | `client_pid: u32` | Required first message. |
-| `list` | — | |
-| `send` | `target: PaneRef`, `data: string`, `append_enter: bool` (default false) | |
-| `split` | `target: PaneRef`, `direction: vertical\|horizontal`, `command?`, `id?`, `role?`, `cwd?` | |
-| `focus` | `target: PaneRef` | |
+| `list` | `from_pane?: usize` | `from_pane` added in #288; optional, omitted on the wire when absent, so `{"cmd":"list"}` is unchanged. |
+| `send` | `target: PaneRef`, `data: string`, `append_enter: bool` (default false), `from_pane?: usize` | |
+| `split` | `target: PaneRef`, `direction: vertical\|horizontal`, `command?`, `id?`, `role?`, `cwd?`, `from_pane?: usize` | Relative `cwd` resolves against the **target** pane, not `from_pane`. |
+| `focus` | `target: PaneRef`, `from_pane?: usize` | Resolving outside the visible tab switches the visible tab. |
 | `close` | `target: PaneRef` | |
 | `new_tab` | `command?`, `id?`, `label?`, `role?`, `cwd?` | |
 | `subscribe` | — | Switches to event-stream mode after ack. |
@@ -582,9 +583,23 @@ major version.
   `"focused"` only where documented (`spawn_*`, `set_pane_identity`); other
   tools require an explicit `target`.
 - **Tab scoping (Q4)**: `list_panes`, `focus_pane`, `send_message`,
-  `inspect_pane`, `send_keys`, `set_pane_identity`, `close_pane`, and
-  `peer_send` are **scoped to the current tab**. Panes on other tabs are not
-  addressable in v1.0.
+  `inspect_pane`, `send_keys`, `spawn_pane`, `spawn_claude_pane`,
+  `spawn_codex_pane`, and `peer_send` are **scoped to the caller's tab** — the
+  tab the calling pane lives in, *not* whichever tab the user is currently
+  looking at (Issue #288; before that fix these resolved against the visible
+  tab, which silently misdirected every call made from a background tab).
+  Relative selectors (`"focused"`, a stable name) never leave the caller's tab.
+  An explicit **numeric pane id** may address a pane in another tab, matching
+  the cross-tab behavior `close_pane` / `set_pane_identity` already had.
+  `focus_pane` additionally switches the visible tab whenever the resolved pane
+  is not in it — focus the keyboard cannot reach would not be focus.
+
+  Wire-level: the five stable IPC requests (`list`, `send`, `split`, `focus`,
+  `inspect`) carry an **optional** `from_pane`. Omitting it preserves the
+  pre-#288 active-tab semantics exactly, which is what the `renga` CLI sends.
+  Servers advertise a `caller_scope` capability in the `hello` reply; clients
+  that depend on caller scoping refuse to run against a server that does not
+  advertise it rather than degrade silently.
 - **Cross-tab `peer_send` is a silent no-op (Q5)**: no error is raised;
   delivery silently fails. v1.0 keeps this for backward compat; the
   cross-tab story is reopened in v1.1+.

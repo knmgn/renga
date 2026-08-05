@@ -98,6 +98,7 @@ fn handle_peer_send_emits_peer_inbox_to_sibling_in_same_tab() {
             None,
             None,
             None,
+            None,
         )
         .expect("split succeeds");
     // Drain PaneStarted events from the split so the assertion below
@@ -220,11 +221,12 @@ fn handle_peer_send_queues_codex_nudge_and_emits_peer_inbox() {
             None,
             None,
             None,
+            None,
         )
         .expect("split succeeds");
     app.peer_client_kinds
         .insert(sibling_id, PeerClientKind::Codex);
-    app.handle_focus(&ipc::PaneRef::Id(sender_id))
+    app.handle_focus(&ipc::PaneRef::Id(sender_id), None)
         .expect("refocus sender");
     while rx.try_recv().is_ok() {}
 
@@ -284,11 +286,12 @@ fn handle_peer_send_coalesces_codex_nudges_per_pane() {
             None,
             None,
             None,
+            None,
         )
         .expect("split succeeds");
     app.peer_client_kinds
         .insert(sibling_id, PeerClientKind::Codex);
-    app.handle_focus(&ipc::PaneRef::Id(sender_id))
+    app.handle_focus(&ipc::PaneRef::Id(sender_id), None)
         .expect("refocus sender");
 
     app.handle_peer_send(
@@ -409,11 +412,12 @@ fn handle_peer_send_defers_codex_nudge_while_target_is_focused() {
             None,
             None,
             None,
+            None,
         )
         .expect("split succeeds");
     app.peer_client_kinds
         .insert(sibling_id, PeerClientKind::Codex);
-    app.handle_focus(&ipc::PaneRef::Id(sibling_id))
+    app.handle_focus(&ipc::PaneRef::Id(sibling_id), None)
         .expect("focus sibling");
     while rx.try_recv().is_ok() {}
 
@@ -459,7 +463,7 @@ fn handle_peer_send_defers_codex_nudge_while_target_is_focused() {
         "focused Codex target should stay notification-only while it remains focused"
     );
 
-    app.handle_focus(&ipc::PaneRef::Id(sender_id))
+    app.handle_focus(&ipc::PaneRef::Id(sender_id), None)
         .expect("refocus sender");
     app.flush_pending_codex_peer_messages();
     assert!(
@@ -509,11 +513,12 @@ fn handle_peer_send_coalesces_focused_codex_notifications() {
             None,
             None,
             None,
+            None,
         )
         .expect("split succeeds");
     app.peer_client_kinds
         .insert(sibling_id, PeerClientKind::Codex);
-    app.handle_focus(&ipc::PaneRef::Id(sibling_id))
+    app.handle_focus(&ipc::PaneRef::Id(sibling_id), None)
         .expect("focus sibling");
 
     app.handle_peer_send(
@@ -555,11 +560,12 @@ fn focused_codex_notification_esc_dismisses_without_queueing_nudge() {
             None,
             None,
             None,
+            None,
         )
         .expect("split succeeds");
     app.peer_client_kinds
         .insert(sibling_id, PeerClientKind::Codex);
-    app.handle_focus(&ipc::PaneRef::Id(sibling_id))
+    app.handle_focus(&ipc::PaneRef::Id(sibling_id), None)
         .expect("focus sibling");
     app.handle_peer_send(
         sender_id,
@@ -591,11 +597,12 @@ fn focused_codex_notification_commit_clears_notification() {
             None,
             None,
             None,
+            None,
         )
         .expect("split succeeds");
     app.peer_client_kinds
         .insert(sibling_id, PeerClientKind::Codex);
-    app.handle_focus(&ipc::PaneRef::Id(sibling_id))
+    app.handle_focus(&ipc::PaneRef::Id(sibling_id), None)
         .expect("focus sibling");
     app.handle_peer_send(
         sender_id,
@@ -627,11 +634,12 @@ fn flush_pending_codex_peer_messages_requires_ready_screen() {
             None,
             None,
             None,
+            None,
         )
         .expect("split succeeds");
     app.peer_client_kinds
         .insert(sibling_id, PeerClientKind::Codex);
-    app.handle_focus(&ipc::PaneRef::Id(sender_id))
+    app.handle_focus(&ipc::PaneRef::Id(sender_id), None)
         .expect("refocus sender");
     {
         let pane = app.ws_mut().panes.get_mut(&sibling_id).expect("pane");
@@ -690,11 +698,12 @@ fn flush_pending_codex_peer_messages_waits_for_non_blank_codex_screen() {
             None,
             None,
             None,
+            None,
         )
         .expect("split succeeds");
     app.peer_client_kinds
         .insert(sibling_id, PeerClientKind::Codex);
-    app.handle_focus(&ipc::PaneRef::Id(sender_id))
+    app.handle_focus(&ipc::PaneRef::Id(sender_id), None)
         .expect("refocus sender");
     app.handle_peer_send(
         sender_id,
@@ -775,11 +784,12 @@ fn flush_pending_codex_peer_messages_does_not_interrupt_existing_codex_draft() {
             None,
             None,
             None,
+            None,
         )
         .expect("split succeeds");
     app.peer_client_kinds
         .insert(sibling_id, PeerClientKind::Codex);
-    app.handle_focus(&ipc::PaneRef::Id(sender_id))
+    app.handle_focus(&ipc::PaneRef::Id(sender_id), None)
         .expect("refocus sender");
     app.handle_peer_send(
         sender_id,
@@ -840,6 +850,7 @@ fn handle_peer_list_excludes_caller_and_lists_siblings() {
             Some("sibling".into()),
             Some("worker".into()),
             None,
+            None,
         )
         .expect("split succeeds");
     let peers = app.handle_peer_list(sender_id).expect("peer list");
@@ -869,6 +880,7 @@ fn handle_peer_send_dedupes_identical_payload_within_window() {
         .handle_split(
             &ipc::PaneRef::Focused,
             ipc::Direction::Vertical,
+            None,
             None,
             None,
             None,
@@ -909,6 +921,7 @@ fn handle_peer_send_distinct_bodies_are_not_deduped() {
         .handle_split(
             &ipc::PaneRef::Focused,
             ipc::Direction::Vertical,
+            None,
             None,
             None,
             None,
@@ -956,12 +969,14 @@ fn handle_peer_send_dedupe_does_not_collapse_distinct_senders() {
             None,
             None,
             None,
+            None,
         )
         .expect("split succeeds (sender_b)");
     let target = app
         .handle_split(
             &ipc::PaneRef::Id(sender_a),
             ipc::Direction::Horizontal,
+            None,
             None,
             None,
             None,

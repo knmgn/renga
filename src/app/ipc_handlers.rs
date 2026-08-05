@@ -3,50 +3,26 @@ use super::*;
 impl App {
     pub(crate) fn handle_app_command(&mut self, cmd: AppCommand) {
         match cmd {
-            AppCommand::List { reply } => {
-                let ws = self.ws();
-                let focused = ws.focused_pane_id;
-                let mut name_by_id: HashMap<usize, String> = HashMap::new();
-                for (name, id) in &ws.pane_names {
-                    name_by_id.insert(*id, name.clone());
-                }
-                let rect_by_id: HashMap<usize, Rect> = ws.last_pane_rects.iter().copied().collect();
-                let mut infos: Vec<PaneInfo> = Vec::new();
-                for id in ws.layout.collect_pane_ids() {
-                    let pane = ws.panes.get(&id);
-                    let role = pane.and_then(|p| p.role.clone());
-                    let cwd = pane.map(|p| p.cwd.to_string_lossy().to_string());
-                    let kind = self.peer_client_kinds.get(&id).copied();
-                    let rect = rect_by_id.get(&id).copied().unwrap_or_default();
-                    let summary = pane.and_then(|p| p.summary.clone());
-                    infos.push(PaneInfo {
-                        id,
-                        name: name_by_id.get(&id).cloned(),
-                        role,
-                        focused: id == focused,
-                        x: rect.x,
-                        y: rect.y,
-                        width: rect.width,
-                        height: rect.height,
-                        cwd,
-                        kind,
-                        receive_mode: kind.map(|k| k.receive_mode()),
-                        summary,
-                    });
-                }
-                let _ = reply.send(infos);
+            AppCommand::List { from_pane, reply } => {
+                let result = self.handle_list(from_pane);
+                let _ = reply.send(result);
             }
             AppCommand::Send {
                 target,
                 data,
                 append_enter,
+                from_pane,
                 reply,
             } => {
-                let result = self.handle_send(&target, &data, append_enter);
+                let result = self.handle_send(&target, &data, append_enter, from_pane);
                 let _ = reply.send(result);
             }
-            AppCommand::Focus { target, reply } => {
-                let result = self.handle_focus(&target);
+            AppCommand::Focus {
+                target,
+                from_pane,
+                reply,
+            } => {
+                let result = self.handle_focus(&target, from_pane);
                 let _ = reply.send(result);
             }
             AppCommand::Split {
@@ -56,9 +32,11 @@ impl App {
                 name,
                 role,
                 cwd,
+                from_pane,
                 reply,
             } => {
-                let result = self.handle_split(&target, direction, command, name, role, cwd);
+                let result =
+                    self.handle_split(&target, direction, command, name, role, cwd, from_pane);
                 let _ = reply.send(result);
             }
             AppCommand::NewTab {
@@ -76,9 +54,10 @@ impl App {
                 target,
                 lines,
                 include_cursor,
+                from_pane,
                 reply,
             } => {
-                let result = self.handle_inspect(&target, lines, include_cursor);
+                let result = self.handle_inspect(&target, lines, include_cursor, from_pane);
                 let _ = reply.send(result);
             }
             AppCommand::Close { target, reply } => {
@@ -124,6 +103,61 @@ impl App {
                 let _ = reply.send(result);
             }
         }
+    }
+
+    /// `list_panes` / `renga list`: the panes of the caller's tab.
+    ///
+    /// Before #288 this always read the active workspace, which made
+    /// the tool's own description ("panes in the current tab") false for
+    /// any agent whose tab was not the one on screen — and, worse, made
+    /// the ids it returned unsafe to feed straight back into
+    /// `send_keys`.
+    pub(crate) fn handle_list(
+        &self,
+        from_pane: Option<usize>,
+    ) -> std::result::Result<Vec<PaneInfo>, ipc::CodedError> {
+        let ws_idx = self.resolve_caller_workspace(from_pane)?;
+        Ok(self.pane_infos_for_workspace(ws_idx))
+    }
+
+    /// Build the wire [`PaneInfo`] list for one workspace. Shared by
+    /// `List` and the single-pane replies of `SetPaneIdentity` /
+    /// `SetSummary` so the three can't disagree about what a pane
+    /// record contains.
+    pub(crate) fn pane_infos_for_workspace(&self, ws_idx: usize) -> Vec<PaneInfo> {
+        let Some(ws) = self.workspaces.get(ws_idx) else {
+            return Vec::new();
+        };
+        let focused = ws.focused_pane_id;
+        let mut name_by_id: HashMap<usize, String> = HashMap::new();
+        for (name, id) in &ws.pane_names {
+            name_by_id.insert(*id, name.clone());
+        }
+        let rect_by_id: HashMap<usize, Rect> = ws.last_pane_rects.iter().copied().collect();
+        let mut infos: Vec<PaneInfo> = Vec::new();
+        for id in ws.layout.collect_pane_ids() {
+            let pane = ws.panes.get(&id);
+            let role = pane.and_then(|p| p.role.clone());
+            let cwd = pane.map(|p| p.cwd.to_string_lossy().to_string());
+            let kind = self.peer_client_kinds.get(&id).copied();
+            let rect = rect_by_id.get(&id).copied().unwrap_or_default();
+            let summary = pane.and_then(|p| p.summary.clone());
+            infos.push(PaneInfo {
+                id,
+                name: name_by_id.get(&id).cloned(),
+                role,
+                focused: id == focused,
+                x: rect.x,
+                y: rect.y,
+                width: rect.width,
+                height: rect.height,
+                cwd,
+                kind,
+                receive_mode: kind.map(|k| k.receive_mode()),
+                summary,
+            });
+        }
+        infos
     }
 
     /// Resolve `from_pane` to its workspace, then return every other
@@ -358,14 +392,10 @@ impl App {
         target: &PaneRef,
         lines: Option<usize>,
         include_cursor: bool,
+        from_pane: Option<usize>,
     ) -> std::result::Result<serde_json::Value, ipc::CodedError> {
-        let ws = self.ws();
-        let pane_id = ws.resolve_pane_ref(target).ok_or_else(|| {
-            ipc::CodedError::new(
-                ipc::err_code::PANE_NOT_FOUND,
-                format!("pane not found: {target:?}"),
-            )
-        })?;
+        let (ws_idx, pane_id) = self.resolve_request_target(from_pane, target)?;
+        let ws = &self.workspaces[ws_idx];
         let pane = ws
             .panes
             .get(&pane_id)
@@ -549,39 +579,48 @@ impl App {
         target: &PaneRef,
         data: &[u8],
         append_enter: bool,
+        from_pane: Option<usize>,
     ) -> std::result::Result<(), ipc::CodedError> {
-        let pane_id = self.ws().resolve_pane_ref(target).ok_or_else(|| {
-            ipc::CodedError::new(
-                ipc::err_code::PANE_NOT_FOUND,
-                format!("pane not found: {target:?}"),
-            )
-        })?;
-        let pane =
-            self.ws_mut().panes.get_mut(&pane_id).ok_or_else(|| {
-                ipc::CodedError::new(ipc::err_code::PANE_VANISHED, "pane vanished")
-            })?;
+        let (ws_idx, pane_id) = self.resolve_request_target(from_pane, target)?;
+        let pane = self.workspaces[ws_idx]
+            .panes
+            .get_mut(&pane_id)
+            .ok_or_else(|| ipc::CodedError::new(ipc::err_code::PANE_VANISHED, "pane vanished"))?;
         write_input_to_pane(pane, data, append_enter)?;
         self.dirty = true;
         Ok(())
     }
 
+    /// Move keyboard focus. When the target lives in a tab that is not
+    /// on screen, the visible tab switches too.
+    ///
+    /// That is deliberately disruptive, and the alternative is worse:
+    /// setting `focused_pane_id` on a hidden workspace moves no
+    /// keyboard focus at all — the user keeps typing into the tab they
+    /// can see — so the tool would report success while doing nothing
+    /// observable. "Focus this pane" has to mean the keystrokes land
+    /// there. Both the MCP tool description and the docs say so.
     pub(crate) fn handle_focus(
         &mut self,
         target: &PaneRef,
+        from_pane: Option<usize>,
     ) -> std::result::Result<(), ipc::CodedError> {
-        let pane_id = self.ws().resolve_pane_ref(target).ok_or_else(|| {
-            ipc::CodedError::new(
-                ipc::err_code::PANE_NOT_FOUND,
-                format!("pane not found: {target:?}"),
-            )
-        })?;
-        let ws = self.ws_mut();
+        let (ws_idx, pane_id) = self.resolve_request_target(from_pane, target)?;
+        let ws = &mut self.workspaces[ws_idx];
         ws.focused_pane_id = pane_id;
         ws.focus_target = FocusTarget::Pane;
+        if ws_idx != self.active_tab {
+            self.active_tab = ws_idx;
+            // Mirrors the Alt+Left / Alt+Right / Alt+N tab switch: an
+            // overlay anchored to the tab we just left has nothing to
+            // point at any more.
+            self.suspend_overlay();
+        }
         self.dirty = true;
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn handle_split(
         &mut self,
         target: &PaneRef,
@@ -590,33 +629,33 @@ impl App {
         name: Option<String>,
         role: Option<String>,
         cwd: Option<String>,
+        from_pane: Option<usize>,
     ) -> std::result::Result<usize, ipc::CodedError> {
-        let target_pane_id = self.ws().resolve_pane_ref(target).ok_or_else(|| {
-            ipc::CodedError::new(
-                ipc::err_code::PANE_NOT_FOUND,
-                format!("pane not found: {target:?}"),
-            )
-        })?;
-        let base = self
-            .ws()
+        let (ws_idx, target_pane_id) = self.resolve_request_target(from_pane, target)?;
+        // A relative `cwd` is resolved against the *target* pane, not
+        // the caller: that is the pre-#288 contract for this request and
+        // `from_pane` only narrows which panes `target` may name. MCP
+        // callers that want caller-relative paths absolutize before
+        // sending (see `resolve_mcp_cwd`).
+        let base = self.workspaces[ws_idx]
             .panes
             .get(&target_pane_id)
             .map(|p| p.cwd.clone())
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
         let cwd_override = resolve_optional_cwd(cwd.as_deref(), &base)?;
-        let prev_focus = self.ws().focused_pane_id;
-        self.ws_mut().focused_pane_id = target_pane_id;
         let split_dir = match direction {
             ipc::Direction::Vertical => SplitDirection::Vertical,
             ipc::Direction::Horizontal => SplitDirection::Horizontal,
         };
+        // No focus round-trip any more: the indexed primitive takes the
+        // target directly, so a refused split leaves every workspace's
+        // focus exactly where it was instead of relying on a restore.
         let new_pane_id = match self
-            .split_focused_pane(split_dir, cwd_override)
+            .split_pane_in_workspace(ws_idx, target_pane_id, split_dir, false, cwd_override)
             .map_err(|e| ipc::CodedError::new(ipc::err_code::IO_ERROR, e.to_string()))?
         {
             Some(id) => id,
             None => {
-                self.ws_mut().focused_pane_id = prev_focus;
                 return Err(ipc::CodedError::new(
                     ipc::err_code::SPLIT_REFUSED,
                     "split refused (max panes reached or pane too small)",
@@ -624,7 +663,7 @@ impl App {
             }
         };
         let effective_command = command.or_else(|| default_command_for_role(role.as_deref()));
-        if let Some(pane) = self.ws_mut().panes.get_mut(&new_pane_id) {
+        if let Some(pane) = self.workspaces[ws_idx].panes.get_mut(&new_pane_id) {
             if let Some(cmd) = effective_command {
                 pane.queue_startup_command(&cmd);
             }
@@ -634,7 +673,7 @@ impl App {
         }
         if let Some(name) = name {
             if !name.is_empty() {
-                self.ws_mut().pane_names.insert(name, new_pane_id);
+                self.workspaces[ws_idx].pane_names.insert(name, new_pane_id);
             }
         }
         self.emit_pane_started(new_pane_id);

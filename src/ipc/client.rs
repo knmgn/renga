@@ -25,6 +25,35 @@ use super::{Event, Request, Response, RESPONSE_TIMEOUT};
 /// the helper thread is detached and cleaned up by the OS when the
 /// client process exits.
 pub fn send_request(endpoint: &EndpointName, request: &Request) -> Result<Response> {
+    send_request_inner(endpoint, request, None)
+}
+
+/// Like [`send_request`], but refuses to send unless the server
+/// advertised `required_cap` in its hello (see
+/// [`super::CAP_CALLER_SCOPE`]).
+///
+/// This is the **fail-closed** path for version skew. renga registers
+/// `renga mcp-peer` by absolute path, so upgrading the binary on disk
+/// leaves the *old* server process running while every newly spawned
+/// mcp-peer is the *new* one. An old server parses `from_pane` as an
+/// unknown field, drops it, and happily operates on whatever tab the
+/// human is looking at — a wrong-tab `send_keys` with no error
+/// anywhere. Erroring out with "restart renga" is the only safe
+/// answer; silently falling back to the old semantics is exactly the
+/// bug #288 exists to remove.
+pub fn send_request_requiring(
+    endpoint: &EndpointName,
+    request: &Request,
+    required_cap: &'static str,
+) -> Result<Response> {
+    send_request_inner(endpoint, request, Some(required_cap))
+}
+
+fn send_request_inner(
+    endpoint: &EndpointName,
+    request: &Request,
+    required_cap: Option<&'static str>,
+) -> Result<Response> {
     let name_string = endpoint.as_str().to_string();
     let endpoint_clone = endpoint.clone();
     let request_clone = request.clone();
@@ -36,7 +65,7 @@ pub fn send_request(endpoint: &EndpointName, request: &Request) -> Result<Respon
                 let name = make_connection_name(&endpoint_clone)?;
                 let conn = Stream::connect(name)
                     .with_context(|| format!("connect to {}", endpoint_clone.as_str()))?;
-                converse(conn, &request_clone)
+                converse(conn, &request_clone, required_cap)
             })();
             let _ = tx.send(result);
         })
@@ -66,7 +95,11 @@ fn make_connection_name(endpoint: &EndpointName) -> Result<interprocess::local_s
     }
 }
 
-fn converse(conn: Stream, request: &Request) -> Result<Response> {
+fn converse(
+    conn: Stream,
+    request: &Request,
+    required_cap: Option<&'static str>,
+) -> Result<Response> {
     let mut reader = BufReader::new(conn);
 
     // Handshake
@@ -76,8 +109,15 @@ fn converse(conn: Stream, request: &Request) -> Result<Response> {
     write_request_line(reader.get_mut(), &hello)?;
     let hello_resp = read_response_line(&mut reader)?;
     match hello_resp {
-        Response::Hello { session_token, .. } => {
+        Response::Hello {
+            session_token,
+            capabilities,
+            ..
+        } => {
             verify_session_token(&session_token, std::env::var(ENV_TOKEN).ok().as_deref())?;
+            if let Some(cap) = required_cap {
+                require_capability(cap, &capabilities)?;
+            }
         }
         Response::Err { message, code } => {
             return Err(anyhow!(
@@ -249,6 +289,26 @@ fn verify_session_token(server_token: &str, expected: Option<&str>) -> Result<()
     }
 }
 
+/// Reject the call when the connected server does not advertise
+/// `cap`. The message names the remedy (restart renga) because the
+/// cause is always the same: a renga process started from an older
+/// binary than the client that is talking to it.
+fn require_capability(cap: &str, advertised: &[String]) -> Result<()> {
+    if advertised.iter().any(|c| c == cap) {
+        return Ok(());
+    }
+    Err(anyhow!(
+        "[server_too_old] this renga server does not support the `{cap}` protocol capability \
+         (it advertised: {advertised}). The running renga process predates this feature — \
+         restart renga so the server and its panes speak the same protocol.",
+        advertised = if advertised.is_empty() {
+            "none".to_string()
+        } else {
+            advertised.join(", ")
+        }
+    ))
+}
+
 fn read_response_line<R: BufRead>(r: &mut R) -> Result<Response> {
     let mut buf = String::new();
     let n = r.read_line(&mut buf)?;
@@ -300,7 +360,7 @@ mod tests {
     #[test]
     fn write_request_line_is_newline_terminated() {
         let mut out: Vec<u8> = Vec::new();
-        let req = Request::List;
+        let req = Request::List { from_pane: None };
         write_request_line(&mut out, &req).unwrap();
         assert!(out.ends_with(b"\n"));
         // The line without the trailing newline must parse back to the
@@ -308,7 +368,7 @@ mod tests {
         // multi-line JSON.
         let line = std::str::from_utf8(&out).unwrap().trim_end();
         let parsed: Request = serde_json::from_str(line).unwrap();
-        assert_eq!(parsed, Request::List);
+        assert_eq!(parsed, Request::List { from_pane: None });
     }
 
     #[test]
@@ -317,6 +377,31 @@ mod tests {
         let mut reader = std::io::BufReader::new(input);
         let resp = read_response_line(&mut reader).unwrap();
         assert!(matches!(resp, Response::Ok { .. }));
+    }
+
+    // ─── Issue #288 version-skew gate ─────────────────────
+
+    #[test]
+    fn require_capability_accepts_an_advertised_token() {
+        let advertised = vec![super::super::CAP_CALLER_SCOPE.to_string()];
+        assert!(require_capability(super::super::CAP_CALLER_SCOPE, &advertised).is_ok());
+    }
+
+    /// An old renga process advertises nothing. Failing closed here is
+    /// what keeps a new mcp-peer from issuing a `from_pane` request the
+    /// old server silently strips and executes against the wrong tab.
+    #[test]
+    fn require_capability_fails_closed_and_names_the_remedy() {
+        let err = require_capability(super::super::CAP_CALLER_SCOPE, &[]).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("server_too_old"), "got: {msg}");
+        assert!(msg.contains("restart renga"), "got: {msg}");
+    }
+
+    #[test]
+    fn require_capability_ignores_unrelated_tokens() {
+        let advertised = vec!["something_else".to_string()];
+        assert!(require_capability(super::super::CAP_CALLER_SCOPE, &advertised).is_err());
     }
 
     #[test]
@@ -376,6 +461,7 @@ mod tests {
             id: Some("foo".into()),
             role: None,
             cwd: None,
+            from_pane: None,
         };
         let mut out: Vec<u8> = Vec::new();
         write_request_line(&mut out, &req).unwrap();

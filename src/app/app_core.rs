@@ -351,19 +351,35 @@ impl App {
     /// cooldown). Safe to call without a Frame — uses the cached
     /// `last_term_size`.
     pub fn relayout_panes(&mut self) -> bool {
+        self.relayout_workspace(self.active_tab)
+    }
+
+    /// [`Self::relayout_panes`] for an arbitrary workspace.
+    ///
+    /// The visible tab gets this for free from `ui::render_panes` every
+    /// frame; a hidden one never renders, so anything that mutates a
+    /// hidden layout (an MCP `spawn_*` scoped to another tab) has to ask
+    /// for it explicitly or leave `last_pane_rects` describing a layout
+    /// that no longer exists. Sizing hidden PTYs here is not premature:
+    /// it is the same size `render_panes` would apply the moment that
+    /// tab is switched to, just applied early enough that the child
+    /// process starts at the right dimensions.
+    pub fn relayout_workspace(&mut self, ws_index: usize) -> bool {
+        if self.workspaces.get(ws_index).is_none() {
+            return false;
+        }
         let (cols, rows) = self.last_term_size;
         if cols < 20 || rows < 5 {
             return false;
         }
 
-        let rects = self
-            .ws()
+        let rects = self.workspaces[ws_index]
             .layout
-            .calculate_rects(self.main_area_layout().panes);
+            .calculate_rects(self.main_area_layout_for(ws_index).panes);
 
         let mut any_changed = false;
         for (pane_id, rect) in &rects {
-            if let Some(pane) = self.ws_mut().panes.get_mut(pane_id) {
+            if let Some(pane) = self.workspaces[ws_index].panes.get_mut(pane_id) {
                 let inner_rows = rect.height.saturating_sub(2);
                 let inner_cols = rect.width.saturating_sub(2);
                 if pane.resize(inner_rows, inner_cols).unwrap_or(false) {
@@ -372,7 +388,7 @@ impl App {
             }
         }
 
-        self.ws_mut().last_pane_rects = rects;
+        self.workspaces[ws_index].last_pane_rects = rects;
         any_changed
     }
 
@@ -391,6 +407,20 @@ impl App {
     /// main area, macOS tip, status bar); only the horizontal split is
     /// shared, via `layout_geometry::compute`.
     pub(crate) fn main_area_layout(&self) -> layout_geometry::MainAreaLayout {
+        self.main_area_layout_for(self.active_tab)
+    }
+
+    /// [`Self::main_area_layout`] for an arbitrary workspace.
+    ///
+    /// Two of the horizontal inputs — whether the file tree is open and
+    /// whether the preview is active — are per-workspace, so a hidden
+    /// tab's pane area is genuinely not the visible tab's. The PTY
+    /// resize path needs this to size a background tab's panes the way
+    /// rendering *that* tab would (Issue #288).
+    pub(crate) fn main_area_layout_for(
+        &self,
+        ws_index: usize,
+    ) -> layout_geometry::MainAreaLayout {
         let (cols, rows) = self.last_term_size;
         let tab_h = 1u16;
         let status_h: u16 = if self.status_bar_visible || self.rename_input.is_some() {
@@ -408,7 +438,9 @@ impl App {
         // they are two rows taller than what gets painted.
         let macos_tip_h: u16 = if self.macos_tip_visible { 2 } else { 0 };
         let main_h = rows.saturating_sub(tab_h + status_h + macos_tip_h);
-        layout_geometry::compute(self.main_area_input(Rect::new(0, tab_h, cols, main_h)))
+        layout_geometry::compute(
+            self.main_area_input_for(ws_index, Rect::new(0, tab_h, cols, main_h)),
+        )
     }
 
     /// Collect the horizontal-layout inputs for `area`.
@@ -419,14 +451,26 @@ impl App {
     ///
     /// [`layout_geometry::compute`]: crate::app::layout_geometry::compute
     pub(crate) fn main_area_input(&self, area: Rect) -> layout_geometry::MainAreaInput {
+        self.main_area_input_for(self.active_tab, area)
+    }
+
+    /// [`Self::main_area_input`] for an arbitrary workspace. Falls back
+    /// to the active tab's panel state if `ws_index` is out of range, so
+    /// callers get the pre-#288 answer rather than a panic.
+    pub(crate) fn main_area_input_for(
+        &self,
+        ws_index: usize,
+        area: Rect,
+    ) -> layout_geometry::MainAreaInput {
+        let ws = self.workspaces.get(ws_index).unwrap_or_else(|| self.ws());
         layout_geometry::MainAreaInput {
             area,
             org_sidebar_mode: self.org_sidebar_mode,
             org_sidebar_visible: self.org_sidebar_visible,
             org_sidebar_width: self.org_sidebar_width,
-            file_tree_visible: self.ws().file_tree_visible,
+            file_tree_visible: ws.file_tree_visible,
             file_tree_width: self.file_tree_width,
-            preview_active: self.ws().preview.is_active(),
+            preview_active: ws.preview.is_active(),
             preview_width: self.preview_width,
             layout_swapped: self.layout_swapped,
         }

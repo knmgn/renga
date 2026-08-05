@@ -86,12 +86,12 @@ Exposed by the MCP server to each Claude pane:
 
 | Tool | Effect |
 |---|---|
-| `list_panes` | Lists every pane in the caller's tab with id, optional name / role, focus flag, cwd, and terminal geometry. |
+| `list_panes` | Lists every pane in the caller's tab — the tab the calling pane lives in, not whichever tab the user is currently viewing — with id, optional name / role, focus flag, cwd, and terminal geometry. |
 | `spawn_pane(direction, …)` | Splits a target pane. Optional `command`, `name`, `role`, `cwd`. A bare `command="claude"` (or `claude <args>`) is auto-upgraded to the `Alt+P` peer-enabled launch line so the new pane joins the `renga-peers` network without the caller having to remember `--dangerously-load-development-channels`. |
 | `spawn_claude_pane(direction, …)` | Higher-level convenience for launching Claude. Takes structured `permission_mode` / `model` / `args[]` fields instead of a free-form command string, always enables the peer channel, and keeps launch policy in renga. Reserved flags (`--dangerously-load-development-channels` / `--permission-mode` / `--model`) inside `args[]` are rejected with `invalid-params`. |
 | `spawn_codex_pane(direction, …)` | Higher-level convenience for launching Codex. Takes structured `args[]`, builds the final `codex ...` command with renga-owned shell quoting, and relies on `renga mcp install --client codex` for the MCP-side `RENGA_PEER_CLIENT_KIND=codex` registration. |
 | `close_pane(target)` | Closes a pane. Refuses with `last_pane` when it's the only pane of the only tab. |
-| `focus_pane(target)` | Moves keyboard focus inside the same tab. Use sparingly — yanking focus out from under the user is disruptive. |
+| `focus_pane(target)` | Moves keyboard focus. **If the resolved pane is not in the tab the user is currently viewing, the visible tab switches to it** — deliberately so, since focus the keyboard cannot reach is not focus, but it makes this the most disruptive pane tool. Use sparingly. |
 | `new_tab(…)` | Opens a brand-new tab with a fresh pane and switches focus to it. Accepts the same `cwd` option as `spawn_pane`, plus the same `claude` auto-upgrade when `command` starts with `claude`. |
 | `inspect_pane(target, …)` | Snapshots another pane's visible screen so an orchestrator can detect prompts, banners, or mode changes without asking the target Claude to describe itself. Text by default; `format="grid"` returns row-addressable JSON. `lines=N` returns the last N lines, reaching into scrollback history when N exceeds the visible height (2000-line cap) — recent output stays readable even in small panes. |
 | `send_keys(target, …)` | Sends raw PTY key input (`Enter`, `Esc`, arrows, `Ctrl+<letter>`, literal text, etc.) to another pane. Use this for interactive prompts or TUIs that cannot consume `send_message`. |

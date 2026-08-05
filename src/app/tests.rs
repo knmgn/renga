@@ -1,3 +1,4 @@
+mod caller_scope;
 mod close_confirm;
 mod codex_peer;
 mod ipc_state;
