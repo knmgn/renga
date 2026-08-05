@@ -354,6 +354,112 @@ fn flush_delivers_codex_nudge_to_background_tab_focused_pane() {
     );
     app.shutdown();
 }
+
+#[test]
+fn flush_promotes_queued_draft_to_notification_when_target_tab_activates() {
+    // A nudge queued while its tab was hidden must not stall when the
+    // human switches onto the pane before delivery: the flush promotes
+    // the still-undelivered draft into the focused-pane notification
+    // overlay instead of skipping it forever (Codex review of #289).
+    let mut app = App::new(40, 80).expect("App::new");
+    let sender_id = app.ws().focused_pane_id;
+    let codex_pane = app
+        .handle_new_tab(None, None, None, None, None)
+        .expect("new tab succeeds");
+    app.peer_client_kinds
+        .insert(codex_pane, PeerClientKind::Codex);
+    assert!(app.switch_tab(0), "back to the sender tab");
+
+    app.handle_peer_send(
+        sender_id,
+        &ipc::PaneRef::Id(codex_pane),
+        "queued while hidden".to_string(),
+    )
+    .expect("peer send");
+    assert!(app.pending_codex_peer_messages.contains_key(&codex_pane));
+
+    // The human switches onto the Codex tab before any flush delivered
+    // the draft (its screen was never ready).
+    assert!(app.switch_tab(1), "activate the codex tab");
+    app.flush_pending_codex_peer_messages();
+
+    assert!(
+        !app.pending_codex_peer_messages.contains_key(&codex_pane),
+        "promotion must consume the queued draft"
+    );
+    let notification = app
+        .visible_codex_peer_notification()
+        .expect("draft should surface as a visible notification");
+    assert_eq!(notification.target_pane, codex_pane);
+    app.shutdown();
+}
+
+#[test]
+fn flush_keeps_half_delivered_nudge_queued_while_target_pane_is_watched() {
+    // Once the draft text has been typed into the composer (SubmitAt
+    // stage), activating the tab must neither promote it to a
+    // notification (the text is already in the pane) nor press Enter
+    // under the user's cursor. It completes after the user leaves.
+    let mut app = App::new(40, 80).expect("App::new");
+    let sender_id = app.ws().focused_pane_id;
+    let codex_pane = app
+        .handle_new_tab(None, None, None, None, None)
+        .expect("new tab succeeds");
+    app.peer_client_kinds
+        .insert(codex_pane, PeerClientKind::Codex);
+    {
+        let pane = app.workspaces[1]
+            .panes
+            .get_mut(&codex_pane)
+            .expect("codex pane");
+        let mut parser = pane.parser.lock().unwrap();
+        parser.process(b"\x1b[?25h\x1b[2J\x1b[Hready for input\n\nenter to send");
+    }
+    assert!(app.switch_tab(0), "back to the sender tab");
+    app.handle_peer_send(
+        sender_id,
+        &ipc::PaneRef::Id(codex_pane),
+        "half delivered".to_string(),
+    )
+    .expect("peer send");
+    app.flush_pending_codex_peer_messages();
+    assert!(
+        matches!(
+            app.pending_codex_peer_messages
+                .get(&codex_pane)
+                .and_then(|q| q.front()),
+            Some(PendingCodexPeerDelivery::SubmitAt(_))
+        ),
+        "draft should have been typed into the background pane"
+    );
+    if let Some(queue) = app.pending_codex_peer_messages.get_mut(&codex_pane) {
+        queue[0] = PendingCodexPeerDelivery::SubmitAt(Instant::now());
+    }
+
+    assert!(app.switch_tab(1), "activate the codex tab mid-delivery");
+    app.flush_pending_codex_peer_messages();
+    assert!(
+        matches!(
+            app.pending_codex_peer_messages
+                .get(&codex_pane)
+                .and_then(|q| q.front()),
+            Some(PendingCodexPeerDelivery::SubmitAt(_))
+        ),
+        "watched pane must not have the submit pressed under the cursor"
+    );
+    assert!(
+        app.visible_codex_peer_notification().is_none(),
+        "half-delivered nudge must not double-surface as a notification"
+    );
+
+    assert!(app.switch_tab(0), "leave the codex tab again");
+    app.flush_pending_codex_peer_messages();
+    assert!(
+        !app.pending_codex_peer_messages.contains_key(&codex_pane),
+        "submit should complete once the pane is unwatched"
+    );
+    app.shutdown();
+}
 #[test]
 fn handle_peer_send_queues_codex_nudge_and_emits_peer_inbox() {
     let mut app = App::new(40, 80).expect("App::new");
