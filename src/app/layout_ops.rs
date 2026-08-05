@@ -166,6 +166,21 @@ impl App {
             return Ok(None);
         }
 
+        // A hidden workspace's `last_pane_rects` are frozen at whatever
+        // they were when it was last on screen: only the active tab is
+        // relaid out on a terminal resize or a sidebar toggle. Reading
+        // them here without refreshing would run the min-size guard —
+        // and seed the new PTY — against a terminal width that no
+        // longer exists, in both directions: a split that should be
+        // refused gets through after the user shrinks the terminal, and
+        // a legal one is refused after they enlarge it. The active tab
+        // is already accurate (`ui::render_panes` rewrites its rects
+        // every frame), so leave it alone rather than pay a redundant
+        // resize pass on the TUI's own split path.
+        if ws_index != self.active_tab {
+            self.relayout_workspace(ws_index);
+        }
+
         let focused_rect = self.workspaces[ws_index]
             .last_pane_rects
             .iter()

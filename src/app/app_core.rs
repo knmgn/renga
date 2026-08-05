@@ -263,11 +263,24 @@ impl App {
         self.min_pane_height = height.max(1);
     }
 
-    /// Emit a [`PaneStarted`] event for the given pane id. Pulls the
-    /// current name/role from the active workspace so subscribers
-    /// receive the metadata that was just attached.
+    /// Emit a [`PaneStarted`] event for a pane in the active workspace.
     pub(crate) fn emit_pane_started(&self, pane_id: usize) {
-        let ws = self.ws();
+        self.emit_pane_started_in(self.active_tab, pane_id);
+    }
+
+    /// Emit a [`PaneStarted`] event for a pane in workspace `ws_index`,
+    /// pulling the name/role that was just attached to it.
+    ///
+    /// The workspace has to be named explicitly: pane ids are unique
+    /// App-wide, so looking one up in the *active* workspace after a
+    /// cross-tab spawn silently finds nothing and emits `name: null,
+    /// role: null` instead of erroring. `poll_events` is process-wide,
+    /// so an orchestrator waiting on the worker it just named by
+    /// `spawn_claude_pane(name = ...)` would never match the event.
+    pub(crate) fn emit_pane_started_in(&self, ws_index: usize, pane_id: usize) {
+        let Some(ws) = self.workspaces.get(ws_index) else {
+            return;
+        };
         let name = ws
             .pane_names
             .iter()

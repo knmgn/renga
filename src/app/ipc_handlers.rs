@@ -676,7 +676,10 @@ impl App {
                 self.workspaces[ws_idx].pane_names.insert(name, new_pane_id);
             }
         }
-        self.emit_pane_started(new_pane_id);
+        // Indexed, not `emit_pane_started`: after a cross-tab split the
+        // new pane is not in the active workspace, and the unindexed
+        // form would emit the event with a null name and role.
+        self.emit_pane_started_in(ws_idx, new_pane_id);
         Ok(new_pane_id)
     }
 }

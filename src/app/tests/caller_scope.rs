@@ -339,6 +339,90 @@ fn split_inherits_the_target_panes_cwd_across_tabs() {
     app.shutdown();
 }
 
+/// `poll_events` is process-wide, so an orchestrator in a background
+/// tab waits on the event stream for the worker it just named. Pane ids
+/// are unique App-wide, so resolving the new pane's metadata in the
+/// *active* workspace does not error — it quietly returns nothing, and
+/// the event goes out with `name: null, role: null`.
+#[test]
+fn a_cross_tab_spawn_emits_pane_started_with_its_name_and_role() {
+    let (mut app, caller, _active) = two_tabs();
+    let (_sub_id, rx) = app.event_bus.subscribe();
+
+    let id = app
+        .handle_split(
+            &ipc::PaneRef::Focused,
+            ipc::Direction::Vertical,
+            None,
+            Some("worker-1".into()),
+            Some("worker".into()),
+            None,
+            Some(caller),
+        )
+        .expect("cross-tab split");
+
+    let mut observed: Option<(Option<String>, Option<String>)> = None;
+    while let Ok(ev) = rx.try_recv() {
+        if let ipc::Event::PaneStarted {
+            id: ev_id,
+            name,
+            role,
+            ..
+        } = ev
+        {
+            if ev_id == id {
+                observed = Some((name, role));
+                break;
+            }
+        }
+    }
+    let (name, role) = observed.expect("PaneStarted for the new pane");
+    assert_eq!(name.as_deref(), Some("worker-1"));
+    assert_eq!(role.as_deref(), Some("worker"));
+    app.shutdown();
+}
+
+/// Only the visible tab is relaid out on a terminal resize, so a hidden
+/// workspace's `last_pane_rects` describe a terminal that no longer
+/// exists. Running the min-size guard against those stale rects lets a
+/// cross-tab split through that the identical split in the visible tab
+/// would refuse.
+#[test]
+fn a_cross_tab_split_guards_against_the_current_terminal_not_a_stale_one() {
+    let (mut app, caller, _active) = two_tabs();
+    app.relayout_workspace(0);
+    app.set_min_pane_size(20, 5);
+
+    // The user shrinks the terminal while tab 0 is hidden. Only the
+    // active tab is relaid out, so workspace 0 keeps its 120-column
+    // rects.
+    app.on_terminal_resize(46, 20);
+    let stale = app.workspaces[0]
+        .last_pane_rects
+        .iter()
+        .find(|(id, _)| *id == caller)
+        .map(|(_, r)| r.width)
+        .expect("caller rect");
+    assert!(
+        stale > 46,
+        "precondition: the hidden tab still holds pre-resize geometry ({stale} cols)"
+    );
+
+    let err = app
+        .handle_split(
+            &ipc::PaneRef::Focused,
+            ipc::Direction::Vertical,
+            None,
+            None,
+            None,
+            None,
+            Some(caller),
+        )
+        .expect_err("46 cols cannot hold two 20-column panes");
+    assert_eq!(err.code, Some(ipc::err_code::SPLIT_REFUSED));
+    app.shutdown();
+}
+
 // ─── legacy (CLI) semantics ───────────────────────────────
 
 #[test]

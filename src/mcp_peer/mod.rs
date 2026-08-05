@@ -389,11 +389,16 @@ Peer messaging tools:\n\
 - send_message: Send a message to another instance by peer ID or name.\n\
 - set_summary: Set a 1-2 sentence summary of what you're working on; surfaced on list_panes / list_peers for other peers.\n\
 - check_messages: Drain any queued peer messages still waiting for this client.\n\n\
-Pane control tools. \"Current tab\" always means the tab YOUR pane lives in, not whichever \
-tab the user happens to be looking at — so these stay correct while the user switches tabs. \
-Relative targets (`focused`, a stable name) never leave your tab; a numeric pane id from \
-another tab does reach across, which is the deliberate escape hatch for orchestrating \
-sibling tabs. new_tab creates a whole new tab:\n\
+Pane control tools. For list_panes, spawn_pane, spawn_claude_pane, spawn_codex_pane, \
+focus_pane, inspect_pane and send_keys, \"current tab\" means the tab YOUR pane lives in, \
+not whichever tab the user happens to be looking at — so these stay correct while the user \
+switches tabs. For those seven, relative targets (`focused`, a stable name) never leave your \
+tab; a numeric pane id from another tab does reach across, which is the deliberate escape \
+hatch for orchestrating sibling tabs. TWO TOOLS DO NOT FOLLOW THIS RULE: close_pane and \
+set_pane_identity resolve `focused` and names against the tab the USER is currently viewing, \
+so calling close_pane(target=\"focused\") from a background tab can terminate a pane the \
+user is typing in — always pass an explicit numeric id to those two. new_tab creates a whole \
+new tab:\n\
 - list_panes: Inspect all panes in the current tab, including geometry and the focus flag.\n\
 - spawn_pane: Split an existing pane to create a new one. Optionally runs a startup command, \
 assigns a stable name, attaches a role label, or sets an explicit working directory via \
