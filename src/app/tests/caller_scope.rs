@@ -423,6 +423,57 @@ fn a_cross_tab_split_guards_against_the_current_terminal_not_a_stale_one() {
     app.shutdown();
 }
 
+/// A background agent spawning a pane must not drop the text the user
+/// is selecting in the tab they are looking at — that tab's geometry did
+/// not move. A selection anchored to the *split* workspace is stale and
+/// still has to go.
+#[test]
+fn a_cross_tab_split_keeps_a_selection_that_belongs_to_another_tab() {
+    let (mut app, caller, active) = two_tabs();
+    let sel = |pane_id| TextSelection {
+        target: SelectionTarget::Pane(pane_id),
+        start_row: 0,
+        start_col: 0,
+        end_row: 0,
+        end_col: 4,
+        content_rect: Rect::new(0, 0, 10, 2),
+    };
+
+    app.selection = Some(sel(active));
+    app.handle_split(
+        &ipc::PaneRef::Focused,
+        ipc::Direction::Vertical,
+        None,
+        None,
+        None,
+        None,
+        Some(caller),
+    )
+    .expect("split the hidden tab");
+    assert!(
+        app.selection.is_some(),
+        "the visible tab's selection survives a split in another tab"
+    );
+
+    // Anchored in the workspace being split: that geometry just moved.
+    app.selection = Some(sel(caller));
+    app.handle_split(
+        &ipc::PaneRef::Id(caller),
+        ipc::Direction::Horizontal,
+        None,
+        None,
+        None,
+        None,
+        Some(caller),
+    )
+    .expect("second split");
+    assert!(
+        app.selection.is_none(),
+        "a selection in the split workspace is stale and must be dropped"
+    );
+    app.shutdown();
+}
+
 // ─── legacy (CLI) semantics ───────────────────────────────
 
 #[test]

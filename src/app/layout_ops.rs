@@ -249,7 +249,15 @@ impl App {
             // at face value. Recompute for that workspace alone: no
             // repaint cooldown, no effect on the tab on screen.
             self.relayout_workspace(ws_index);
-            self.selection = None;
+            // Only the mutated workspace's geometry moved, so only a
+            // selection anchored *there* is stale. Clearing
+            // unconditionally (what `mark_layout_change` does, correctly,
+            // for the active tab) would make a background agent's spawn
+            // drop the text the user was in the middle of selecting in
+            // the tab they are looking at.
+            if self.selection_belongs_to_workspace(ws_index) {
+                self.selection = None;
+            }
             self.dirty = true;
         }
         // A split during a single-pane tab-close prompt would widen the
@@ -439,6 +447,24 @@ impl App {
             return;
         }
         self.close_tab(ws_index);
+    }
+
+    /// Whether the live text selection is anchored to something in
+    /// workspace `ws_index`.
+    ///
+    /// A pane selection names its pane, so it can be attributed exactly.
+    /// A preview selection belongs to whichever workspace's preview
+    /// panel is open — the sidebar is per-workspace state, so it is the
+    /// active tab's by construction.
+    pub(crate) fn selection_belongs_to_workspace(&self, ws_index: usize) -> bool {
+        match self.selection.as_ref().map(|s| &s.target) {
+            None => false,
+            Some(SelectionTarget::Pane(pane_id)) => self
+                .workspaces
+                .get(ws_index)
+                .is_some_and(|ws| ws.panes.contains_key(pane_id)),
+            Some(SelectionTarget::Preview) => ws_index == self.active_tab,
+        }
     }
 
     pub(crate) fn workspace_index_of_pane(&self, pane_id: usize) -> Option<usize> {
