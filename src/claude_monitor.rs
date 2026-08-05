@@ -856,12 +856,19 @@ mod tests {
         // Baseline call against the empty file establishes last_mtime.
         assert!(!monitor.update_throttled(2, cwd, min_interval));
 
-        // Append a complete JSONL line and wait past min_interval so the
-        // next call isn't throttled and the mtime has visibly changed.
+        // Sleep BEFORE the second write, not after: what the final
+        // assertion depends on is the mtime delta between the two
+        // writes, and the file-time clock advances in coarse ticks
+        // (~15.6ms on Windows). Sleeping after the write only defeats
+        // the `Instant`-based throttle while leaving the writes
+        // microseconds apart — same tick, same mtime, early return,
+        // flaky failure. Placing the wait here separates the writes
+        // *and* satisfies the throttle window with one sleep.
+        std::thread::sleep(Duration::from_millis(60));
+
         let line = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","id":"t1","input":{}}],"stop_reason":"tool_use"}}
 "#;
         std::fs::write(&path, line).unwrap();
-        std::thread::sleep(Duration::from_millis(60));
 
         assert!(monitor.update_throttled(2, cwd, min_interval));
         assert_eq!(monitor.state(2).current_tool.as_deref(), Some("Bash"));
