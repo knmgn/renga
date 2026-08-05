@@ -357,6 +357,12 @@ fn copy_to_windows_clipboard(text: &str) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Terminal dimensions below which the layout pass is skipped
+/// entirely — there is not enough room to place a pane area, a tab bar
+/// and borders.
+const MIN_LAYOUT_COLS: u16 = 20;
+const MIN_LAYOUT_ROWS: u16 = 5;
+
 impl App {
     /// Recompute pane rectangles and apply sizes to every PTY in the
     /// active workspace. Returns `true` if any pane was actually
@@ -381,8 +387,7 @@ impl App {
         if self.workspaces.get(ws_index).is_none() {
             return false;
         }
-        let (cols, rows) = self.last_term_size;
-        if cols < 20 || rows < 5 {
+        if self.terminal_too_small_for_layout() {
             return false;
         }
 
@@ -597,10 +602,41 @@ impl App {
         self.dirty = true;
     }
 
+    /// Whether the terminal is too small for the layout pass to run at
+    /// all. Below this, [`Self::relayout_workspace`] bails and every
+    /// workspace keeps whatever `last_pane_rects` it last had — so
+    /// anything that would *act* on those rects has to treat them as
+    /// unknown rather than current.
+    pub(crate) fn terminal_too_small_for_layout(&self) -> bool {
+        let (cols, rows) = self.last_term_size;
+        cols < MIN_LAYOUT_COLS || rows < MIN_LAYOUT_ROWS
+    }
+
     /// Called from main.rs on crossterm Resize events so we can update
     /// the cached terminal size and propagate the resize into panes.
+    ///
+    /// Every workspace is relaid out, not just the visible one. A hidden
+    /// workspace never passes through `ui::render_panes`, so before
+    /// Issue #288 its `last_pane_rects` and PTY sizes simply stayed at
+    /// the old terminal until the user switched to it — harmless while
+    /// nothing could read a hidden tab, and wrong the moment the
+    /// caller-scoped tools could. Refreshing at the one event that
+    /// invalidates every workspace at once keeps that a property of the
+    /// resize rather than something each reader has to remember: the
+    /// alternative, relayouting defensively in `list_panes`, `inspect`
+    /// and `split`, was three chances to forget the fourth. Resizes are
+    /// human-paced and `Pane::resize` no-ops when the size is unchanged,
+    /// so the extra passes cost nothing measurable.
     pub fn on_terminal_resize(&mut self, cols: u16, rows: u16) {
         self.last_term_size = (cols, rows);
+        for i in 0..self.workspaces.len() {
+            if i != self.active_tab {
+                self.relayout_workspace(i);
+            }
+        }
+        // The active workspace goes through `mark_layout_change` so the
+        // repaint cooldown and selection invalidation stay tied to the
+        // tab actually being painted.
         self.mark_layout_change();
     }
 

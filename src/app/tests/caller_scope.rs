@@ -406,31 +406,40 @@ fn a_cross_tab_spawn_emits_pane_started_with_its_name_and_role() {
     app.shutdown();
 }
 
-/// Only the visible tab is relaid out on a terminal resize, so a hidden
-/// workspace's `last_pane_rects` describe a terminal that no longer
-/// exists. Running the min-size guard against those stale rects lets a
-/// cross-tab split through that the identical split in the visible tab
-/// would refuse.
+/// The root invariant behind the caller-scoped geometry: a terminal
+/// resize relayouts *every* workspace, not just the visible one. Without
+/// it, a hidden workspace keeps the rects it had when it was last on
+/// screen, and every reader (`list_panes`, `inspect_pane`, the split
+/// min-size guard) has to remember to refresh — three chances to forget
+/// the fourth.
 #[test]
-fn a_cross_tab_split_guards_against_the_current_terminal_not_a_stale_one() {
+fn a_terminal_resize_relayouts_hidden_workspaces_too() {
     let (mut app, caller, _active) = two_tabs();
     app.relayout_workspace(0);
-    app.set_min_pane_size(20, 5);
 
-    // The user shrinks the terminal while tab 0 is hidden. Only the
-    // active tab is relaid out, so workspace 0 keeps its 120-column
-    // rects.
     app.on_terminal_resize(46, 20);
-    let stale = app.workspaces[0]
+    let width = app.workspaces[0]
         .last_pane_rects
         .iter()
         .find(|(id, _)| *id == caller)
         .map(|(_, r)| r.width)
         .expect("caller rect");
     assert!(
-        stale > 46,
-        "precondition: the hidden tab still holds pre-resize geometry ({stale} cols)"
+        width <= 46,
+        "hidden tab still reports {width} cols after a resize to 46"
     );
+    app.shutdown();
+}
+
+/// Consequence of that invariant: a cross-tab split is judged against
+/// the terminal that exists now, so it refuses exactly where the same
+/// split in the visible tab would.
+#[test]
+fn a_cross_tab_split_guards_against_the_current_terminal() {
+    let (mut app, caller, _active) = two_tabs();
+    app.relayout_workspace(0);
+    app.set_min_pane_size(20, 5);
+    app.on_terminal_resize(46, 20);
 
     let err = app
         .handle_split(
@@ -443,6 +452,30 @@ fn a_cross_tab_split_guards_against_the_current_terminal_not_a_stale_one() {
             Some(caller),
         )
         .expect_err("46 cols cannot hold two 20-column panes");
+    assert_eq!(err.code, Some(ipc::err_code::SPLIT_REFUSED));
+    app.shutdown();
+}
+
+/// Below the layout threshold `relayout_workspace` cannot run at all, so
+/// every workspace's rects describe a terminal that is gone. Splitting
+/// on them would be guesswork; refuse instead.
+#[test]
+fn a_split_is_refused_while_the_terminal_is_too_small_to_lay_out() {
+    let (mut app, caller, _active) = two_tabs();
+    app.relayout_workspace(0);
+    app.on_terminal_resize(10, 3);
+
+    let err = app
+        .handle_split(
+            &ipc::PaneRef::Focused,
+            ipc::Direction::Vertical,
+            None,
+            None,
+            None,
+            None,
+            Some(caller),
+        )
+        .expect_err("no usable geometry at 10x3");
     assert_eq!(err.code, Some(ipc::err_code::SPLIT_REFUSED));
     app.shutdown();
 }
