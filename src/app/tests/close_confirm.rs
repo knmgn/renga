@@ -506,6 +506,7 @@ fn tab_prompt_expires_when_a_split_grows_the_tab() {
         None,
         None,
         None,
+        None,
     )
     .expect("mcp split");
 

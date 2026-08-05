@@ -6,4 +6,5 @@ mod layout_tree;
 mod org_sidebar;
 mod overlay;
 mod pointer_input;
+mod tab_placement;
 mod workspace_ops;

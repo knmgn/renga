@@ -295,6 +295,7 @@ fn close_releases_pane_name_for_reuse() {
             None,
             None,
             None,
+            None,
         )
         .expect("split with reused name");
     assert_ne!(new_id, victim_id_before);
@@ -463,6 +464,7 @@ fn handle_split_explicit_command_wins_over_role_claude_default() {
             Some("claude".into()),
             None,
             None,
+            None,
         )
         .expect("split succeeds");
     let pane = app.ws().panes.get(&new_id).expect("pane exists");
@@ -499,6 +501,7 @@ fn handle_split_emits_pane_started_with_attached_name_and_role() {
             None,
             Some("worker-1".into()),
             Some("worker".into()),
+            None,
             None,
             None,
         )
@@ -602,6 +605,7 @@ fn split_refused_keeps_focus_and_emits_no_pane_started() {
         None,
         None,
         None,
+        None,
     )
     .expect("first split should succeed");
 
@@ -617,6 +621,7 @@ fn split_refused_keeps_focus_and_emits_no_pane_started() {
             ipc::Direction::Vertical,
             None,
             Some("overflow".into()),
+            None,
             None,
             None,
             None,
@@ -664,6 +669,7 @@ fn set_min_pane_size_lets_split_succeed_below_default_threshold() {
         None,
         None,
         None,
+        None,
     )
     .expect("first split should succeed");
 
@@ -680,6 +686,7 @@ fn set_min_pane_size_lets_split_succeed_below_default_threshold() {
             ipc::Direction::Vertical,
             None,
             Some("narrow".into()),
+            None,
             None,
             None,
             None,

@@ -88,10 +88,24 @@ pub const CAP_CALLER_SCOPE: &str = "caller_scope";
 /// Absent token ⇒ fail closed (see [`client::send_request_requiring`]).
 pub const CAP_CROSS_TAB_PEERS: &str = "cross_tab_peers";
 
+/// Capability token advertised by servers that understand tab-directed
+/// spawning (Issue #290): the `tab` selector on [`Request::Split`] and
+/// the [`Request::SpawnTab`] background-tab variant.
+///
+/// Deliberately distinct from [`CAP_CALLER_SCOPE`] /
+/// [`CAP_CROSS_TAB_PEERS`]: `Request` does not use
+/// `deny_unknown_fields`, so a #289-era server would silently drop an
+/// unknown `tab` field and spawn into the caller's tab — the same
+/// wrong-tab accident #288 fixed for targeting. Clients sending a `tab`
+/// selector must gate on *this* token via
+/// [`client::send_request_requiring`] and fail closed when it is
+/// absent.
+pub const CAP_SPAWN_TAB: &str = "spawn_tab";
+
 /// Every capability token this build's server advertises. Additive by
 /// construction — clients match on tokens they know and ignore the
 /// rest.
-pub const SERVER_CAPABILITIES: &[&str] = &[CAP_CALLER_SCOPE, CAP_CROSS_TAB_PEERS];
+pub const SERVER_CAPABILITIES: &[&str] = &[CAP_CALLER_SCOPE, CAP_CROSS_TAB_PEERS, CAP_SPAWN_TAB];
 
 /// One IPC call from a client to the running renga instance.
 ///
@@ -169,6 +183,22 @@ pub enum Request {
         cwd: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         from_pane: Option<usize>,
+        /// Which tab hosts the split (Issue #290). `None` keeps the
+        /// prior behavior: the target resolves inside the caller's tab
+        /// (or the active tab without `from_pane`). `Some(selector)`
+        /// resolves the tab first, then resolves `target` strictly
+        /// inside it — a numeric target in another tab fails with
+        /// `target_tab_mismatch` instead of silently escaping the
+        /// selected tab. [`TabSelector::New`] is not valid here (a
+        /// split needs an existing layout); use [`Request::SpawnTab`].
+        ///
+        /// Only send this through
+        /// [`client::send_request_requiring`] with [`CAP_SPAWN_TAB`]:
+        /// `Request` tolerates unknown fields, so an older server
+        /// would silently ignore the selector and split in the wrong
+        /// tab.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tab: Option<TabSelector>,
     },
     /// Move keyboard focus to the target pane. When the resolved pane
     /// lives in a different tab than the one on screen, the server also
@@ -209,6 +239,53 @@ pub enum Request {
         /// path is missing or not a directory.
         #[serde(default)]
         cwd: Option<String>,
+    },
+    /// Spawn a fresh single-pane tab **in the background** (Issue
+    /// #290): unlike [`Request::NewTab`], the active tab does not
+    /// change — the human keeps looking at whatever they were looking
+    /// at while an orchestrator places a worker in a new tab. The
+    /// server finishes the new tab's rect computation and PTY resize
+    /// before answering, so the reported geometry is real (never the
+    /// 10x40 placeholder), and emits exactly one `pane_started` for
+    /// the new pane after its name/role are set.
+    ///
+    /// This is the wire form of the MCP `spawn_*` tools' `tab: {new:
+    /// …}` selector. It intentionally has no `target` / `direction` —
+    /// a brand-new tab has nothing to split. Fails with
+    /// `tab_limit_reached` when `MAX_TABS` tabs already exist.
+    ///
+    /// Only send this through [`client::send_request_requiring`] with
+    /// [`CAP_SPAWN_TAB`] — an older server rejects the unknown `cmd`,
+    /// but gating on the capability gives the caller the actionable
+    /// `server_too_old` message instead of a generic parse error.
+    SpawnTab {
+        /// Startup command for the new pane.
+        #[serde(default)]
+        command: Option<String>,
+        /// Stable name to register for the new pane so it can be
+        /// addressed via [`PaneRef::Name`] later.
+        #[serde(default)]
+        id: Option<String>,
+        /// Custom label for the new tab (the `{new: {name: …}}` field
+        /// of the MCP selector). Otherwise derived from the cwd.
+        #[serde(default)]
+        label: Option<String>,
+        /// Free-form role label (see [`PaneInfo::role`]).
+        #[serde(default)]
+        role: Option<String>,
+        /// Working directory for the new tab's initial pane. Absolute
+        /// paths are used as-is; relative paths resolve against the
+        /// **caller pane's** cwd (unlike [`Request::NewTab`], which
+        /// resolves against the server process cwd). When omitted, the
+        /// caller pane's cwd is inherited — a spawn API places workers
+        /// relative to the orchestrator that asked, not relative to
+        /// wherever the renga process happened to start. Falls back to
+        /// the server process cwd when `from_pane` is absent. Fails
+        /// with `cwd_invalid` before any layout mutation.
+        #[serde(default)]
+        cwd: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from_pane: Option<usize>,
     },
     /// Switch the connection to live event stream mode. After the
     /// server acknowledges with [`Response::Subscribed`], it emits
@@ -367,6 +444,42 @@ pub enum PaneRef {
     Id(usize),
     Name(String),
     Focused,
+}
+
+/// Identifies which tab a spawn lands in (Issue #290). Externally
+/// tagged on the wire, mirroring [`PaneRef`]: `{"name":"workers"}` /
+/// `{"index":2}` / `{"pane_id":17}` / `{"new":{}}` /
+/// `{"new":{"name":"workers"}}`.
+///
+/// A tagged enum instead of an overloaded string on purpose: tab
+/// labels are free-form, so a reserved string like `"new"` would make
+/// a tab actually named "new" unaddressable.
+///
+/// Resolution rules (server-side):
+/// - `Name` — exact match against each tab's display name (custom
+///   label, else the cwd-derived name). Zero matches fail with
+///   `tab_not_found`; multiple matches fail with `tab_ambiguous` —
+///   never first-match, since labels are not unique.
+/// - `Index` — 0-based position in the tab strip, the same index
+///   `list_peers` reports in `PeerInfo::tab`. Out of range fails with
+///   `tab_not_found`.
+/// - `PaneId` — the tab that owns the given pane. The stable anchor
+///   for orchestrators: pane ids never shift, while names collide and
+///   indices move when tabs close. Unknown pane fails with
+///   `pane_not_found`.
+/// - `New` — create a fresh background tab, optionally labeled. Only
+///   meaningful for [`Request::SpawnTab`]; [`Request::Split`] rejects
+///   it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TabSelector {
+    Name(String),
+    Index(usize),
+    PaneId(usize),
+    New {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -596,6 +709,25 @@ pub mod err_code {
     /// per-pane cap (256 Unicode scalar values). The caller should
     /// either truncate the summary or send an empty string to clear.
     pub const SUMMARY_TOO_LONG: &str = "summary_too_long";
+    /// A `tab` selector named a tab that does not exist: no tab's
+    /// display name matches exactly, or the 0-based index is out of
+    /// range. Emitted by `Split` before any layout mutation.
+    pub const TAB_NOT_FOUND: &str = "tab_not_found";
+    /// A `tab: {name: …}` selector matched more than one tab. Tab
+    /// labels are not unique, so the server refuses to guess — the
+    /// caller should switch to a `{pane_id: …}` or `{index: …}`
+    /// anchor, or relabel the tabs.
+    pub const TAB_AMBIGUOUS: &str = "tab_ambiguous";
+    /// A `Split` combined a `tab` selector with a numeric `target`
+    /// that lives in a *different* tab. Refused instead of silently
+    /// following either side — the two halves of the request
+    /// contradict each other.
+    pub const TARGET_TAB_MISMATCH: &str = "target_tab_mismatch";
+    /// Creating another tab would exceed `MAX_TABS`. Emitted by
+    /// `NewTab` / `SpawnTab` (and the `tab: {new: …}` selector).
+    /// Deliberately distinct from `SPLIT_REFUSED`, which is about pane
+    /// capacity *inside* one tab.
+    pub const TAB_LIMIT_REACHED: &str = "tab_limit_reached";
 }
 
 /// App-side error carrying a free-form message plus an optional
@@ -825,6 +957,7 @@ mod tests {
                     role: None,
                     cwd: None,
                     from_pane: None,
+                    tab: None,
                 },
             ),
         ];
@@ -912,6 +1045,114 @@ mod tests {
     }
 
     #[test]
+    fn hello_response_advertises_spawn_tab() {
+        let with = serde_json::to_string(&Response::Hello {
+            server_pid: 1,
+            session_token: "t".into(),
+            capabilities: SERVER_CAPABILITIES.iter().map(|s| s.to_string()).collect(),
+        })
+        .unwrap();
+        assert!(
+            with.contains(CAP_SPAWN_TAB),
+            "server must advertise tab-directed spawning: {with}"
+        );
+    }
+
+    /// The wire shapes the docs promise for the tab selector — one per
+    /// variant, byte-exact, since MCP callers construct these by hand.
+    #[test]
+    fn tab_selector_wire_shapes() {
+        let cases: &[(TabSelector, &str)] = &[
+            (TabSelector::Name("workers".into()), r#"{"name":"workers"}"#),
+            (TabSelector::Index(2), r#"{"index":2}"#),
+            (TabSelector::PaneId(17), r#"{"pane_id":17}"#),
+            (TabSelector::New { name: None }, r#"{"new":{}}"#),
+            (
+                TabSelector::New {
+                    name: Some("workers".into()),
+                },
+                r#"{"new":{"name":"workers"}}"#,
+            ),
+        ];
+        for (selector, wire) in cases {
+            let ser = serde_json::to_string(selector).unwrap();
+            assert_eq!(&ser, wire);
+            let de: TabSelector = serde_json::from_str(wire).unwrap();
+            assert_eq!(&de, selector);
+        }
+    }
+
+    #[test]
+    fn split_request_with_tab_roundtrips() {
+        for tab in [
+            TabSelector::Name("workers".into()),
+            TabSelector::Index(0),
+            TabSelector::PaneId(3),
+        ] {
+            let r = Request::Split {
+                target: PaneRef::Focused,
+                direction: Direction::Vertical,
+                command: None,
+                id: None,
+                role: None,
+                cwd: None,
+                from_pane: Some(1),
+                tab: Some(tab),
+            };
+            assert_eq!(roundtrip(&r), r);
+        }
+    }
+
+    /// With `tab: None` the split request's raw JSON is byte-identical
+    /// to what a pre-#290 client sends — the added field must never
+    /// leak onto the wire for callers that don't use it.
+    #[test]
+    fn split_request_raw_json_shape_is_unchanged_without_tab() {
+        let r = Request::Split {
+            target: PaneRef::Focused,
+            direction: Direction::Vertical,
+            command: None,
+            id: None,
+            role: None,
+            cwd: None,
+            from_pane: None,
+            tab: None,
+        };
+        let ser = serde_json::to_string(&r).unwrap();
+        assert!(!ser.contains("tab"), "tab must stay off the wire: {ser}");
+        assert!(!ser.contains("from_pane"), "{ser}");
+    }
+
+    #[test]
+    fn spawn_tab_request_roundtrips() {
+        let r = Request::SpawnTab {
+            command: Some("claude".into()),
+            id: Some("worker-a".into()),
+            label: Some("workers".into()),
+            role: Some("worker".into()),
+            cwd: Some("/tmp/work".into()),
+            from_pane: Some(2),
+        };
+        assert_eq!(roundtrip(&r), r);
+    }
+
+    #[test]
+    fn spawn_tab_request_defaults_all_fields() {
+        let parsed: Request = serde_json::from_str(r#"{"cmd":"spawn_tab"}"#).unwrap();
+        assert_eq!(
+            parsed,
+            Request::SpawnTab {
+                command: None,
+                id: None,
+                label: None,
+                role: None,
+                cwd: None,
+                from_pane: None,
+            }
+        );
+    }
+
+    #[test]
     fn list_request_roundtrips() {
         assert_eq!(
             roundtrip(&Request::List { from_pane: None }),
@@ -940,6 +1181,7 @@ mod tests {
             role: None,
             cwd: None,
             from_pane: None,
+            tab: None,
         };
         assert_eq!(roundtrip(&r), r);
     }
@@ -1104,6 +1346,7 @@ mod tests {
             role: None,
             cwd: Some("/tmp/work".into()),
             from_pane: None,
+            tab: None,
         };
         assert_eq!(roundtrip(&r), r);
     }
@@ -1222,6 +1465,7 @@ mod tests {
             role: Some("worker".into()),
             cwd: None,
             from_pane: None,
+            tab: None,
         };
         assert_eq!(roundtrip(&r), r);
     }

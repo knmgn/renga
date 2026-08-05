@@ -510,18 +510,31 @@ fn tools_spec() -> Value {
         },
         {
             "name": "spawn_pane",
-            "description": "Split a pane to create a new one in the same renga tab. Returns the new pane's numeric id so you can address it from later tool calls. Refuses if the target is already at minimum size or the tab has hit its pane cap.",
+            "description": "Create a new pane: by default splits a pane in this renga tab, or — with the `tab` selector — splits inside another tab or spawns a fresh background tab. Returns the new pane's numeric id so you can address it from later tool calls. Refuses if the target is already at minimum size or the tab has hit its pane cap.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "direction": {
                         "type": "string",
                         "enum": ["vertical", "horizontal"],
-                        "description": "`vertical` splits side-by-side (new pane to the right); `horizontal` splits top/bottom (new pane on the bottom)."
+                        "description": "`vertical` splits side-by-side (new pane to the right); `horizontal` splits top/bottom (new pane on the bottom). Required unless `tab` is `{\"new\": …}` (a fresh tab has nothing to split — omit it there)."
                     },
                     "target": {
                         "type": "string",
-                        "description": "Pane to split. Numeric id (from list_panes), stable name, or the literal 'focused'. Defaults to 'focused' when omitted. All-digit strings are always interpreted as ids — a pane literally named '7' cannot be addressed by name, use its id instead."
+                        "description": "Pane to split. Numeric id (from list_panes), stable name, or the literal 'focused'. Defaults to 'focused' when omitted. All-digit strings are always interpreted as ids — a pane literally named '7' cannot be addressed by name, use its id instead. With a `tab` selector the target must live in the selected tab (names and 'focused' resolve there; a mismatching numeric id is refused with target_tab_mismatch). Omit with `tab: {\"new\": …}`."
+                    },
+                    "tab": {
+                        "type": "object",
+                        "properties": {
+                            "name": { "type": "string" },
+                            "index": { "type": "integer", "minimum": 0 },
+                            "pane_id": { "type": "integer", "minimum": 0 },
+                            "new": {
+                                "type": "object",
+                                "properties": { "name": { "type": "string" } }
+                            }
+                        },
+                        "description": "Optional tab placement (Issue #290); default is this pane's own tab. Pass exactly one key: {\"name\": \"<label>\"} = the tab whose display name matches exactly (0 matches → tab_not_found, several → tab_ambiguous — labels are not unique, use index/pane_id then); {\"index\": N} = 0-based tab index as reported by list_peers; {\"pane_id\": N} = the tab owning that pane (the stable anchor: ids never shift when tabs close); {\"new\": {}} or {\"new\": {\"name\": \"<label>\"}} = create a fresh single-pane BACKGROUND tab — the user's visible tab does not change, and `direction`/`target` must be omitted. Needs a renga server advertising the spawn_tab capability; older servers are refused (server_too_old) instead of spawning into the wrong tab."
                     },
                     "command": {
                         "type": "string",
@@ -537,10 +550,9 @@ fn tools_spec() -> Value {
                     },
                     "cwd": {
                         "type": "string",
-                        "description": "Optional working directory for the new pane. Absolute paths are used as-is; relative paths are resolved against the caller pane's cwd. When omitted, the new pane inherits the target pane's cwd (prior behavior). Use this instead of embedding `cd <path> && ...` in `command` — keeps the shell-quoting and the claude auto-upgrade intact."
+                        "description": "Optional working directory for the new pane. Absolute paths are used as-is; relative paths are resolved against the caller pane's cwd. When omitted, the new pane inherits the target pane's cwd (prior behavior), or the caller pane's cwd with `tab: {\"new\": …}`. Use this instead of embedding `cd <path> && ...` in `command` — keeps the shell-quoting and the claude auto-upgrade intact."
                     }
-                },
-                "required": ["direction"]
+                }
             }
         },
         {
@@ -552,11 +564,24 @@ fn tools_spec() -> Value {
                     "direction": {
                         "type": "string",
                         "enum": ["vertical", "horizontal"],
-                        "description": "`vertical` splits side-by-side (new pane to the right); `horizontal` splits top/bottom (new pane on the bottom)."
+                        "description": "`vertical` splits side-by-side (new pane to the right); `horizontal` splits top/bottom (new pane on the bottom). Required unless `tab` is `{\"new\": …}` (omit it there)."
                     },
                     "target": {
                         "type": "string",
-                        "description": "Pane to split. Numeric id, stable name, or the literal 'focused'. Defaults to 'focused' when omitted."
+                        "description": "Pane to split. Numeric id, stable name, or the literal 'focused'. Defaults to 'focused' when omitted. With a `tab` selector the target must live in the selected tab. Omit with `tab: {\"new\": …}`."
+                    },
+                    "tab": {
+                        "type": "object",
+                        "properties": {
+                            "name": { "type": "string" },
+                            "index": { "type": "integer", "minimum": 0 },
+                            "pane_id": { "type": "integer", "minimum": 0 },
+                            "new": {
+                                "type": "object",
+                                "properties": { "name": { "type": "string" } }
+                            }
+                        },
+                        "description": "Optional tab placement — same selector and semantics as `spawn_pane`'s `tab`: exactly one of {\"name\"}, {\"index\"}, {\"pane_id\"}, or {\"new\": {…}} for a fresh single-pane background tab (visible tab unchanged; `direction`/`target` must be omitted). Requires the server's spawn_tab capability; older servers are refused instead of spawning into the wrong tab."
                     },
                     "name": {
                         "type": "string",
@@ -583,8 +608,7 @@ fn tools_spec() -> Value {
                         "items": { "type": "string" },
                         "description": "Additional Claude CLI args appended after the structured fields. Must NOT contain --dangerously-load-development-channels, --permission-mode, or --model — pass those via the structured fields instead, or the call is rejected with invalid-params."
                     }
-                },
-                "required": ["direction"]
+                }
             }
         },
         {
@@ -596,11 +620,24 @@ fn tools_spec() -> Value {
                     "direction": {
                         "type": "string",
                         "enum": ["vertical", "horizontal"],
-                        "description": "`vertical` splits side-by-side (new pane to the right); `horizontal` splits top/bottom (new pane on the bottom)."
+                        "description": "`vertical` splits side-by-side (new pane to the right); `horizontal` splits top/bottom (new pane on the bottom). Required unless `tab` is `{\"new\": …}` (omit it there)."
                     },
                     "target": {
                         "type": "string",
-                        "description": "Pane to split. Numeric id, stable name, or the literal 'focused'. Defaults to 'focused' when omitted."
+                        "description": "Pane to split. Numeric id, stable name, or the literal 'focused'. Defaults to 'focused' when omitted. With a `tab` selector the target must live in the selected tab. Omit with `tab: {\"new\": …}`."
+                    },
+                    "tab": {
+                        "type": "object",
+                        "properties": {
+                            "name": { "type": "string" },
+                            "index": { "type": "integer", "minimum": 0 },
+                            "pane_id": { "type": "integer", "minimum": 0 },
+                            "new": {
+                                "type": "object",
+                                "properties": { "name": { "type": "string" } }
+                            }
+                        },
+                        "description": "Optional tab placement — same selector and semantics as `spawn_pane`'s `tab`: exactly one of {\"name\"}, {\"index\"}, {\"pane_id\"}, or {\"new\": {…}} for a fresh single-pane background tab (visible tab unchanged; `direction`/`target` must be omitted). Requires the server's spawn_tab capability; older servers are refused instead of spawning into the wrong tab."
                     },
                     "name": {
                         "type": "string",
@@ -619,8 +656,7 @@ fn tools_spec() -> Value {
                         "items": { "type": "string" },
                         "description": "Additional Codex CLI args appended after the `codex` token. renga owns shell quoting for each item, so callers should pass one logical token per array entry."
                     }
-                },
-                "required": ["direction"]
+                }
             }
         },
         {
@@ -1074,6 +1110,158 @@ fn parse_direction(raw: Option<&str>) -> std::result::Result<Direction, String> 
     }
 }
 
+/// Where a `spawn_*` call places its new pane (Issue #290).
+#[derive(Debug, Clone, PartialEq)]
+enum SpawnPlacement {
+    /// No `tab` argument — split inside the caller's own tab, the
+    /// pre-#290 behavior.
+    Here,
+    /// `tab: {name|index|pane_id}` — split inside the selected
+    /// existing tab.
+    Tab(crate::ipc::TabSelector),
+    /// `tab: {new: {…}}` — spawn a fresh single-pane background tab.
+    NewTab { label: Option<String> },
+}
+
+impl SpawnPlacement {
+    /// The capability the outgoing request must be gated on. Any
+    /// explicit selector — including one that resolves to the caller's
+    /// own tab — requires [`crate::ipc::CAP_SPAWN_TAB`]: an older
+    /// server would silently drop the unknown field and spawn in the
+    /// caller's tab, which is exactly the wrong-tab accident the
+    /// capability exists to prevent. `SERVER_CAPABILITIES` is
+    /// additive, so a `spawn_tab` server always understands
+    /// `caller_scope` too.
+    fn required_cap(&self) -> &'static str {
+        match self {
+            SpawnPlacement::Here => crate::ipc::CAP_CALLER_SCOPE,
+            _ => crate::ipc::CAP_SPAWN_TAB,
+        }
+    }
+}
+
+/// Parse the `tab` argument shared by the three `spawn_*` tools.
+///
+/// Strict on purpose — every rejected shape here would otherwise be a
+/// pane spawned into the wrong tab: exactly one selector key, known
+/// keys only, correct JSON types, and `{new: …}` refuses `direction` /
+/// `target` outright instead of silently ignoring them (a brand-new
+/// tab has nothing to split, so a caller passing them is confused
+/// about what will happen).
+fn parse_spawn_placement(args: &Value) -> std::result::Result<SpawnPlacement, String> {
+    const FORM: &str = "expected one of {\"name\": \"<tab label>\"}, {\"index\": <0-based>}, \
+                        {\"pane_id\": <pane id>}, {\"new\": {}} or {\"new\": {\"name\": \"<label>\"}}";
+    let raw = match args.get("tab") {
+        None | Some(Value::Null) => return Ok(SpawnPlacement::Here),
+        Some(v) => v,
+    };
+    let obj = raw
+        .as_object()
+        .ok_or_else(|| format!("invalid tab selector {raw}: {FORM}"))?;
+    if obj.len() != 1 {
+        return Err(format!(
+            "invalid tab selector: exactly one selector key is required; {FORM}"
+        ));
+    }
+    let (key, val) = obj.iter().next().expect("len checked above");
+    match key.as_str() {
+        "name" => match val.as_str().map(str::trim) {
+            Some(s) if !s.is_empty() => Ok(SpawnPlacement::Tab(crate::ipc::TabSelector::Name(
+                s.to_string(),
+            ))),
+            _ => Err(format!("tab.name must be a non-empty string; {FORM}")),
+        },
+        "index" => match val.as_u64() {
+            Some(n) => Ok(SpawnPlacement::Tab(crate::ipc::TabSelector::Index(
+                n as usize,
+            ))),
+            None => Err(format!(
+                "tab.index must be a non-negative integer (0-based, as reported by list_peers); {FORM}"
+            )),
+        },
+        "pane_id" => match val.as_u64() {
+            Some(n) => Ok(SpawnPlacement::Tab(crate::ipc::TabSelector::PaneId(
+                n as usize,
+            ))),
+            None => Err(format!(
+                "tab.pane_id must be a non-negative integer pane id; {FORM}"
+            )),
+        },
+        "new" => {
+            let nested = val
+                .as_object()
+                .ok_or_else(|| format!("tab.new must be an object; {FORM}"))?;
+            if let Some(unknown) = nested.keys().find(|k| k.as_str() != "name") {
+                return Err(format!(
+                    "unknown tab.new field {unknown:?}; only \"name\" (the new tab's label) is accepted"
+                ));
+            }
+            let label = match nested.get("name") {
+                None => None,
+                Some(v) => match v.as_str().map(str::trim) {
+                    Some(s) if !s.is_empty() => Some(s.to_string()),
+                    _ => {
+                        return Err(
+                            "tab.new.name must be a non-empty string when present".to_string()
+                        );
+                    }
+                },
+            };
+            // Refuse, never ignore: with `direction` or `target` in
+            // the call, the caller believes this is a split — spawning
+            // an unrelated single-pane tab instead would honor the
+            // letter of the request and betray its intent.
+            if args.get("direction").is_some() || args.get("target").is_some() {
+                return Err(
+                    "tab: {new: …} creates a fresh single-pane tab, so `direction` and `target` \
+                     must be omitted"
+                        .to_string(),
+                );
+            }
+            Ok(SpawnPlacement::NewTab { label })
+        }
+        other => Err(format!("unknown tab selector key {other:?}; {FORM}")),
+    }
+}
+
+/// Send a [`Request::SpawnTab`] (the `tab: {new: …}` path of the
+/// `spawn_*` tools) and format the tool response. Shared by the three
+/// spawn handlers — only the command construction and the success
+/// wording differ between them.
+fn dispatch_spawn_tab(
+    id: &Value,
+    tool: &str,
+    what: &str,
+    endpoint: &EndpointName,
+    req: &Request,
+    launch_command: Option<&str>,
+) -> Value {
+    match client::send_request_requiring(endpoint, req, crate::ipc::CAP_SPAWN_TAB) {
+        Ok(Response::Ok { data }) => {
+            let new_id = data.get("id").and_then(|v| v.as_u64());
+            let tab_idx = data.get("tab").and_then(|v| v.as_u64());
+            let mut msg = match (new_id, tab_idx) {
+                (Some(n), Some(t)) => format!(
+                    "Spawned {what} id={n} in a new background tab (tab index {t}; focus unchanged)."
+                ),
+                (Some(n), None) => format!("Spawned {what} id={n} in a new background tab."),
+                _ => format!("Spawned {what} in a new background tab (id not reported)."),
+            };
+            if let Some(cmd) = launch_command {
+                msg.push_str(&format!(" Launch command: {cmd}"));
+            }
+            ok_response(id, tool_text_result(&msg))
+        }
+        Ok(Response::Err { message, code }) => err_response(
+            id,
+            -32603,
+            &format!("renga refused {tool}: {}", fmt_code(&message, &code)),
+        ),
+        Ok(other) => err_response(id, -32603, &format!("unexpected renga response: {other:?}")),
+        Err(e) => err_response(id, -32603, &format!("renga call failed: {e}")),
+    }
+}
+
 /// Optional string-valued argument extractor. Empty strings map to None
 /// so Claude can send `{"command": ""}` without accidentally shoving an
 /// empty command line into the new pane.
@@ -1259,11 +1447,26 @@ fn resolve_mcp_cwd(
 }
 
 fn handle_spawn_pane(id: &Value, args: &Value, ctx: &PeerCtx) -> Value {
-    let direction = match parse_direction(args.get("direction").and_then(|v| v.as_str())) {
-        Ok(d) => d,
+    // Placement first (Issue #290): `tab: {new: …}` changes which
+    // other arguments are even meaningful, so it must be interpreted
+    // before `direction` is demanded.
+    let placement = match parse_spawn_placement(args) {
+        Ok(p) => p,
         Err(msg) => return err_response(id, -32602, &msg),
     };
-    let target = parse_target(args.get("target").and_then(|v| v.as_str()));
+    let split_params = match &placement {
+        SpawnPlacement::NewTab { .. } => None,
+        _ => {
+            let direction = match parse_direction(args.get("direction").and_then(|v| v.as_str())) {
+                Ok(d) => d,
+                Err(msg) => return err_response(id, -32602, &msg),
+            };
+            Some((
+                direction,
+                parse_target(args.get("target").and_then(|v| v.as_str())),
+            ))
+        }
+    };
     let command = opt_string(args, "command").map(|c| upgrade_claude_command(&c));
     let name = opt_string(args, "name");
     let role = opt_string(args, "role");
@@ -1277,11 +1480,35 @@ fn handle_spawn_pane(id: &Value, args: &Value, ctx: &PeerCtx) -> Value {
     // paths in Claude's tool calls behave the way a user would expect
     // when typing them into the pane's shell. Absolute paths are left
     // untouched; `None` is forwarded as-is so the server falls back to
-    // its default (target pane's cwd for Split).
+    // its default (target pane's cwd for Split, the caller pane's cwd
+    // for SpawnTab).
     let cwd = match resolve_mcp_cwd(endpoint, caller_pane, cwd.as_deref()) {
         Ok(v) => v,
         Err(msg) => return err_response(id, -32602, &msg),
     };
+    if let SpawnPlacement::NewTab { label } = placement {
+        return dispatch_spawn_tab(
+            id,
+            "spawn_pane",
+            "pane",
+            endpoint,
+            &Request::SpawnTab {
+                command,
+                id: name,
+                label,
+                role,
+                cwd,
+                from_pane: Some(caller_pane),
+            },
+            None,
+        );
+    }
+    let required_cap = placement.required_cap();
+    let tab = match placement {
+        SpawnPlacement::Tab(selector) => Some(selector),
+        _ => None,
+    };
+    let (direction, target) = split_params.expect("split params parsed for non-new placement");
     match client::send_request_requiring(
         endpoint,
         &Request::Split {
@@ -1292,8 +1519,9 @@ fn handle_spawn_pane(id: &Value, args: &Value, ctx: &PeerCtx) -> Value {
             role,
             cwd,
             from_pane: Some(caller_pane),
+            tab,
         },
-        crate::ipc::CAP_CALLER_SCOPE,
+        required_cap,
     ) {
         Ok(Response::Ok { data }) => {
             let new_id = data.get("id").and_then(|v| v.as_u64());
@@ -1613,11 +1841,23 @@ fn validate_claude_extra_args(
 }
 
 fn handle_spawn_claude_pane(id: &Value, args: &Value, ctx: &PeerCtx) -> Value {
-    let direction = match parse_direction(args.get("direction").and_then(|v| v.as_str())) {
-        Ok(d) => d,
+    let placement = match parse_spawn_placement(args) {
+        Ok(p) => p,
         Err(msg) => return err_response(id, -32602, &msg),
     };
-    let target = parse_target(args.get("target").and_then(|v| v.as_str()));
+    let split_params = match &placement {
+        SpawnPlacement::NewTab { .. } => None,
+        _ => {
+            let direction = match parse_direction(args.get("direction").and_then(|v| v.as_str())) {
+                Ok(d) => d,
+                Err(msg) => return err_response(id, -32602, &msg),
+            };
+            Some((
+                direction,
+                parse_target(args.get("target").and_then(|v| v.as_str())),
+            ))
+        }
+    };
     let name = opt_string(args, "name");
     let role = opt_string(args, "role");
     let cwd = opt_string(args, "cwd");
@@ -1656,6 +1896,29 @@ fn handle_spawn_claude_pane(id: &Value, args: &Value, ctx: &PeerCtx) -> Value {
         Ok(v) => v,
         Err(msg) => return err_response(id, -32602, &msg),
     };
+    if let SpawnPlacement::NewTab { label } = placement {
+        return dispatch_spawn_tab(
+            id,
+            "spawn_claude_pane",
+            "Claude pane",
+            endpoint,
+            &Request::SpawnTab {
+                command: Some(command.clone()),
+                id: name,
+                label,
+                role,
+                cwd,
+                from_pane: Some(caller_pane),
+            },
+            Some(&command),
+        );
+    }
+    let required_cap = placement.required_cap();
+    let tab = match placement {
+        SpawnPlacement::Tab(selector) => Some(selector),
+        _ => None,
+    };
+    let (direction, target) = split_params.expect("split params parsed for non-new placement");
     match client::send_request_requiring(
         endpoint,
         &Request::Split {
@@ -1666,8 +1929,9 @@ fn handle_spawn_claude_pane(id: &Value, args: &Value, ctx: &PeerCtx) -> Value {
             role,
             cwd,
             from_pane: Some(caller_pane),
+            tab,
         },
-        crate::ipc::CAP_CALLER_SCOPE,
+        required_cap,
     ) {
         Ok(Response::Ok { data }) => {
             let new_id = data.get("id").and_then(|v| v.as_u64());
@@ -1703,11 +1967,23 @@ fn handle_spawn_codex_pane_with(
     ctx: &PeerCtx,
     verify_codex_install: fn() -> std::result::Result<(), String>,
 ) -> Value {
-    let direction = match parse_direction(args.get("direction").and_then(|v| v.as_str())) {
-        Ok(d) => d,
+    let placement = match parse_spawn_placement(args) {
+        Ok(p) => p,
         Err(msg) => return err_response(id, -32602, &msg),
     };
-    let target = parse_target(args.get("target").and_then(|v| v.as_str()));
+    let split_params = match &placement {
+        SpawnPlacement::NewTab { .. } => None,
+        _ => {
+            let direction = match parse_direction(args.get("direction").and_then(|v| v.as_str())) {
+                Ok(d) => d,
+                Err(msg) => return err_response(id, -32602, &msg),
+            };
+            Some((
+                direction,
+                parse_target(args.get("target").and_then(|v| v.as_str())),
+            ))
+        }
+    };
     let name = opt_string(args, "name");
     let role = opt_string(args, "role");
     let cwd = opt_string(args, "cwd");
@@ -1748,6 +2024,29 @@ fn handle_spawn_codex_pane_with(
         Ok(v) => v,
         Err(msg) => return err_response(id, -32602, &msg),
     };
+    if let SpawnPlacement::NewTab { label } = placement {
+        return dispatch_spawn_tab(
+            id,
+            "spawn_codex_pane",
+            "Codex pane",
+            endpoint,
+            &Request::SpawnTab {
+                command: Some(command.clone()),
+                id: name,
+                label,
+                role,
+                cwd,
+                from_pane: Some(caller_pane),
+            },
+            Some(&command),
+        );
+    }
+    let required_cap = placement.required_cap();
+    let tab = match placement {
+        SpawnPlacement::Tab(selector) => Some(selector),
+        _ => None,
+    };
+    let (direction, target) = split_params.expect("split params parsed for non-new placement");
     match client::send_request_requiring(
         endpoint,
         &Request::Split {
@@ -1758,8 +2057,9 @@ fn handle_spawn_codex_pane_with(
             role,
             cwd,
             from_pane: Some(caller_pane),
+            tab,
         },
-        crate::ipc::CAP_CALLER_SCOPE,
+        required_cap,
     ) {
         Ok(Response::Ok { data }) => {
             let new_id = data.get("id").and_then(|v| v.as_u64());
@@ -2699,6 +2999,129 @@ mod tests {
         assert!(parse_direction(None).is_err());
     }
 
+    // ─── #290: spawn placement (tab selector) parsing ─────────
+
+    #[test]
+    fn parse_spawn_placement_defaults_to_here() {
+        assert_eq!(
+            parse_spawn_placement(&json!({ "direction": "vertical" })),
+            Ok(SpawnPlacement::Here)
+        );
+        assert_eq!(
+            parse_spawn_placement(&json!({ "tab": null })),
+            Ok(SpawnPlacement::Here)
+        );
+    }
+
+    #[test]
+    fn parse_spawn_placement_maps_each_selector() {
+        assert_eq!(
+            parse_spawn_placement(&json!({ "tab": { "name": "workers" } })),
+            Ok(SpawnPlacement::Tab(crate::ipc::TabSelector::Name(
+                "workers".into()
+            )))
+        );
+        assert_eq!(
+            parse_spawn_placement(&json!({ "tab": { "index": 2 } })),
+            Ok(SpawnPlacement::Tab(crate::ipc::TabSelector::Index(2)))
+        );
+        assert_eq!(
+            parse_spawn_placement(&json!({ "tab": { "pane_id": 17 } })),
+            Ok(SpawnPlacement::Tab(crate::ipc::TabSelector::PaneId(17)))
+        );
+        assert_eq!(
+            parse_spawn_placement(&json!({ "tab": { "new": {} } })),
+            Ok(SpawnPlacement::NewTab { label: None })
+        );
+        assert_eq!(
+            parse_spawn_placement(&json!({ "tab": { "new": { "name": "workers" } } })),
+            Ok(SpawnPlacement::NewTab {
+                label: Some("workers".into())
+            })
+        );
+    }
+
+    /// Every malformed selector shape is refused — each of these, if
+    /// silently coerced or ignored, would be a pane in the wrong tab.
+    #[test]
+    fn parse_spawn_placement_rejects_malformed_selectors() {
+        for args in [
+            // not an object / string forms are not accepted ("new" is
+            // not a reserved string, tabs may literally be named "new")
+            json!({ "tab": "new" }),
+            json!({ "tab": 2 }),
+            // zero or several selector keys
+            json!({ "tab": {} }),
+            json!({ "tab": { "name": "a", "index": 1 } }),
+            // unknown key, wrong types
+            json!({ "tab": { "nme": "a" } }),
+            json!({ "tab": { "name": "" } }),
+            json!({ "tab": { "name": 3 } }),
+            json!({ "tab": { "index": -1 } }),
+            json!({ "tab": { "index": "2" } }),
+            json!({ "tab": { "pane_id": "x" } }),
+            // malformed `new`
+            json!({ "tab": { "new": null } }),
+            json!({ "tab": { "new": "workers" } }),
+            json!({ "tab": { "new": { "label": "x" } } }),
+            json!({ "tab": { "new": { "name": "" } } }),
+        ] {
+            assert!(parse_spawn_placement(&args).is_err(), "must reject {args}");
+        }
+    }
+
+    /// `tab.new` has nothing to split: `direction` / `target` in the
+    /// same call are refused outright, never silently dropped.
+    #[test]
+    fn parse_spawn_placement_refuses_direction_and_target_with_new() {
+        for args in [
+            json!({ "tab": { "new": {} }, "direction": "vertical" }),
+            json!({ "tab": { "new": {} }, "target": "focused" }),
+        ] {
+            let err = parse_spawn_placement(&args).expect_err("must refuse");
+            assert!(err.contains("omitted"), "unhelpful message: {err}");
+        }
+    }
+
+    /// Any explicit selector — even one resolving to the caller's own
+    /// tab — must escalate the required capability: an older server
+    /// would ignore the field and spawn in the wrong tab.
+    #[test]
+    fn spawn_placement_capability_escalates_with_any_selector() {
+        assert_eq!(
+            SpawnPlacement::Here.required_cap(),
+            crate::ipc::CAP_CALLER_SCOPE
+        );
+        assert_eq!(
+            SpawnPlacement::Tab(crate::ipc::TabSelector::Index(0)).required_cap(),
+            crate::ipc::CAP_SPAWN_TAB
+        );
+        assert_eq!(
+            SpawnPlacement::NewTab { label: None }.required_cap(),
+            crate::ipc::CAP_SPAWN_TAB
+        );
+    }
+
+    /// The `tab.new` rejection must fire at the handler level for all
+    /// three spawn tools, before any IPC traffic.
+    #[test]
+    fn spawn_tools_reject_direction_with_tab_new_as_invalid_params() {
+        let ctx = detached_ctx("not relevant");
+        let args = json!({ "tab": { "new": {} }, "direction": "vertical" });
+        for handler in [
+            handle_spawn_pane as fn(&Value, &Value, &PeerCtx) -> Value,
+            handle_spawn_claude_pane,
+            handle_spawn_codex_pane,
+        ] {
+            let resp = handler(&json!(1), &args, &ctx);
+            let err_code = resp
+                .get("error")
+                .and_then(|e| e.get("code"))
+                .and_then(|c| c.as_i64());
+            assert_eq!(err_code, Some(-32602), "resp={resp}");
+        }
+    }
+
     #[test]
     fn upgrade_claude_command_bare_claude_becomes_peer_enabled() {
         assert_eq!(
@@ -2913,22 +3336,49 @@ mod tests {
         }
     }
 
+    /// Since #290, `direction` is only *conditionally* required (a
+    /// `tab: {new: …}` spawn forbids it), which a static `required`
+    /// array cannot express. The schema therefore must NOT list
+    /// `direction` as required — a schema-enforcing client would
+    /// otherwise reject every valid tab.new call — and the actual
+    /// requiredness lives in `parse_direction` on the split path
+    /// (covered by `spawn_pane_without_direction_is_invalid_params`).
     #[test]
-    fn spawn_pane_schema_requires_direction() {
+    fn spawn_schemas_leave_direction_conditionally_required() {
         let spec = tools_spec();
-        let spawn = spec
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|t| t.get("name").and_then(|v| v.as_str()) == Some("spawn_pane"))
-            .expect("spawn_pane entry");
-        let required = spawn
-            .get("inputSchema")
-            .and_then(|s| s.get("required"))
-            .and_then(|r| r.as_array())
-            .expect("required array");
-        let required_names: Vec<&str> = required.iter().filter_map(|v| v.as_str()).collect();
-        assert!(required_names.contains(&"direction"), "{required_names:?}");
+        for tool in ["spawn_pane", "spawn_claude_pane", "spawn_codex_pane"] {
+            let entry = spec
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|t| t.get("name").and_then(|v| v.as_str()) == Some(tool))
+                .unwrap_or_else(|| panic!("{tool} entry"));
+            let required: Vec<&str> = entry
+                .get("inputSchema")
+                .and_then(|s| s.get("required"))
+                .and_then(|r| r.as_array())
+                .map(|r| r.iter().filter_map(|v| v.as_str()).collect())
+                .unwrap_or_default();
+            assert!(
+                !required.contains(&"direction"),
+                "{tool} lists direction as unconditionally required: {required:?}"
+            );
+        }
+    }
+
+    /// The Rust-side check still enforces `direction` whenever the
+    /// call is a split (no `tab`, or an existing-tab selector).
+    #[test]
+    fn spawn_pane_without_direction_is_invalid_params() {
+        let ctx = detached_ctx("not relevant");
+        for args in [json!({}), json!({ "tab": { "index": 1 } })] {
+            let resp = handle_spawn_pane(&json!(1), &args, &ctx);
+            let err_code = resp
+                .get("error")
+                .and_then(|e| e.get("code"))
+                .and_then(|c| c.as_i64());
+            assert_eq!(err_code, Some(-32602), "args={args} resp={resp}");
+        }
     }
 
     #[test]
@@ -3613,6 +4063,50 @@ Commands:
                 "{tool} schema must advertise cwd property"
             );
         }
+    }
+
+    /// #290 regression guard: the `tab` selector must be discoverable
+    /// on all three spawn tools (and stay off `new_tab`, whose
+    /// activate-and-focus contract is unchanged).
+    #[test]
+    fn spawn_schemas_advertise_the_tab_selector() {
+        let spec = tools_spec();
+        for tool in ["spawn_pane", "spawn_claude_pane", "spawn_codex_pane"] {
+            let entry = spec
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|t| t.get("name").and_then(|v| v.as_str()) == Some(tool))
+                .unwrap_or_else(|| panic!("{tool} entry"));
+            let props = entry
+                .get("inputSchema")
+                .and_then(|s| s.get("properties"))
+                .and_then(|p| p.as_object())
+                .unwrap_or_else(|| panic!("{tool} properties"));
+            let tab_props = props
+                .get("tab")
+                .and_then(|t| t.get("properties"))
+                .and_then(|p| p.as_object())
+                .unwrap_or_else(|| panic!("{tool} schema must advertise a structured tab object"));
+            for key in ["name", "index", "pane_id", "new"] {
+                assert!(tab_props.contains_key(key), "{tool} tab is missing {key}");
+            }
+        }
+        let new_tab = spec
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t.get("name").and_then(|v| v.as_str()) == Some("new_tab"))
+            .expect("new_tab entry");
+        let props = new_tab
+            .get("inputSchema")
+            .and_then(|s| s.get("properties"))
+            .and_then(|p| p.as_object())
+            .expect("new_tab properties");
+        assert!(
+            !props.contains_key("tab"),
+            "new_tab must not grow a tab selector — its contract stays create-and-focus"
+        );
     }
 
     #[test]

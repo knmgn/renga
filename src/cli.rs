@@ -443,6 +443,9 @@ impl IpcCommand {
                     role: role.clone(),
                     cwd: resolve_cli_cwd(cwd.as_deref())?,
                     from_pane: None,
+                    // The CLI has no tab-placement flag: `renga split`
+                    // keeps splitting in the visible tab.
+                    tab: None,
                 })
             }
             IpcCommand::Rename {
