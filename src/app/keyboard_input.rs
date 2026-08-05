@@ -226,8 +226,18 @@ impl App {
         if (key.modifiers == KeyModifiers::CONTROL || key.modifiers == KeyModifiers::ALT)
             && matches!(key.code, KeyCode::Char('t') | KeyCode::Char('T'))
         {
-            let new_id = self.new_tab()?;
-            self.emit_pane_started(new_id);
+            match self.create_tab_with_cwd(None, true) {
+                Ok((_, new_id)) => self.emit_pane_started(new_id),
+                // The MAX_TABS refusal must not bubble into the event
+                // loop — `run_event_loop`'s `?` would tear down the
+                // whole multiplexer over a full tab strip. Consume the
+                // keypress instead, matching how a split at MAX_PANES
+                // and the tab-bar `+` click already no-op at their
+                // caps. Genuine failures (PTY spawn I/O) keep the
+                // pre-#290 propagation.
+                Err(e) if e.code == Some(ipc::err_code::TAB_LIMIT_REACHED) => {}
+                Err(e) => return Err(anyhow::anyhow!(e.to_string())),
+            }
             return Ok(true);
         }
 

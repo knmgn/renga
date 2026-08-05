@@ -178,6 +178,45 @@ fn foreign_numeric_target_is_target_tab_mismatch() {
     app.shutdown();
 }
 
+/// `{new: …}` is `spawn_tab`'s job; a raw wire client sending it on a
+/// `split` gets a `protocol` error, never a fallthrough into some
+/// existing tab.
+#[test]
+fn split_with_tab_new_is_a_protocol_error() {
+    let (mut app, caller, _active) = two_tabs();
+    let tabs_before = app.workspaces.len();
+    for selector in [
+        ipc::TabSelector::New { name: None },
+        ipc::TabSelector::New {
+            name: Some("workers".into()),
+        },
+    ] {
+        let err = app
+            .handle_split(
+                &ipc::PaneRef::Focused,
+                ipc::Direction::Vertical,
+                None,
+                None,
+                None,
+                None,
+                Some(caller),
+                Some(&selector),
+            )
+            .expect_err("tab.new is not a split");
+        assert_eq!(err.code, Some(ipc::err_code::PROTOCOL));
+    }
+    assert_eq!(app.workspaces.len(), tabs_before, "no tab was created");
+    assert_eq!(
+        app.workspaces
+            .iter()
+            .map(|ws| ws.panes.len())
+            .sum::<usize>(),
+        2,
+        "no pane was created"
+    );
+    app.shutdown();
+}
+
 #[test]
 fn tab_selector_with_unknown_caller_is_pane_not_found() {
     let (mut app, _caller, _active) = two_tabs();

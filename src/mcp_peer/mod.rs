@@ -1197,7 +1197,9 @@ fn parse_spawn_placement(args: &Value) -> std::result::Result<SpawnPlacement, St
                 ));
             }
             let label = match nested.get("name") {
-                None => None,
+                // Explicit null means the same as omission, matching
+                // how `tab: null` is treated above.
+                None | Some(Value::Null) => None,
                 Some(v) => match v.as_str().map(str::trim) {
                     Some(s) if !s.is_empty() => Some(s.to_string()),
                     _ => {
@@ -1210,8 +1212,13 @@ fn parse_spawn_placement(args: &Value) -> std::result::Result<SpawnPlacement, St
             // Refuse, never ignore: with `direction` or `target` in
             // the call, the caller believes this is a split — spawning
             // an unrelated single-pane tab instead would honor the
-            // letter of the request and betray its intent.
-            if args.get("direction").is_some() || args.get("target").is_some() {
+            // letter of the request and betray its intent. Explicit
+            // null counts as absent, consistent with the split path
+            // (where `direction: null` / `target: null` read as
+            // omitted) and with `tab: null` above.
+            let given =
+                |key: &str| args.get(key).is_some_and(|v| !v.is_null());
+            if given("direction") || given("target") {
                 return Err(
                     "tab: {new: …} creates a fresh single-pane tab, so `direction` and `target` \
                      must be omitted"
@@ -3081,6 +3088,25 @@ mod tests {
             let err = parse_spawn_placement(&args).expect_err("must refuse");
             assert!(err.contains("omitted"), "unhelpful message: {err}");
         }
+    }
+
+    /// Explicit JSON null means "omitted" everywhere in this parser —
+    /// a client serializer that null-fills its optional fields must
+    /// not be rejected for fields it semantically left out. (The split
+    /// path already reads `direction: null` / `target: null` as
+    /// absent via `as_str()`.)
+    #[test]
+    fn parse_spawn_placement_treats_explicit_null_as_omitted() {
+        assert_eq!(
+            parse_spawn_placement(
+                &json!({ "tab": { "new": {} }, "direction": null, "target": null })
+            ),
+            Ok(SpawnPlacement::NewTab { label: None })
+        );
+        assert_eq!(
+            parse_spawn_placement(&json!({ "tab": { "new": { "name": null } } })),
+            Ok(SpawnPlacement::NewTab { label: None })
+        );
     }
 
     /// Any explicit selector — even one resolving to the caller's own
