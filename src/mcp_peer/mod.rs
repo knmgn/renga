@@ -4,8 +4,8 @@
 //! `src/bin/renga-mcp-peer-spike.rs`. Where the spike looped messages
 //! back to the same Claude, this module routes them through renga's
 //! existing IPC server so a message sent from pane A shows up in pane
-//! B's context as a `<channel source="renga-peers">` tag — provided
-//! both panes live in the same renga tab.
+//! B's context as a `<channel source="renga-peers">` tag. Since Issue
+//! #289 delivery spans every renga tab, not just the sender's own.
 //!
 //! # Lifecycle
 //!
@@ -382,11 +382,15 @@ send_message calls may need approval before peer messaging becomes reliable.\n\n
     };
     format!(
         "You are connected to the renga-peers network. Other peer-enabled agent instances \
-running in the same renga tab can see you and send you messages.\n\n\
+running in any renga tab can see you and send you messages.\n\n\
 {receive_guidance}\
 Peer messaging tools:\n\
-- list_peers: Discover other peer-enabled agent instances in the same renga tab.\n\
-- send_message: Send a message to another instance by peer ID or name.\n\
+- list_peers: Discover peer-enabled agent instances across all renga tabs (your tab first). \
+The tab index shown per peer is display metadata — it shifts when tabs close, so address \
+peers by their numeric pane id.\n\
+- send_message: Send a message to another instance. A numeric peer ID reaches any tab; a \
+name only resolves within your own tab (names are unique per tab, not globally), so use \
+the numeric id from list_peers for peers in other tabs.\n\
 - set_summary: Set a 1-2 sentence summary of what you're working on; surfaced on list_panes / list_peers for other peers.\n\
 - check_messages: Drain any queued peer messages still waiting for this client.\n\n\
 Pane control tools. For list_panes, spawn_pane, spawn_claude_pane, spawn_codex_pane, \
@@ -461,25 +465,25 @@ fn tools_spec() -> Value {
     json!([
         {
             "name": "list_peers",
-            "description": "List other peer-enabled panes in the same renga tab. Each peer includes id, optional name / role, cwd, and when known the client kind and whether it receives messages via push or polling.",
+            "description": "List other peer-enabled panes across ALL renga tabs, your own tab first. Each peer includes id, optional name / role, cwd, tab metadata (display only — tab indexes shift when tabs close, so always address a peer by its numeric pane id), and when known the client kind and whether it receives messages via push or polling.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "scope": {
                         "type": "string",
                         "enum": ["machine", "directory", "repo"],
-                        "description": "Accepted for wire-compat with claude-peers-mcp. renga always treats scope as the current tab; this parameter is ignored."
+                        "description": "Accepted for wire-compat with claude-peers-mcp; this parameter is ignored. renga results always span every renga tab."
                     }
                 }
             }
         },
         {
             "name": "send_message",
-            "description": "Send a message to another pane in the same renga tab. Claude recipients see it as a <channel source=\"renga-peers\"> tag; Codex panes receive a pane-local nudge from renga and then read the actual queued message via `check_messages`.",
+            "description": "Send a message to another pane in any renga tab. Claude recipients see it as a <channel source=\"renga-peers\"> tag; Codex panes receive a pane-local nudge from renga and then read the actual queued message via `check_messages`. A numeric to_id reaches every tab; a name resolves ONLY within your own tab — pane names are unique per tab, not globally, so a pane in another tab cannot be addressed by an unqualified name even if the name is unique right now. Use the numeric id from list_peers for cross-tab sends.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "to_id":   { "type": "string", "description": "Recipient pane id (from list_peers) or stable name." },
+                    "to_id":   { "type": "string", "description": "Recipient pane id (from list_peers; works across tabs) or stable name (own tab only)." },
                     "message": { "type": "string", "description": "Text to deliver." }
                 },
                 "required": ["to_id", "message"]
@@ -817,7 +821,14 @@ fn handle_list_peers(id: &Value, ctx: &PeerCtx) -> Value {
             );
         }
     };
-    match client::send_request(endpoint, &Request::PeerList { from_pane: pane_id }) {
+    // Requires `cross_tab_peers`, not just `caller_scope`: a #288-era
+    // server would answer this request successfully but with same-tab
+    // scope, silently contradicting the all-tabs tool description.
+    match client::send_request_requiring(
+        endpoint,
+        &Request::PeerList { from_pane: pane_id },
+        crate::ipc::CAP_CROSS_TAB_PEERS,
+    ) {
         Ok(Response::Ok { data }) => match serde_json::from_value::<Vec<PeerInfo>>(data) {
             Ok(peers) => ok_response(id, tool_text_result(&format_peer_list(&peers))),
             Err(e) => err_response(id, -32603, &format!("decode peer list: {e}")),
@@ -834,9 +845,13 @@ fn handle_list_peers(id: &Value, ctx: &PeerCtx) -> Value {
 
 fn format_peer_list(peers: &[PeerInfo]) -> String {
     if peers.is_empty() {
-        return "No peers in this tab.".to_string();
+        return "No peers in any renga tab.".to_string();
     }
-    let mut out = String::from("Peers in this tab:\n\n");
+    let mut out = String::from(
+        "Peers across all renga tabs (your tab first). Address same-tab peers by id or \
+name; peers in other tabs ONLY by numeric id — names never resolve across tabs, and the \
+tab index shown is display metadata that shifts when tabs close:\n\n",
+    );
     for p in peers {
         out.push_str(&format!("- id={}", p.id));
         if let Some(name) = &p.name {
@@ -850,6 +865,14 @@ fn format_peer_list(peers: &[PeerInfo]) -> String {
         }
         if let Some(mode) = p.receive_mode {
             out.push_str(&format!(" receive={}", receive_mode_label(mode)));
+        }
+        match (p.same_tab, p.tab) {
+            (Some(true), _) => out.push_str(" [your tab]"),
+            (_, Some(tab)) => match &p.tab_name {
+                Some(tab_name) => out.push_str(&format!(" [tab {tab} \"{tab_name}\"]")),
+                None => out.push_str(&format!(" [tab {tab}]")),
+            },
+            _ => {}
         }
         if let Some(cwd) = &p.cwd {
             out.push_str(&format!("\n  cwd: {cwd}"));
@@ -894,13 +917,18 @@ fn handle_send_message(id: &Value, args: &Value, ctx: &PeerCtx) -> Value {
         Ok(n) => PaneRef::Id(n),
         Err(_) => PaneRef::Name(to_id.to_string()),
     };
-    match client::send_request(
+    // Requires `cross_tab_peers`: a #288-era server (which also
+    // advertises `caller_scope`) still silently drops cross-tab
+    // targets, so reporting "Delivered" against one would be a lie.
+    // Fail closed and name the remedy instead.
+    match client::send_request_requiring(
         endpoint,
         &Request::PeerSend {
             from_pane: pane_id,
             target,
             body: message.to_string(),
         },
+        crate::ipc::CAP_CROSS_TAB_PEERS,
     ) {
         Ok(Response::Ok { .. }) => {
             ok_response(id, tool_text_result(&format!("Delivered to {to_id}.")))
@@ -2748,6 +2776,68 @@ mod tests {
     #[test]
     fn format_pane_list_empty() {
         assert_eq!(format_pane_list(&[]), "No panes in this tab.");
+    }
+
+    fn bare_peer_info(id: usize) -> PeerInfo {
+        PeerInfo {
+            id,
+            name: None,
+            role: None,
+            tab: None,
+            tab_name: None,
+            same_tab: None,
+            cwd: None,
+            kind: None,
+            receive_mode: None,
+            summary: None,
+        }
+    }
+
+    #[test]
+    fn format_peer_list_empty_spans_all_tabs() {
+        assert_eq!(format_peer_list(&[]), "No peers in any renga tab.");
+    }
+
+    #[test]
+    fn format_peer_list_annotates_tab_membership() {
+        let peers = vec![
+            PeerInfo {
+                name: Some("sibling".into()),
+                tab: Some(0),
+                tab_name: Some("renga".into()),
+                same_tab: Some(true),
+                kind: Some(PeerClientKind::Claude),
+                ..bare_peer_info(3)
+            },
+            PeerInfo {
+                tab: Some(1),
+                tab_name: Some("kura".into()),
+                same_tab: Some(false),
+                kind: Some(PeerClientKind::Codex),
+                ..bare_peer_info(7)
+            },
+        ];
+        let text = format_peer_list(&peers);
+        assert!(text.contains("across all renga tabs"), "{text}");
+        assert!(
+            text.contains("id=3 name=sibling kind=claude [your tab]"),
+            "{text}"
+        );
+        assert!(text.contains("id=7 kind=codex [tab 1 \"kura\"]"), "{text}");
+        // The addressing rule ships with the list so agents don't
+        // have to remember it from the tool description alone.
+        assert!(text.contains("ONLY by numeric id"), "{text}");
+    }
+
+    #[test]
+    fn format_peer_list_tolerates_missing_tab_metadata() {
+        // A PeerInfo without tab fields (defensive: the capability
+        // gate should prevent pre-#289 servers, but decode-level None
+        // must not panic or print a bogus tab).
+        let text = format_peer_list(&[bare_peer_info(5)]);
+        assert!(text.contains("- id=5\n"), "{text}");
+        assert!(!text.contains("[tab"), "{text}");
+        assert!(!text.contains("[your tab]"), "{text}");
     }
 
     #[test]

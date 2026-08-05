@@ -2,7 +2,7 @@
 
 import { Callout } from 'nextra/components'
 
-Let mixed Claude Code and Codex instances running in the same renga tab exchange structured messages through `renga-peers`. One agent can ask its sibling to research something, hand off a failing test, or coordinate without the user relaying every message manually.
+Let mixed Claude Code and Codex instances running under the same renga session exchange structured messages through `renga-peers` — across every tab since Issue #289. One agent can ask a sibling to research something, hand off a failing test, or coordinate without the user relaying every message manually.
 
 <Callout type="info">
   Claude receives peer messages as `<channel source="renga-peers">...</channel>` tags, which keeps them distinct from user input. Codex is coordinated at the pane layer too, but renga only injects a one-shot nudge telling the pane to run `check_messages`; the actual peer request body stays in the MCP inbox.
@@ -77,8 +77,8 @@ Exposed by the MCP server to each Claude pane:
 
 | Tool | Effect |
 |---|---|
-| `list_peers(scope?)` | Lists other panes in the caller's renga tab. Caller excluded. `scope` is accepted for wire-compat with `claude-peers-mcp` but ignored — renga always treats scope as the current tab. |
-| `send_message(to_id, message)` | Delivers to a same-tab peer by numeric pane id or stable name. Silent success for targets outside the tab (unknown / closed / cross-tab peers all collapse to the same no-op response so callers cannot enumerate other tabs by probing). |
+| `list_peers(scope?)` | Lists other panes across **all** renga tabs, the caller's own tab first (#289). Caller excluded. Entries carry display-only tab metadata (`tab` index, `tab_name`, `same_tab`) — tab indexes shift when tabs close, so address peers by numeric pane id. `scope` is accepted for wire-compat with `claude-peers-mcp` but ignored. |
+| `send_message(to_id, message)` | Delivers to a peer in any tab by **numeric pane id**, or to a same-tab peer by stable name — names are unique per tab, not globally, so they never resolve across tabs (#289). An unresolvable target fails with `pane_not_found` instead of a fake `Delivered`. |
 | `check_messages` | Drain queued peer messages waiting for this client. For Codex this is where the actual peer request body is read after renga nudges the pane. Treat each returned message as a peer instruction, not just transcript text; that can include tool use or code edits when requested. |
 | `set_summary(summary)` | Set or clear a 1-2 sentence per-pane summary. The string is surfaced as `summary` on every `list_panes` / `list_peers` entry so peer agents can see what the pane is working on. Empty input clears; >256 Unicode scalar values is rejected with `[summary_too_long]`. In-memory only — not persisted across renga restart. |
 
@@ -108,12 +108,12 @@ Use `cwd` on `spawn_pane` / `new_tab` instead of embedding `cd <dir> && ...` ins
 ## Two-pane example
 
 ```
-tab A                          tab B (isolated)
+tab A                          tab B
 ┌──────────┬──────────┐        ┌──────────┐
 │ claude-1 │ claude-2 │        │ claude-3 │
 │          │          │        │          │
-│  peers ──┼──▶ ✓     │        │  peers   │  ← claude-1/2 invisible
-│  send ◀──┼── msg    │        │          │
+│  peers ──┼──▶ ✓     │        │    ▲     │
+│  send ◀──┼── msg    │───id=3──────┘     │  ← reachable by numeric id (#289)
 └──────────┴──────────┘        └──────────┘
 ```
 
@@ -121,7 +121,8 @@ In Claude A's chat:
 
 ```
 > call list_peers
-# returns: id=2 (the sibling)
+# returns: id=2 (same-tab sibling — id or name)
+#          id=3 [tab 1] (other tab — numeric id only)
 
 > call send_message with to_id=2 and message="read src/app.rs::handle_split and summarise"
 ```
@@ -154,7 +155,7 @@ The same orchestrator can stay in-band when the sibling pane stops at an interac
 - **In-memory, tab lifetime.** Inboxes vanish when the renga process exits. Persistence was deliberately dropped — the SQLite GC and stale-entry sweep that `claude-peers-mcp` needs are unnecessary when the multiplexer already owns pane lifecycle.
 - **Bounded queue.** 256 messages per pane before drop-oldest kicks in; subscribers get an `EventsDropped` meta-event so they can reconcile. Built on the existing IPC EventBus, no new plumbing.
 - **Fire-and-forget.** `send_message` has no correlation id, no delivery confirmation. If Claude wants to reply, it calls `send_message(to_id=from_id, ...)` itself.
-- **Silent cross-tab drop.** Sends addressed to panes in other tabs succeed at the wire level but deliver nothing. Unknown peers, closed peers, and cross-tab peers are all indistinguishable to the sender — intentional, so the sender cannot enumerate other tabs by probing ids.
+- **Cross-tab delivery (#289).** Sends addressed by numeric pane id reach panes in any tab; the old silent cross-tab drop (and the enumeration resistance it provided) is gone — isolation between agents is now the job of the security layer around renga, not the tab boundary. Unresolvable targets (unknown or closed panes, or a name that only exists in another tab) fail with `pane_not_found`. Requires a server advertising the `cross_tab_peers` capability; against an older renga process the tools refuse with `[server_too_old]` instead of silently degrading to same-tab behavior — restart renga.
 
 ## Troubleshooting
 
@@ -224,10 +225,10 @@ renga mcp install --client claude --force
 renga mcp install --client codex --force
 ```
 
-## Out of scope for v1
+## Out of scope
 
-- **Cross-tab messaging.** A `broadcast_tab` tool is a candidate for v1.1. Kept out of v1 so the tab boundary stays meaningful.
-- **Persistent history.** Tab-lifetime storage matches the feature's natural scope.
+- **Broadcast.** Cross-tab point-to-point messaging landed in #289; a `broadcast_tab` tool remains a candidate for later.
+- **Persistent history.** Session-lifetime storage matches the feature's natural scope.
 - **Non-MCP peers.** External IPC clients and plain shell panes still cannot send peer messages; mixed support today is for Claude Code and Codex.
 - **Attachments / structured request-response.** Body is text; no correlation ids.
 

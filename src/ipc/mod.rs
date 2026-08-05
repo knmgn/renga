@@ -76,10 +76,22 @@ pub const INSPECT_MAX_LINES: usize = 2000;
 /// theoretical one.
 pub const CAP_CALLER_SCOPE: &str = "caller_scope";
 
+/// Capability token advertised by servers whose peer messaging spans
+/// tabs (Issue #289): [`Request::PeerList`] enumerates every workspace
+/// and [`Request::PeerSend`] delivers to panes in other tabs instead of
+/// silently dropping them.
+///
+/// Deliberately distinct from [`CAP_CALLER_SCOPE`]: a #288-era server
+/// advertises `caller_scope` while still silently dropping cross-tab
+/// sends, so the bundled mcp-peer must gate its `list_peers` /
+/// `send_message` tools on *this* token to keep "Delivered" honest.
+/// Absent token ⇒ fail closed (see [`client::send_request_requiring`]).
+pub const CAP_CROSS_TAB_PEERS: &str = "cross_tab_peers";
+
 /// Every capability token this build's server advertises. Additive by
 /// construction — clients match on tokens they know and ignore the
 /// rest.
-pub const SERVER_CAPABILITIES: &[&str] = &[CAP_CALLER_SCOPE];
+pub const SERVER_CAPABILITIES: &[&str] = &[CAP_CALLER_SCOPE, CAP_CROSS_TAB_PEERS];
 
 /// One IPC call from a client to the running renga instance.
 ///
@@ -229,22 +241,30 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         from_pane: Option<usize>,
     },
-    /// List peers visible from the caller's pane. Scope is always
-    /// "panes in the same workspace as `from_pane`, excluding
-    /// `from_pane` itself". Used by the bundled MCP peer server
-    /// (`renga mcp-peer`) to serve its `list_peers` tool. Wire-compat
-    /// with claude-peers-mcp's tool signature is handled in the MCP
-    /// layer; this request is renga-internal.
+    /// List peers visible from the caller's pane. Scope is "every pane
+    /// in every workspace, excluding `from_pane` itself" (Issue #289) —
+    /// the caller's own tab is listed first so same-tab siblings stay
+    /// at the top. Servers advertising [`CAP_CROSS_TAB_PEERS`] answer
+    /// with this scope; older servers only ever listed the caller's
+    /// workspace. Used by the bundled MCP peer server (`renga
+    /// mcp-peer`) to serve its `list_peers` tool. Wire-compat with
+    /// claude-peers-mcp's tool signature is handled in the MCP layer;
+    /// this request is renga-internal.
     PeerList {
         /// The caller's own pane id (from `RENGA_PANE_ID` env).
         from_pane: usize,
     },
-    /// Deliver `body` to `target`'s peer inbox. Silently no-ops if
-    /// `target` resolves to a pane outside `from_pane`'s workspace —
-    /// cross-tab messaging is not exposed in v1. On success the server
-    /// emits an `Event::PeerInbox` on the event bus so any MCP peer
-    /// subprocess subscribed on behalf of the target can push it out
-    /// as a `notifications/claude/channel` frame.
+    /// Deliver `body` to `target`'s peer inbox. Cross-tab targets are
+    /// deliverable since Issue #289 (servers advertising
+    /// [`CAP_CROSS_TAB_PEERS`]; older servers silently dropped them):
+    /// a numeric id reaches any tab, while a name resolves only inside
+    /// `from_pane`'s own workspace — pane names are unique per tab,
+    /// not globally, so an unqualified name can never address another
+    /// tab. An unresolvable target fails with `pane_not_found` rather
+    /// than pretending to deliver. On success the server emits an
+    /// `Event::PeerInbox` on the event bus so any MCP peer subprocess
+    /// subscribed on behalf of the target can push it out as a
+    /// `notifications/claude/channel` frame.
     PeerSend {
         from_pane: usize,
         target: PaneRef,
@@ -382,10 +402,10 @@ pub enum PeerReceiveMode {
 }
 
 /// One entry in the `PeerList` response payload. Describes a single
-/// Claude-or-shell pane as a peer of the requesting pane. Scoped to
-/// the same workspace as the caller (tab isolation is enforced by the
-/// server). The MCP peer subprocess maps this into its `list_peers`
-/// tool output for Claude; see `src/mcp_peer/` once landed.
+/// Claude-or-shell pane as a peer of the requesting pane. Spans every
+/// workspace since Issue #289 (previously scoped to the caller's tab).
+/// The MCP peer subprocess maps this into its `list_peers` tool output
+/// for Claude; see `src/mcp_peer/`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PeerInfo {
     pub id: usize,
@@ -393,6 +413,23 @@ pub struct PeerInfo {
     pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
+    /// Index of the tab (workspace) the pane lives in. **Display
+    /// metadata only** — tab indexes shift when tabs close, so the
+    /// stable address for a peer is its pane `id`, never this. All
+    /// three tab fields are optional for wire compat both ways: a
+    /// pre-#289 server omits them (new client decodes `None`) and a
+    /// pre-#289 client ignores them as unknown fields.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tab: Option<usize>,
+    /// Display label of that tab (custom rename or cwd-derived).
+    /// Display metadata only, same caveat as [`PeerInfo::tab`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tab_name: Option<String>,
+    /// True when the pane shares the caller's tab. Same-tab peers can
+    /// be addressed by bare name; peers in other tabs require the
+    /// numeric pane id (names are only unique per tab).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub same_tab: Option<bool>,
     /// Working directory the pane was spawned with. Surfaced so the
     /// asking Claude can tell which repo a sibling pane is in.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -668,11 +705,12 @@ pub enum Event {
     /// liveness indicator.
     Heartbeat { ts_ms: u64 },
     /// A peer message destined for `target_pane`. Emitted by the server
-    /// in response to a `Request::PeerSend` that resolved to a pane in
-    /// the sender's workspace. Subscribers filter on `target_pane` to
-    /// pick out their own inbox; all other subscribers ignore the
-    /// event. Workspace isolation is enforced at send time, so an
-    /// emitted `PeerInbox` is always intra-tab by construction.
+    /// in response to a `Request::PeerSend` whose target resolved to a
+    /// live pane — in any tab, since Issue #289 removed the same-tab
+    /// restriction. Subscribers filter on `target_pane` to pick out
+    /// their own inbox (pane ids are unique across the whole session,
+    /// so the filter needs no tab awareness); all other subscribers
+    /// ignore the event.
     PeerInbox {
         /// Pane the message is addressed to.
         target_pane: usize,
@@ -855,6 +893,10 @@ mod tests {
         assert!(
             with.contains(CAP_CALLER_SCOPE),
             "server must advertise caller scope: {with}"
+        );
+        assert!(
+            with.contains(CAP_CROSS_TAB_PEERS),
+            "server must advertise cross-tab peers: {with}"
         );
 
         let without = serde_json::to_string(&Response::Hello {
@@ -1388,6 +1430,68 @@ mod tests {
             body: "hi".into(),
         };
         assert_eq!(roundtrip(&r), r);
+    }
+
+    fn peer_info_with_ids_only(id: usize) -> PeerInfo {
+        PeerInfo {
+            id,
+            name: None,
+            role: None,
+            tab: None,
+            tab_name: None,
+            same_tab: None,
+            cwd: None,
+            kind: None,
+            receive_mode: None,
+            summary: None,
+        }
+    }
+
+    #[test]
+    fn peer_info_tab_fields_roundtrip() {
+        let info = PeerInfo {
+            name: Some("worker".into()),
+            tab: Some(2),
+            tab_name: Some("renga".into()),
+            same_tab: Some(false),
+            ..peer_info_with_ids_only(7)
+        };
+        let s = serde_json::to_string(&info).unwrap();
+        let parsed: PeerInfo = serde_json::from_str(&s).unwrap();
+        assert_eq!(parsed, info);
+    }
+
+    #[test]
+    fn peer_info_omits_tab_fields_when_none() {
+        // Additive serde: a server talking to a pre-#289 client must
+        // not emit `tab: null` keys the old decoder never asked for.
+        let s = serde_json::to_string(&peer_info_with_ids_only(1)).unwrap();
+        for key in ["tab", "tab_name", "same_tab"] {
+            assert!(!s.contains(key), "must omit {key}: {s}");
+        }
+    }
+
+    #[test]
+    fn peer_info_deserializes_legacy_payload_without_tab_fields() {
+        // New client × pre-#289 server: the tab fields are simply
+        // absent and must decode to None, not fail the whole
+        // `Vec<PeerInfo>` decode.
+        let raw = r#"{"id":4,"name":"worker"}"#;
+        let info: PeerInfo = serde_json::from_str(raw).unwrap();
+        assert_eq!(info.tab, None);
+        assert_eq!(info.tab_name, None);
+        assert_eq!(info.same_tab, None);
+    }
+
+    #[test]
+    fn peer_info_ignores_unknown_future_fields() {
+        // Old client × new server relies on serde's default
+        // ignore-unknown-fields behavior; guard it so nobody adds
+        // `deny_unknown_fields` and breaks the forward path.
+        let raw = r#"{"id":4,"tab":1,"tab_name":"kura","same_tab":false,"future_field":true}"#;
+        let info: PeerInfo = serde_json::from_str(raw).unwrap();
+        assert_eq!(info.id, 4);
+        assert_eq!(info.tab, Some(1));
     }
 
     #[test]

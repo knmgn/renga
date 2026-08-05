@@ -175,11 +175,10 @@ fn handle_peer_send_loops_back_to_sender_pane() {
 }
 
 #[test]
-fn handle_peer_send_silently_drops_cross_tab_target() {
-    // Cross-tab delivery is a silent no-op by design — callers
-    // cannot enumerate panes in other tabs by probing ids. A
-    // PeerInbox event would leak "pane X exists somewhere", so
-    // the handler must emit nothing at all.
+fn handle_peer_send_delivers_to_cross_tab_target_by_id() {
+    // Issue #289 inverted the old silent-drop guard: a numeric id in
+    // another tab is a legitimate cross-tab address and must produce
+    // exactly one PeerInbox event, same as a same-tab send.
     let mut app = App::new(40, 80).expect("App::new");
     let (_sub_id, rx) = app.event_bus.subscribe();
     let sender_id = app.ws().focused_pane_id;
@@ -197,14 +196,266 @@ fn handle_peer_send_silently_drops_cross_tab_target() {
     app.handle_peer_send(
         sender_id,
         &ipc::PaneRef::Id(other_tab_pane),
-        "should be silently dropped".to_string(),
+        "hello other tab".to_string(),
     )
-    .expect("cross-tab send reports success");
+    .expect("cross-tab send succeeds");
+    let inboxes: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok())
+        .filter_map(|ev| match ev {
+            ipc::Event::PeerInbox {
+                target_pane,
+                from_pane,
+                body,
+                ..
+            } => Some((target_pane, from_pane, body)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        inboxes,
+        vec![(other_tab_pane, sender_id, "hello other tab".to_string())],
+        "cross-tab PeerSend must emit exactly one PeerInbox for the target"
+    );
+    app.shutdown();
+}
+
+#[test]
+fn handle_peer_send_resolves_name_in_sender_workspace_not_active_tab() {
+    // Pane names are only unique per tab. The sender sits in a
+    // background tab while the human views a tab holding a pane with
+    // the SAME name — resolution must prefer the sender's workspace,
+    // not the visible one, or background-tab orchestrators misroute
+    // (Issue #289 design review, Major 2).
+    let mut app = App::new(40, 80).expect("App::new");
+    let (_sub_id, rx) = app.event_bus.subscribe();
+    let sender_id = app.ws().focused_pane_id;
+    let same_tab_worker = app
+        .handle_split(
+            &ipc::PaneRef::Focused,
+            ipc::Direction::Vertical,
+            None,
+            Some("worker".into()),
+            None,
+            None,
+            None,
+        )
+        .expect("split succeeds");
+    // A second tab with an identically named pane, left as the active
+    // tab so the old active-tab-first resolution would pick it.
+    let other_tab_worker = app
+        .handle_new_tab(None, Some("worker".into()), None, None, None)
+        .expect("new tab succeeds");
+    assert_eq!(app.active_tab, 1, "new tab should be the visible one");
+    while rx.try_recv().is_ok() {}
+
+    app.handle_peer_send(
+        sender_id,
+        &ipc::PaneRef::Name("worker".into()),
+        "task for MY worker".to_string(),
+    )
+    .expect("name send succeeds");
+    let targets: Vec<usize> = std::iter::from_fn(|| rx.try_recv().ok())
+        .filter_map(|ev| match ev {
+            ipc::Event::PeerInbox { target_pane, .. } => Some(target_pane),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        targets,
+        vec![same_tab_worker],
+        "name must resolve to the sender's own tab, not the visible tab \
+         (other-tab worker is {other_tab_worker})"
+    );
+    app.shutdown();
+}
+
+#[test]
+fn handle_peer_send_rejects_a_name_that_only_exists_in_another_tab() {
+    // Cross-tab sends require the numeric pane id. An unqualified
+    // name never leaves the sender's workspace, and an unresolvable
+    // target errors instead of faking "Delivered".
+    let mut app = App::new(40, 80).expect("App::new");
+    let (_sub_id, rx) = app.event_bus.subscribe();
+    let sender_id = app.ws().focused_pane_id;
+    app.handle_new_tab(None, Some("far-worker".into()), None, None, None)
+        .expect("new tab succeeds");
+    while rx.try_recv().is_ok() {}
+
+    let err = app
+        .handle_peer_send(
+            sender_id,
+            &ipc::PaneRef::Name("far-worker".into()),
+            "won't arrive".to_string(),
+        )
+        .expect_err("other-tab name must not resolve");
+    assert_eq!(err.code, Some(ipc::err_code::PANE_NOT_FOUND));
     let got_inbox = std::iter::from_fn(|| rx.try_recv().ok())
         .any(|ev| matches!(ev, ipc::Event::PeerInbox { .. }));
+    assert!(!got_inbox, "a failed resolution must not deliver anything");
+    app.shutdown();
+}
+
+#[test]
+fn flush_delivers_codex_nudge_to_background_tab_focused_pane() {
+    // A single-pane background tab's only pane is always its
+    // workspace-focused pane. The flush skip must therefore be limited
+    // to the pane the human actually sees (active tab), or cross-tab
+    // Codex nudges queue forever (Issue #289 design review, Major 1).
+    let mut app = App::new(40, 80).expect("App::new");
+    let sender_id = app.ws().focused_pane_id;
+    let codex_pane = app
+        .handle_new_tab(None, None, None, None, None)
+        .expect("new tab succeeds");
+    app.peer_client_kinds
+        .insert(codex_pane, PeerClientKind::Codex);
+    {
+        let pane = app.workspaces[1]
+            .panes
+            .get_mut(&codex_pane)
+            .expect("codex pane");
+        let mut parser = pane.parser.lock().unwrap();
+        parser.process(b"\x1b[?25h\x1b[2J\x1b[Hready for input\n\nenter to send");
+    }
+    // Send the human back to tab 0; the Codex tab is now background.
+    assert!(app.switch_tab(0), "switch back to the sender tab");
+    assert_eq!(app.active_tab, 0, "sender tab should be visible again");
+
+    app.handle_peer_send(
+        sender_id,
+        &ipc::PaneRef::Id(codex_pane),
+        "cross-tab codex ping".to_string(),
+    )
+    .expect("peer send");
+    assert_eq!(
+        app.pending_codex_peer_messages
+            .get(&codex_pane)
+            .map(|q| q.len()),
+        Some(1),
+        "background-tab Codex target should queue a nudge"
+    );
+
+    app.flush_pending_codex_peer_messages();
     assert!(
-        !got_inbox,
-        "cross-tab PeerSend must NOT emit a PeerInbox event"
+        matches!(
+            app.pending_codex_peer_messages
+                .get(&codex_pane)
+                .and_then(|q| q.front()),
+            Some(PendingCodexPeerDelivery::SubmitAt(_))
+        ),
+        "first flush must type the draft into the background tab's \
+         workspace-focused pane instead of skipping it"
+    );
+    if let Some(queue) = app.pending_codex_peer_messages.get_mut(&codex_pane) {
+        queue[0] = PendingCodexPeerDelivery::SubmitAt(Instant::now());
+    }
+    app.flush_pending_codex_peer_messages();
+    assert!(
+        !app.pending_codex_peer_messages.contains_key(&codex_pane),
+        "second flush should submit the queued nudge"
+    );
+    app.shutdown();
+}
+
+#[test]
+fn flush_promotes_queued_draft_to_notification_when_target_tab_activates() {
+    // A nudge queued while its tab was hidden must not stall when the
+    // human switches onto the pane before delivery: the flush promotes
+    // the still-undelivered draft into the focused-pane notification
+    // overlay instead of skipping it forever (Codex review of #289).
+    let mut app = App::new(40, 80).expect("App::new");
+    let sender_id = app.ws().focused_pane_id;
+    let codex_pane = app
+        .handle_new_tab(None, None, None, None, None)
+        .expect("new tab succeeds");
+    app.peer_client_kinds
+        .insert(codex_pane, PeerClientKind::Codex);
+    assert!(app.switch_tab(0), "back to the sender tab");
+
+    app.handle_peer_send(
+        sender_id,
+        &ipc::PaneRef::Id(codex_pane),
+        "queued while hidden".to_string(),
+    )
+    .expect("peer send");
+    assert!(app.pending_codex_peer_messages.contains_key(&codex_pane));
+
+    // The human switches onto the Codex tab before any flush delivered
+    // the draft (its screen was never ready).
+    assert!(app.switch_tab(1), "activate the codex tab");
+    app.flush_pending_codex_peer_messages();
+
+    assert!(
+        !app.pending_codex_peer_messages.contains_key(&codex_pane),
+        "promotion must consume the queued draft"
+    );
+    let notification = app
+        .visible_codex_peer_notification()
+        .expect("draft should surface as a visible notification");
+    assert_eq!(notification.target_pane, codex_pane);
+    app.shutdown();
+}
+
+#[test]
+fn flush_cancels_half_delivered_nudge_once_target_pane_is_watched() {
+    // Once the draft text has been typed into the composer (SubmitAt
+    // stage), activating the tab hands ownership to the human: the
+    // typed nudge is on screen for them to submit or edit, so the
+    // deferred Enter is cancelled rather than resumed later — a
+    // resumed submit could fire into content the user rewrote in the
+    // meantime (Codex review of #289).
+    let mut app = App::new(40, 80).expect("App::new");
+    let sender_id = app.ws().focused_pane_id;
+    let codex_pane = app
+        .handle_new_tab(None, None, None, None, None)
+        .expect("new tab succeeds");
+    app.peer_client_kinds
+        .insert(codex_pane, PeerClientKind::Codex);
+    {
+        let pane = app.workspaces[1]
+            .panes
+            .get_mut(&codex_pane)
+            .expect("codex pane");
+        let mut parser = pane.parser.lock().unwrap();
+        parser.process(b"\x1b[?25h\x1b[2J\x1b[Hready for input\n\nenter to send");
+    }
+    assert!(app.switch_tab(0), "back to the sender tab");
+    app.handle_peer_send(
+        sender_id,
+        &ipc::PaneRef::Id(codex_pane),
+        "half delivered".to_string(),
+    )
+    .expect("peer send");
+    app.flush_pending_codex_peer_messages();
+    assert!(
+        matches!(
+            app.pending_codex_peer_messages
+                .get(&codex_pane)
+                .and_then(|q| q.front()),
+            Some(PendingCodexPeerDelivery::SubmitAt(_))
+        ),
+        "draft should have been typed into the background pane"
+    );
+    if let Some(queue) = app.pending_codex_peer_messages.get_mut(&codex_pane) {
+        queue[0] = PendingCodexPeerDelivery::SubmitAt(Instant::now());
+    }
+
+    assert!(app.switch_tab(1), "activate the codex tab mid-delivery");
+    app.flush_pending_codex_peer_messages();
+    assert!(
+        !app.pending_codex_peer_messages.contains_key(&codex_pane),
+        "watching the pane must cancel the deferred submit outright"
+    );
+    assert!(
+        app.visible_codex_peer_notification().is_none(),
+        "half-delivered nudge must not double-surface as a notification"
+    );
+
+    // Leaving again must not resurrect the submit — the composer may
+    // no longer hold our text.
+    assert!(app.switch_tab(0), "leave the codex tab again");
+    app.flush_pending_codex_peer_messages();
+    assert!(
+        !app.pending_codex_peer_messages.contains_key(&codex_pane),
+        "a cancelled submit stays cancelled after the pane is unwatched"
     );
     app.shutdown();
 }
@@ -858,11 +1109,103 @@ fn handle_peer_list_excludes_caller_and_lists_siblings() {
     assert_eq!(peers[0].id, sibling_id);
     assert_eq!(peers[0].name.as_deref(), Some("sibling"));
     assert_eq!(peers[0].role.as_deref(), Some("worker"));
+    assert_eq!(peers[0].tab, Some(0));
+    assert_eq!(peers[0].same_tab, Some(true));
     // Caller must be excluded.
     assert!(
         peers.iter().all(|p| p.id != sender_id),
         "peer list must not include the caller"
     );
+    app.shutdown();
+}
+
+#[test]
+fn handle_peer_list_spans_all_tabs_with_caller_tab_first() {
+    // Issue #289: list_peers enumerates every workspace, still
+    // excluding only the caller. The caller's own tab leads so
+    // same-tab siblings (addressable by bare name) stay on top, and
+    // every entry carries tab metadata plus the same_tab flag.
+    let mut app = App::new(40, 80).expect("App::new");
+    let sender_id = app.ws().focused_pane_id;
+    let sibling_id = app
+        .handle_split(
+            &ipc::PaneRef::Focused,
+            ipc::Direction::Vertical,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("split succeeds");
+    let other_tab_pane = app
+        .handle_new_tab(None, None, None, Some("scout".into()), None)
+        .expect("new tab succeeds");
+    // The new tab is now active — listing from the tab-0 sender must
+    // still put the sender's own (background) tab first.
+    assert_eq!(app.active_tab, 1);
+
+    let peers = app.handle_peer_list(sender_id).expect("peer list");
+    let ids: Vec<usize> = peers.iter().map(|p| p.id).collect();
+    assert_eq!(
+        ids,
+        vec![sibling_id, other_tab_pane],
+        "caller's tab first, then remaining tabs in index order"
+    );
+    assert!(
+        peers.iter().all(|p| p.id != sender_id),
+        "peer list must not include the caller"
+    );
+
+    let sibling = &peers[0];
+    assert_eq!(sibling.tab, Some(0));
+    assert_eq!(sibling.same_tab, Some(true));
+    assert!(sibling.tab_name.is_some(), "tab label should be surfaced");
+
+    let other = &peers[1];
+    assert_eq!(other.tab, Some(1));
+    assert_eq!(other.same_tab, Some(false));
+    assert_eq!(other.role.as_deref(), Some("scout"));
+    app.shutdown();
+}
+
+#[test]
+fn handle_peer_list_reorders_middle_tab_caller_ahead_of_lower_tabs() {
+    // With the caller in tab 0 the caller-first order is
+    // indistinguishable from plain index order, so pin the reorder
+    // from a MIDDLE tab: the caller's tab-1 sibling must outrank the
+    // tab-0 pane even though tab 0 comes first by index.
+    let mut app = App::new(40, 80).expect("App::new");
+    let tab0_pane = app.ws().focused_pane_id;
+    let caller_id = app
+        .handle_new_tab(None, None, None, None, None)
+        .expect("second tab");
+    assert_eq!(app.active_tab, 1);
+    let caller_sibling = app
+        .handle_split(
+            &ipc::PaneRef::Focused,
+            ipc::Direction::Vertical,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("split caller tab");
+    let tab2_pane = app
+        .handle_new_tab(None, None, None, None, None)
+        .expect("third tab");
+
+    let peers = app.handle_peer_list(caller_id).expect("peer list");
+    let ids: Vec<usize> = peers.iter().map(|p| p.id).collect();
+    assert_eq!(
+        ids,
+        vec![caller_sibling, tab0_pane, tab2_pane],
+        "caller's own tab leads even when a lower-indexed tab exists"
+    );
+    assert_eq!(peers[0].same_tab, Some(true));
+    assert_eq!(peers[1].tab, Some(0));
+    assert_eq!(peers[2].tab, Some(2));
     app.shutdown();
 }
 

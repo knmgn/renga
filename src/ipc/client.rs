@@ -404,6 +404,28 @@ mod tests {
         assert!(require_capability(super::super::CAP_CALLER_SCOPE, &advertised).is_err());
     }
 
+    /// A #288-era server advertises `caller_scope` but still silently
+    /// drops cross-tab peer sends. The peer tools gate on the distinct
+    /// `cross_tab_peers` token, so that server must be rejected — a
+    /// success here would let "Delivered" lie about a dropped message.
+    #[test]
+    fn require_cross_tab_peers_fails_closed_against_a_288_server() {
+        let advertised = vec![super::super::CAP_CALLER_SCOPE.to_string()];
+        let err = require_capability(super::super::CAP_CROSS_TAB_PEERS, &advertised).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("server_too_old"), "got: {msg}");
+        assert!(msg.contains("cross_tab_peers"), "got: {msg}");
+    }
+
+    #[test]
+    fn require_cross_tab_peers_accepts_a_289_server() {
+        let advertised: Vec<String> = super::super::SERVER_CAPABILITIES
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert!(require_capability(super::super::CAP_CROSS_TAB_PEERS, &advertised).is_ok());
+    }
+
     #[test]
     fn verify_session_token_matches() {
         assert!(verify_session_token("abc-123", Some("abc-123")).is_ok());

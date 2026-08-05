@@ -11,6 +11,36 @@ rules in [`docs/semver-policy.md`](./docs/semver-policy.md).
 
 ### Changed
 
+- **BREAKING — peer messaging now crosses tabs.** (#289) `send_message`
+  / `peer_send` deliver to panes in **any** tab when addressed by
+  numeric pane id, and `list_peers` / `peer_list` enumerate **every**
+  workspace (caller's tab first) instead of only the caller's. Three
+  observable contract changes on the frozen v1.0 surface, called out
+  per [`docs/semver-policy.md`](./docs/semver-policy.md) §3 ("cross-tab
+  `peer_send` switching from silent no-op" is its named example of a
+  breaking semantic change):
+  1. cross-tab sends deliver instead of silently no-opping — the
+     tab boundary no longer contains peer discovery or delivery, and
+     the anti-enumeration property of the silent drop is gone (owner
+     decision on #289: isolation belongs to the security layer around
+     renga, so the flip ships without the §4 opt-in-flag window);
+  2. an unresolvable target now fails with `pane_not_found` where it
+     previously returned a fake success;
+  3. `list_peers`'s empty-case string changed to `"No peers in any
+     renga tab."`.
+  Name targets still resolve only inside the *sender's* tab (names are
+  unique per tab, not globally) — and now against the sender's tab
+  even when the human is viewing another one, fixing a misroute for
+  background-tab orchestrators. `PeerInfo` gains optional display-only
+  `tab` / `tab_name` / `same_tab` fields (additive serde, compatible
+  both directions). Version skew fails closed: the server advertises a
+  new `cross_tab_peers` hello capability and the bundled mcp-peer
+  refuses `list_peers` / `send_message` with `[server_too_old]`
+  against a server that does not advertise it — including #288-era
+  servers that advertise `caller_scope` but still drop cross-tab
+  sends. Queued Codex nudges now also flush into background tabs
+  (previously a single-pane background tab never received its nudge).
+
 - **`Ctrl+W` now asks before closing.** A centered modal (`Close this
   pane? y / n`) holds every key, paste, and mouse event until you
   answer: `y` closes, `n` / `Esc` cancels, any other key is swallowed

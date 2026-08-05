@@ -73,20 +73,20 @@ pub enum AppCommand {
         target: PaneRef,
         reply: oneshot::Sender<std::result::Result<usize, ipc::CodedError>>,
     },
-    /// List peers visible to `from_pane` — every other pane in the
-    /// same workspace. Drives the MCP peer subprocess's `list_peers`
-    /// tool.
+    /// List peers visible to `from_pane` — every other pane in every
+    /// workspace, caller's tab first (Issue #289). Drives the MCP peer
+    /// subprocess's `list_peers` tool.
     PeerList {
         from_pane: usize,
         reply: oneshot::Sender<std::result::Result<Vec<PeerInfo>, ipc::CodedError>>,
     },
-    /// Route a peer message from `from_pane` to `target`, provided
-    /// both live in the same workspace. Emits `Event::PeerInbox` on
-    /// the event bus so a subscribed MCP subprocess can push it out
-    /// as a `notifications/claude/channel` frame. Cross-tab targets
-    /// are silently accepted and dropped (no-op success) — v1 does
-    /// not expose cross-tab routing; callers cannot distinguish
-    /// "dropped" from "unknown peer" on purpose.
+    /// Route a peer message from `from_pane` to `target` — cross-tab
+    /// targets deliver like same-tab ones since Issue #289. Numeric
+    /// ids resolve across all tabs; names stay inside the sender's
+    /// workspace. Emits `Event::PeerInbox` on the event bus so a
+    /// subscribed MCP subprocess can push it out as a
+    /// `notifications/claude/channel` frame. Unresolvable targets fail
+    /// with `pane_not_found`.
     PeerSend {
         from_pane: usize,
         target: PaneRef,
