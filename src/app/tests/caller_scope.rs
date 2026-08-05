@@ -132,6 +132,63 @@ fn inspect_does_not_blank_the_pane_it_is_about_to_read() {
     app.shutdown();
 }
 
+/// Resizing a pane clears its vt100 screen and leaves the child to
+/// repaint on SIGWINCH — which a TUI does and a plain shell does not.
+/// So neither a terminal resize nor a `list_panes` from some other tab
+/// may push a resize into a hidden pane: the output would be gone, with
+/// nothing to regenerate it. Only rects are recomputed; the real resize
+/// waits until that tab is rendered.
+#[test]
+fn background_pane_contents_survive_a_resize_and_an_unrelated_list() {
+    let (mut app, caller, active) = two_tabs();
+    app.relayout_workspace(0);
+    let seed = |app: &mut App, pane_id: usize| {
+        if let Some(pane) = app.workspaces[0].panes.get_mut(&pane_id) {
+            let mut parser = pane.parser.lock().unwrap_or_else(|e| e.into_inner());
+            parser.process(b"\x1b[2J\x1b[Hscrollback nobody asked to lose");
+        }
+    };
+    let reads_back = |app: &mut App| -> String {
+        let (tx, rx) = oneshot::channel();
+        app.handle_app_command(AppCommand::Inspect {
+            target: ipc::PaneRef::Focused,
+            lines: None,
+            include_cursor: false,
+            from_pane: Some(caller),
+            reply: tx,
+        });
+        rx.recv()
+            .expect("inspect reply")
+            .expect("inspect ok")
+            .get("text")
+            .and_then(|t| t.as_str())
+            .unwrap_or_default()
+            .to_string()
+    };
+
+    seed(&mut app, caller);
+    app.on_terminal_resize(70, 24);
+    assert!(
+        reads_back(&mut app).contains("scrollback nobody asked to lose"),
+        "a terminal resize wiped a hidden pane's screen"
+    );
+
+    seed(&mut app, caller);
+    // `list_panes` issued from the *other* tab must not touch this one.
+    let (tx, rx) = oneshot::channel();
+    app.handle_app_command(AppCommand::List {
+        from_pane: Some(active),
+        reply: tx,
+    });
+    let _ = rx.recv().expect("list reply").expect("list ok");
+    assert!(
+        reads_back(&mut app).contains("scrollback nobody asked to lose"),
+        "a list_panes for another tab wiped this pane's screen"
+    );
+
+    app.shutdown();
+}
+
 #[test]
 fn inspect_by_id_reaches_across_tabs() {
     let (mut app, caller, active) = two_tabs();

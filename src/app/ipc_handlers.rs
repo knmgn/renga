@@ -4,7 +4,7 @@ impl App {
     pub(crate) fn handle_app_command(&mut self, cmd: AppCommand) {
         match cmd {
             AppCommand::List { from_pane, reply } => {
-                self.refresh_hidden_geometry_for_ipc();
+                self.recompute_hidden_rects_for_ipc();
                 let result = self.handle_list(from_pane);
                 let _ = reply.send(result);
             }
@@ -36,7 +36,7 @@ impl App {
                 from_pane,
                 reply,
             } => {
-                self.refresh_hidden_geometry_for_ipc();
+                self.recompute_hidden_rects_for_ipc();
                 let result =
                     self.handle_split(&target, direction, command, name, role, cwd, from_pane);
                 let _ = reply.send(result);
@@ -59,15 +59,10 @@ impl App {
                 from_pane,
                 reply,
             } => {
-                // Deliberately *not* refreshed. `Pane::resize` clears the
-                // vt100 buffer and leaves the child to redraw on
-                // SIGWINCH, which lands milliseconds later — refreshing
-                // here would erase the very screen this call exists to
-                // report and snapshot the blank. The `rows`/`cols` in the
-                // payload describe the buffer being returned, so they
-                // stay self-consistent either way; a slightly older size
-                // that matches the content beats a current size attached
-                // to nothing.
+                // No rect refresh: `inspect` reads the parser, not
+                // `last_pane_rects`. The `rows`/`cols` it reports are the
+                // PTY's real size and therefore always describe the
+                // buffer being returned.
                 let result = self.handle_inspect(&target, lines, include_cursor, from_pane);
                 let _ = reply.send(result);
             }
@@ -116,37 +111,32 @@ impl App {
         }
     }
 
-    /// Bring every non-visible workspace's cached geometry up to date,
+    /// Bring every non-visible workspace's cached rectangles up to date,
     /// immediately before serving an IPC command whose answer depends on
-    /// it: `List` reports rects, `Split` judges the min-size guard and
-    /// seeds the new PTY.
+    /// them: `List` reports rects, `Split` judges the min-size guard.
+    /// `Send`, `Focus` and `Inspect` read no rects and skip it.
     ///
-    /// `Send` and `Focus` read no geometry. `Inspect` is excluded for a
-    /// stronger reason — resizing a pane clears its vt100 buffer, so
-    /// refreshing before a snapshot would return a blank screen.
-    ///
-    /// This is the single chokepoint for the problem, and being single
+    /// This is the single chokepoint for the staleness, and being single
     /// is the point. Only the visible workspace is relaid out as the
     /// layout changes — a terminal resize, a status-bar toggle, a
     /// sidebar drag, a layout swap all move every workspace's pane area
     /// but only refresh the active one. Once caller-scoped tools could
     /// read a background tab, every such reader inherited stale rects;
     /// refreshing inside each reader meant four places to remember and,
-    /// demonstrably, a fifth to forget. Doing it here instead means a
-    /// new pane-control command cannot miss it.
+    /// demonstrably, a fifth to forget. Doing it here means a new
+    /// pane-control command cannot miss it.
     ///
-    /// The eager sweep in [`App::on_terminal_resize`] is kept for a
-    /// different reason: it lets a hidden pane's child process reflow at
-    /// resize time rather than on the next read, so switching to that
-    /// tab does not flash content laid out for the old width.
-    ///
-    /// Cost is bounded and paid on an agent-paced path, never a
-    /// per-frame one: at most a rect walk per workspace, and
-    /// `Pane::resize` no-ops when the size is unchanged.
-    fn refresh_hidden_geometry_for_ipc(&mut self) {
+    /// Deliberately [`App::recompute_workspace_rects`] and not
+    /// [`App::relayout_workspace`]: this must stay a *read*. The latter
+    /// resizes PTYs, which clears their screens, so a `list_panes` from
+    /// one tab would wipe the inspectable contents of every other —
+    /// including tabs that have nothing to do with the request. Rect
+    /// computation alone is pure and cheap, so sweeping all hidden
+    /// workspaces costs nothing worth narrowing.
+    fn recompute_hidden_rects_for_ipc(&mut self) {
         for i in 0..self.workspaces.len() {
             if i != self.active_tab {
-                self.relayout_workspace(i);
+                self.recompute_workspace_rects(i);
             }
         }
     }

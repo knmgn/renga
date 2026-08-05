@@ -373,16 +373,34 @@ impl App {
         self.relayout_workspace(self.active_tab)
     }
 
-    /// [`Self::relayout_panes`] for an arbitrary workspace.
+    /// Recompute a workspace's cached rectangles **without touching its
+    /// PTYs**.
     ///
-    /// The visible tab gets this for free from `ui::render_panes` every
-    /// frame; a hidden one never renders, so anything that mutates a
-    /// hidden layout (an MCP `spawn_*` scoped to another tab) has to ask
-    /// for it explicitly or leave `last_pane_rects` describing a layout
-    /// that no longer exists. Sizing hidden PTYs here is not premature:
-    /// it is the same size `render_panes` would apply the moment that
-    /// tab is switched to, just applied early enough that the child
-    /// process starts at the right dimensions.
+    /// This is the half of the layout pass that is safe to run on a
+    /// hidden tab. The other half — [`Self::relayout_workspace`] — calls
+    /// [`Pane::resize`], which clears the vt100 buffer and leaves the
+    /// child to repaint on SIGWINCH. A TUI child does repaint; a plain
+    /// shell does not, so resizing a hidden pane destroys scrollback
+    /// nobody asked to lose and that nothing regenerates. Anything that
+    /// merely wants to *report* a hidden tab's geometry (`list_panes`)
+    /// or *judge* it (the split min-size guard) wants this, not that.
+    pub(crate) fn recompute_workspace_rects(&mut self, ws_index: usize) {
+        if self.workspaces.get(ws_index).is_none() || self.terminal_too_small_for_layout() {
+            return;
+        }
+        let rects = self.workspaces[ws_index]
+            .layout
+            .calculate_rects(self.main_area_layout_for(ws_index).panes);
+        self.workspaces[ws_index].last_pane_rects = rects;
+    }
+
+    /// [`Self::relayout_panes`] for an arbitrary workspace: recompute the
+    /// rectangles *and* push the new sizes into the PTYs.
+    ///
+    /// Reserve this for a workspace whose layout actually changed (a
+    /// split, a pane close) or that is on screen. Resizing clears each
+    /// pane's screen, so calling it speculatively on a hidden tab is a
+    /// destructive read — see [`Self::recompute_workspace_rects`].
     pub fn relayout_workspace(&mut self, ws_index: usize) -> bool {
         if self.workspaces.get(ws_index).is_none() {
             return false;
@@ -612,30 +630,24 @@ impl App {
     /// Called from main.rs on crossterm Resize events so we can update
     /// the cached terminal size and propagate the resize into panes.
     ///
-    /// Every workspace is relaid out, not just the visible one, so a
-    /// hidden pane's child process reflows now rather than on the first
-    /// read or the next tab switch — otherwise switching to that tab
-    /// briefly shows content laid out for the old width. Resizes are
-    /// human-paced and `Pane::resize` no-ops when the size is unchanged,
-    /// so the extra passes cost nothing measurable.
-    ///
-    /// This is an optimisation, not the correctness mechanism. A resize
-    /// is only one of several things that move every workspace's pane
-    /// area (a status-bar toggle, a sidebar drag and a layout swap do
-    /// too, and those go through `mark_layout_change`, which refreshes
-    /// only the active tab). What guarantees a caller-scoped IPC reader
-    /// never sees stale geometry is
-    /// `App::refresh_hidden_geometry_for_ipc`, at the IPC boundary.
+    /// Hidden workspaces get their *rectangles* recomputed but their
+    /// PTYs left alone. Pushing the resize into a hidden pane would
+    /// clear its screen, and a plain shell — unlike a TUI — never
+    /// repaints after SIGWINCH, so the output the user had scrolled to
+    /// (and that a caller-scoped `inspect_pane` could still read) would
+    /// simply be gone. The real resize happens when that tab is next
+    /// rendered, which is when someone is actually looking at it.
     pub fn on_terminal_resize(&mut self, cols: u16, rows: u16) {
         self.last_term_size = (cols, rows);
         for i in 0..self.workspaces.len() {
             if i != self.active_tab {
-                self.relayout_workspace(i);
+                self.recompute_workspace_rects(i);
             }
         }
         // The active workspace goes through `mark_layout_change` so the
         // repaint cooldown and selection invalidation stay tied to the
-        // tab actually being painted.
+        // tab actually being painted — and it is on screen, so resizing
+        // its PTYs is exactly right.
         self.mark_layout_change();
     }
 
