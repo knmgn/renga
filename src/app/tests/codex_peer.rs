@@ -395,11 +395,13 @@ fn flush_promotes_queued_draft_to_notification_when_target_tab_activates() {
 }
 
 #[test]
-fn flush_keeps_half_delivered_nudge_queued_while_target_pane_is_watched() {
+fn flush_cancels_half_delivered_nudge_once_target_pane_is_watched() {
     // Once the draft text has been typed into the composer (SubmitAt
-    // stage), activating the tab must neither promote it to a
-    // notification (the text is already in the pane) nor press Enter
-    // under the user's cursor. It completes after the user leaves.
+    // stage), activating the tab hands ownership to the human: the
+    // typed nudge is on screen for them to submit or edit, so the
+    // deferred Enter is cancelled rather than resumed later — a
+    // resumed submit could fire into content the user rewrote in the
+    // meantime (Codex review of #289).
     let mut app = App::new(40, 80).expect("App::new");
     let sender_id = app.ws().focused_pane_id;
     let codex_pane = app
@@ -439,24 +441,21 @@ fn flush_keeps_half_delivered_nudge_queued_while_target_pane_is_watched() {
     assert!(app.switch_tab(1), "activate the codex tab mid-delivery");
     app.flush_pending_codex_peer_messages();
     assert!(
-        matches!(
-            app.pending_codex_peer_messages
-                .get(&codex_pane)
-                .and_then(|q| q.front()),
-            Some(PendingCodexPeerDelivery::SubmitAt(_))
-        ),
-        "watched pane must not have the submit pressed under the cursor"
+        !app.pending_codex_peer_messages.contains_key(&codex_pane),
+        "watching the pane must cancel the deferred submit outright"
     );
     assert!(
         app.visible_codex_peer_notification().is_none(),
         "half-delivered nudge must not double-surface as a notification"
     );
 
+    // Leaving again must not resurrect the submit — the composer may
+    // no longer hold our text.
     assert!(app.switch_tab(0), "leave the codex tab again");
     app.flush_pending_codex_peer_messages();
     assert!(
         !app.pending_codex_peer_messages.contains_key(&codex_pane),
-        "submit should complete once the pane is unwatched"
+        "a cancelled submit stays cancelled after the pane is unwatched"
     );
     app.shutdown();
 }

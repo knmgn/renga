@@ -472,27 +472,24 @@ impl App {
                     // would otherwise stall for as long as the human
                     // stays on it — no overlay exists because
                     // `handle_peer_send` only creates one when the
-                    // target was focused *at send time*. Promote a
-                    // still-undelivered draft into the notification
-                    // overlay (the designed UX for a focused target);
-                    // the inverse of `materialize_unfocused_...`, and
-                    // only when the overlay would be immediately
-                    // visible so the two conversions cannot fight. A
-                    // half-delivered `SubmitAt` stays queued on
-                    // purpose: its text already sits in the composer,
-                    // and pressing Enter under the user's cursor could
-                    // submit whatever they are typing — it completes
-                    // once the pane is no longer being watched.
-                    if ws.focus_target == FocusTarget::Pane && self.overlay.is_none() {
-                        let queued_draft = self
-                            .pending_codex_peer_messages
-                            .get(&pane_id)
-                            .and_then(|q| q.front())
-                            .and_then(|d| match d {
-                                PendingCodexPeerDelivery::Draft(m) => Some(m.clone()),
-                                PendingCodexPeerDelivery::SubmitAt(_) => None,
-                            });
-                        if let Some(message) = queued_draft {
+                    // target was focused *at send time*.
+                    match self
+                        .pending_codex_peer_messages
+                        .get(&pane_id)
+                        .and_then(|q| q.front())
+                        .cloned()
+                    {
+                        // Promote a still-undelivered draft into the
+                        // notification overlay (the designed UX for a
+                        // focused target); the inverse of
+                        // `materialize_unfocused_...`, and only when
+                        // the overlay would be immediately visible so
+                        // the two conversions cannot fight. If the
+                        // overlay is busy elsewhere, stay queued and
+                        // retry on a later flush.
+                        Some(PendingCodexPeerDelivery::Draft(message))
+                            if ws.focus_target == FocusTarget::Pane && self.overlay.is_none() =>
+                        {
                             match self.codex_peer_notification.as_mut() {
                                 Some(n) if n.target_pane == pane_id => {
                                     n.register_message(message);
@@ -509,12 +506,21 @@ impl App {
                                         });
                                     self.dirty = true;
                                 }
-                                // Overlay busy with another pane's
-                                // notification — keep the nudge queued
-                                // and retry on a later flush.
                                 Some(_) => {}
                             }
                         }
+                        // A half-delivered nudge loses its owner the
+                        // moment the human watches the pane: the typed
+                        // draft is on screen for them to submit or
+                        // edit, and once they can touch the composer a
+                        // deferred Enter could submit *their* content,
+                        // not ours. Cancel the pending submit instead
+                        // of resuming it later (Codex review of #289).
+                        Some(PendingCodexPeerDelivery::SubmitAt(_)) => {
+                            self.pending_codex_peer_messages.remove(&pane_id);
+                            self.dirty = true;
+                        }
+                        _ => {}
                     }
                     continue;
                 }
