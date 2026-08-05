@@ -797,6 +797,23 @@ mod tests {
         }
     }
 
+    /// Shapes a client can legitimately put on the wire that are
+    /// neither "old" nor "new": an explicit `null`, and a field this
+    /// build does not know. Both must land on the legacy semantics
+    /// rather than erroring — the struct-variant conversion of `List`
+    /// must not have narrowed what the old unit variant accepted.
+    #[test]
+    fn list_tolerates_explicit_null_and_unknown_fields() {
+        for raw in [
+            r#"{"cmd":"list","from_pane":null}"#,
+            r#"{"cmd":"list","some_future_field":1}"#,
+        ] {
+            let parsed: Request =
+                serde_json::from_str(raw).unwrap_or_else(|e| panic!("decode {raw}: {e}"));
+            assert_eq!(parsed, Request::List { from_pane: None }, "decoding {raw}");
+        }
+    }
+
     #[test]
     fn scoped_raw_requests_decode_with_from_pane() {
         let parsed: Request =
