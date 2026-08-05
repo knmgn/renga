@@ -59,7 +59,15 @@ impl App {
                 from_pane,
                 reply,
             } => {
-                self.refresh_hidden_geometry_for_ipc();
+                // Deliberately *not* refreshed. `Pane::resize` clears the
+                // vt100 buffer and leaves the child to redraw on
+                // SIGWINCH, which lands milliseconds later — refreshing
+                // here would erase the very screen this call exists to
+                // report and snapshot the blank. The `rows`/`cols` in the
+                // payload describe the buffer being returned, so they
+                // stay self-consistent either way; a slightly older size
+                // that matches the content beats a current size attached
+                // to nothing.
                 let result = self.handle_inspect(&target, lines, include_cursor, from_pane);
                 let _ = reply.send(result);
             }
@@ -110,9 +118,12 @@ impl App {
 
     /// Bring every non-visible workspace's cached geometry up to date,
     /// immediately before serving an IPC command whose answer depends on
-    /// it (`List` reports rects, `Split` judges the min-size guard and
-    /// seeds the new PTY, `Inspect` snapshots at the pane's PTY size).
-    /// `Send` and `Focus` read no geometry and skip this.
+    /// it: `List` reports rects, `Split` judges the min-size guard and
+    /// seeds the new PTY.
+    ///
+    /// `Send` and `Focus` read no geometry. `Inspect` is excluded for a
+    /// stronger reason — resizing a pane clears its vt100 buffer, so
+    /// refreshing before a snapshot would return a blank screen.
     ///
     /// This is the single chokepoint for the problem, and being single
     /// is the point. Only the visible workspace is relaid out as the

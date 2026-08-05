@@ -96,6 +96,42 @@ fn inspect_focused_resolves_in_the_callers_tab() {
     app.shutdown();
 }
 
+/// `Pane::resize` clears the vt100 buffer and leaves the child to
+/// redraw on SIGWINCH. Refreshing a hidden pane's geometry on the way
+/// into `inspect_pane` would therefore erase the screen this call exists
+/// to report and snapshot the blank — the caller sees nothing wrong,
+/// just an empty pane.
+#[test]
+fn inspect_does_not_blank_the_pane_it_is_about_to_read() {
+    let (mut app, caller, _active) = two_tabs();
+    app.relayout_workspace(0);
+    if let Some(pane) = app.workspaces[0].panes.get_mut(&caller) {
+        let mut parser = pane.parser.lock().unwrap_or_else(|e| e.into_inner());
+        parser.process(b"\x1b[2J\x1b[Hhello from the background tab");
+    }
+
+    // A global layout change: refreshed for the active tab only, so
+    // workspace 0's geometry is now out of date.
+    app.status_bar_visible = !app.status_bar_visible;
+    app.mark_layout_change();
+
+    let (reply_tx, reply_rx) = oneshot::channel();
+    app.handle_app_command(AppCommand::Inspect {
+        target: ipc::PaneRef::Focused,
+        lines: None,
+        include_cursor: false,
+        from_pane: Some(caller),
+        reply: reply_tx,
+    });
+    let payload = reply_rx.recv().expect("inspect reply").expect("inspect ok");
+    let text = payload["text"].as_str().unwrap_or_default();
+    assert!(
+        text.contains("hello from the background tab"),
+        "inspect returned {text:?} — the pane was cleared before it was read"
+    );
+    app.shutdown();
+}
+
 #[test]
 fn inspect_by_id_reaches_across_tabs() {
     let (mut app, caller, active) = two_tabs();
