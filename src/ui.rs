@@ -65,6 +65,13 @@ pub fn render(app: &mut App, frame: &mut Frame) {
     app.deferred_caret = None;
 
     if area.width < MIN_TERMINAL_WIDTH || area.height < MIN_TERMINAL_HEIGHT {
+        // Nothing below this point paints the main area, so retire the
+        // sidebar's hit-test cache instead of leaving last frame's rect
+        // behind. A click on "Terminal too small" would otherwise land
+        // on a row from the pre-resize layout and switch tabs — or grab
+        // the border and resize a panel — entirely invisibly.
+        app.last_org_sidebar_rect = None;
+        app.org_sidebar_row_targets.clear();
         // A pending close confirmation is swallowing every key, paste,
         // and mouse event, so it must stay visible even on a canvas too
         // small for the real UI — otherwise the app just looks wedged.
@@ -669,7 +676,7 @@ fn render_org_sidebar(app: &mut App, frame: &mut Frame, area: Rect, compact: boo
     let rows = app.org_sidebar_rows();
     let selected = app.org_sidebar_selected_index(&rows);
     let visible_height = inner.height as usize;
-    app.org_sidebar_ensure_visible(selected, visible_height);
+    app.org_sidebar_ensure_visible(selected, visible_height, rows.len());
     // Republished every paint so a click can only resolve to a row the
     // user could actually see.
     app.org_sidebar_row_targets = rows.iter().map(|r| r.target).collect();

@@ -75,6 +75,26 @@ impl App {
         self.org_sidebar_enabled() && self.org_sidebar_visible
     }
 
+    /// Is the active tab's file tree actually on screen?
+    ///
+    /// In `replace` mode the sidebar takes the tree's slot, so
+    /// `file_tree_visible` can be `true` for a tree that is not painted
+    /// at all. Everything that decides *where keystrokes go* has to ask
+    /// this rather than read the raw flag — focus on an invisible panel
+    /// silently eats input, and in the file tree's case bare `c` / `v`
+    /// would spawn Claude panes the user never asked for.
+    ///
+    /// Mirrors the `show_tree` rule in
+    /// [`layout_geometry::compute`](crate::app::layout_geometry::compute);
+    /// the narrow-terminal degrade ladder is deliberately *not* folded
+    /// in here, because that answer is only known after a paint and is
+    /// reported through `last_file_tree_rect`.
+    pub(crate) fn file_tree_painted(&self) -> bool {
+        self.ws().file_tree_visible
+            && !(self.org_sidebar_mode == crate::config::OrgSidebarMode::Replace
+                && self.org_sidebar_visible)
+    }
+
     /// Build the full row list, top to bottom.
     ///
     /// Pane order within a tab comes from `LayoutNode::collect_pane_ids`
@@ -160,6 +180,7 @@ impl App {
         let current = self.org_sidebar_selected_index(&rows) as isize;
         let next = (current + delta).clamp(0, rows.len() as isize - 1) as usize;
         self.org_sidebar_selection = Some(rows[next].target);
+        self.org_sidebar_follow_selection = true;
         self.dirty = true;
     }
 
@@ -183,6 +204,7 @@ impl App {
             return;
         }
         self.org_sidebar_selection = Some(target);
+        self.org_sidebar_follow_selection = true;
         self.switch_tab(target.tab);
         if let Some(pane_id) = target.pane_id {
             if self.workspaces[target.tab].panes.contains_key(&pane_id) {
@@ -195,16 +217,34 @@ impl App {
     }
 
     /// Clamp `org_sidebar_scroll` so the selected row stays on screen.
-    /// Called by the renderer once it knows how many rows fit.
-    pub(crate) fn org_sidebar_ensure_visible(&mut self, selected: usize, visible_height: usize) {
+    ///
+    /// Only pulls the view back to the selection when something *moved*
+    /// the selection (`org_sidebar_follow_selection`). Running it on
+    /// every paint would make the wheel useless: the scroll position it
+    /// sets would be dragged straight back to the selected row before
+    /// the next frame, so the panel would never move. The clamp against
+    /// `row_count` still runs every paint, since rows disappear
+    /// underneath a scrolled view when tabs close.
+    pub(crate) fn org_sidebar_ensure_visible(
+        &mut self,
+        selected: usize,
+        visible_height: usize,
+        row_count: usize,
+    ) {
         if visible_height == 0 {
             return;
         }
-        if selected < self.org_sidebar_scroll {
-            self.org_sidebar_scroll = selected;
-        } else if selected >= self.org_sidebar_scroll + visible_height {
-            self.org_sidebar_scroll = selected + 1 - visible_height;
+        if self.org_sidebar_follow_selection {
+            self.org_sidebar_follow_selection = false;
+            if selected < self.org_sidebar_scroll {
+                self.org_sidebar_scroll = selected;
+            } else if selected >= self.org_sidebar_scroll + visible_height {
+                self.org_sidebar_scroll = selected + 1 - visible_height;
+            }
         }
+        self.org_sidebar_scroll = self
+            .org_sidebar_scroll
+            .min(row_count.saturating_sub(visible_height));
     }
 
     /// Drop every cached click target and scroll position. Called when
@@ -214,6 +254,7 @@ impl App {
         self.org_sidebar_row_targets.clear();
         self.org_sidebar_scroll = 0;
         self.org_sidebar_selection = None;
+        self.org_sidebar_follow_selection = true;
     }
 }
 

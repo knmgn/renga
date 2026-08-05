@@ -86,10 +86,15 @@ impl App {
         } else if self.active_tab >= self.workspaces.len() {
             self.active_tab = self.workspaces.len() - 1;
         }
-        // The *workspace* changed under us when the index shifted even
-        // though `active_tab` stayed numerically equal, so compare what
-        // the user is actually looking at, not the raw index.
-        if prev_active != self.active_tab || index == prev_active {
+        // Suspend only when the workspace the user is *looking at*
+        // changed, which is exactly "we closed the active tab".
+        // `prev_active != active_tab` is not that test any more: now
+        // that an earlier close decrements the index, it also fires for
+        // `index < prev_active`, where the visible workspace is
+        // unchanged — and tearing down a half-composed IME overlay
+        // because some other tab closed in the background would be a
+        // regression of its own.
+        if index == prev_active {
             self.suspend_overlay();
         }
         // Tab indices shift after removal; any pending outer-edge or
@@ -574,11 +579,15 @@ impl App {
     /// goes last so the pre-existing `Ctrl+Right` muscle memory
     /// (pane → tree → preview) is untouched.
     fn focus_cycle_targets(&self) -> Vec<FocusTarget> {
-        let ws = self.ws();
         let mut targets = Vec::new();
-        if ws.file_tree_visible {
+        // `file_tree_painted`, not the raw `file_tree_visible` flag: in
+        // `replace` mode the sidebar holds the tree's slot, and cycling
+        // focus onto an unpainted tree would swallow every subsequent
+        // keystroke (and turn a bare `c` / `v` into a Claude pane split).
+        if self.file_tree_painted() {
             targets.push(FocusTarget::FileTree);
         }
+        let ws = self.ws();
         if ws.preview.is_active() {
             targets.push(FocusTarget::Preview);
         }

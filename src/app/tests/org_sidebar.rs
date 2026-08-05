@@ -367,6 +367,314 @@ fn replace_mode_hands_the_slot_between_the_two_panels() {
     assert!(app.ws().file_tree_visible);
 }
 
+// ─── self-review regressions ──────────────────────────────
+//
+// Each test below pins a defect the adversarial self-review pass
+// confirmed against the first cut of this feature.
+
+fn ctrl(c: char) -> KeyEvent {
+    KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
+}
+
+#[test]
+fn focus_cycle_skips_a_file_tree_that_replace_mode_is_hiding() {
+    // `focus_cycle_targets` read the raw `file_tree_visible` flag, so
+    // in `replace` mode — where the sidebar holds the tree's slot and
+    // the tree is not painted at all — a single Ctrl+Right parked
+    // focus on an invisible panel. Every later keystroke was then
+    // swallowed by `handle_file_tree_key`, and a bare `c` / `v` split
+    // the workspace into a new Claude pane the user never asked for.
+    let mut app = app_with_sidebar(40, 160);
+    app.org_sidebar_mode = OrgSidebarMode::Replace;
+    app.ws_mut().file_tree_visible = true;
+    assert!(!app.file_tree_painted(), "replace mode hides the tree");
+
+    app.focus_next_pane();
+    assert_eq!(
+        app.ws().focus_target,
+        FocusTarget::OrgSidebar,
+        "the cycle must skip the unpainted tree"
+    );
+}
+
+#[test]
+fn keys_do_not_route_to_a_file_tree_that_replace_mode_is_hiding() {
+    // Belt and braces for the above: even if focus lands on the tree
+    // some other way, the dispatch must not hand it the keyboard.
+    let mut app = app_with_sidebar(40, 160);
+    app.org_sidebar_mode = OrgSidebarMode::Replace;
+    app.ws_mut().file_tree_visible = true;
+    app.ws_mut().focus_target = FocusTarget::FileTree;
+    let panes_before = app.ws().layout.pane_count();
+
+    // `c` is "split a Claude pane here" inside the file tree.
+    app.handle_key_event(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE))
+        .expect("handle_key_event");
+
+    assert_eq!(
+        app.ws().layout.pane_count(),
+        panes_before,
+        "an unpainted tree must not act on bare character keys"
+    );
+}
+
+#[test]
+fn ctrl_b_passes_through_to_the_pty_when_the_mode_is_off() {
+    // `off` is the documented escape hatch for users who need Ctrl+B
+    // in readline / vim / a nested tmux. The first cut consumed the
+    // key unconditionally and merely made the toggle a no-op, so the
+    // escape hatch did nothing — and both keymap docs plus the
+    // function's own doc comment claimed the opposite.
+    let mut app = App::new(40, 160).expect("App::new");
+    app.org_sidebar_mode = OrgSidebarMode::Off;
+    app.org_sidebar_visible = false;
+
+    let consumed = app.handle_key_event(ctrl('b')).expect("handle_key_event");
+
+    assert!(
+        !consumed,
+        "Ctrl+B must reach the PTY when [ui] org_sidebar = off"
+    );
+    assert!(!app.org_sidebar_visible);
+}
+
+#[test]
+fn ctrl_b_is_consumed_when_the_sidebar_is_enabled() {
+    let mut app = app_with_sidebar(40, 160);
+    app.org_sidebar_visible = false;
+
+    let consumed = app.handle_key_event(ctrl('b')).expect("handle_key_event");
+
+    assert!(consumed);
+    assert!(app.org_sidebar_visible);
+    assert_eq!(app.ws().focus_target, FocusTarget::OrgSidebar);
+}
+
+#[test]
+fn ctrl_b_reaches_the_sidebar_from_file_tree_and_preview_focus() {
+    // Ctrl+F works from inside the file tree, so Ctrl+B has to work
+    // from inside the other panels too. It used to sit *after* the
+    // per-panel dispatch, where `handle_file_tree_key` had already
+    // swallowed it.
+    for focus in [FocusTarget::FileTree, FocusTarget::Preview] {
+        let mut app = app_with_sidebar(40, 160);
+        app.org_sidebar_visible = false;
+        app.ws_mut().file_tree_visible = true;
+        app.ws_mut().focus_target = focus;
+
+        app.handle_key_event(ctrl('b')).expect("handle_key_event");
+
+        assert!(
+            app.org_sidebar_visible,
+            "Ctrl+B should open the sidebar from {focus:?} focus"
+        );
+        assert_eq!(app.ws().focus_target, FocusTarget::OrgSidebar);
+    }
+}
+
+#[test]
+fn the_wheel_scroll_position_survives_the_next_paint() {
+    // The renderer re-anchored the view on the selected row every
+    // frame, so a wheel scroll was undone before it was ever drawn and
+    // the panel simply refused to move.
+    let mut app = app_with_sidebar(40, 160);
+    add_tabs(&mut app, 5);
+    // `new_tab` leaves the last tab active; go back to the top so the
+    // default selection is row 0 and any surviving scroll is unambiguous.
+    app.switch_tab(0);
+    let rows = app.org_sidebar_rows().len();
+    assert!(rows > 4, "need more rows than the viewport for this test");
+
+    app.org_sidebar_follow_selection = false;
+    app.org_sidebar_scroll = 3;
+    let selected = app.org_sidebar_selected_index(&app.org_sidebar_rows());
+    assert_eq!(selected, 0, "selection is still the first tab header");
+
+    app.org_sidebar_ensure_visible(selected, 4, rows);
+
+    assert_eq!(
+        app.org_sidebar_scroll, 3,
+        "a paint must not drag the view back to the selection"
+    );
+}
+
+#[test]
+fn moving_the_selection_does_pull_the_view_back() {
+    let mut app = app_with_sidebar(40, 160);
+    add_tabs(&mut app, 5);
+    let rows = app.org_sidebar_rows().len();
+    app.org_sidebar_scroll = 6;
+
+    app.org_sidebar_move_selection(-100); // jump to the top
+    let selected = app.org_sidebar_selected_index(&app.org_sidebar_rows());
+    app.org_sidebar_ensure_visible(selected, 4, rows);
+
+    assert_eq!(selected, 0);
+    assert_eq!(app.org_sidebar_scroll, 0);
+}
+
+#[test]
+fn scroll_is_clamped_when_rows_disappear() {
+    let mut app = app_with_sidebar(40, 160);
+    add_tabs(&mut app, 5);
+    app.org_sidebar_follow_selection = false;
+    app.org_sidebar_scroll = 8;
+
+    // Same viewport, but only 4 rows left to show.
+    app.org_sidebar_ensure_visible(0, 4, 4);
+
+    assert_eq!(app.org_sidebar_scroll, 0);
+}
+
+#[test]
+fn closing_a_background_tab_leaves_the_ime_overlay_alone() {
+    // The first cut suspended the overlay whenever `active_tab`
+    // changed numerically — which, now that an earlier close
+    // decrements it, includes the case where the user's own workspace
+    // is untouched. Tearing down a half-composed overlay because some
+    // other tab closed in the background is its own regression.
+    let mut app = app_with_sidebar(40, 160);
+    add_tabs(&mut app, 3);
+    app.switch_tab(2);
+    let target_pane = app.ws().focused_pane_id;
+    app.overlay = Some(crate::input::overlay::OverlayState::new(target_pane));
+
+    app.close_tab(0);
+
+    assert_eq!(app.active_tab, 1, "still the same workspace");
+    assert!(
+        app.overlay.is_some(),
+        "a background close must not suspend the overlay"
+    );
+}
+
+#[test]
+fn closing_the_active_tab_still_suspends_the_ime_overlay() {
+    let mut app = app_with_sidebar(40, 160);
+    add_tabs(&mut app, 2);
+    app.switch_tab(0);
+    // Target a pane in a *different* tab so `close_tab`'s own
+    // "overlay belonged to the closed tab" path doesn't fire and we
+    // observe the suspend decision itself.
+    let other_pane = app.workspaces[2].focused_pane_id;
+    app.overlay = Some(crate::input::overlay::OverlayState::new(other_pane));
+
+    app.close_tab(0);
+
+    assert!(
+        app.overlay.is_none(),
+        "closing the tab under the user suspends the overlay"
+    );
+    assert!(app.saved_overlay_drafts.contains_key(&other_pane));
+}
+
+#[test]
+fn background_status_changes_do_not_pierce_the_ime_overlay_freeze() {
+    // `tick_claude_snapshots` runs outside the `dirty` gate on purpose,
+    // but it must still respect the freeze that keeps composition from
+    // flickering — otherwise a background tab's Claude churn repaints
+    // the panes at up to 4 Hz behind the overlay.
+    let mut app = app_with_sidebar(40, 160);
+    app.ime_freeze_panes_on_overlay = true;
+    let pane = app.ws().focused_pane_id;
+    app.overlay = Some(crate::input::overlay::OverlayState::new(pane));
+    // Seed a snapshot that disagrees with the (empty) monitor state so
+    // the sweep is guaranteed to see a change.
+    app.claude_snapshots.insert(
+        pane,
+        crate::claude_monitor::ClaudeSnapshot {
+            is_working: true,
+            ..Default::default()
+        },
+    );
+    app.dirty = false;
+
+    app.tick_claude_snapshots();
+
+    assert!(
+        !app.dirty,
+        "the freeze must hold while the overlay is composing"
+    );
+    assert_eq!(
+        app.claude_snapshots.get(&pane).map(|s| s.is_working),
+        Some(false),
+        "the cache is still refreshed — only the repaint is deferred"
+    );
+}
+
+#[test]
+fn clicking_the_sidebar_border_rows_does_not_activate_a_row() {
+    // The hit test accepted the whole rect while the row index
+    // saturated at the top border and ran one past the viewport at the
+    // bottom one. Clicking the " ORG " title jumped to whatever was at
+    // the top of the view, and clicking the bottom border jumped to a
+    // row that had never been on screen — both of which switch tabs
+    // and move pane focus.
+    let mut app = app_with_sidebar(40, 160);
+    add_tabs(&mut app, 3);
+    app.switch_tab(3);
+    app.relayout_panes();
+
+    // A 6-row panel: border, four inner rows, border.
+    let rect = Rect::new(0, 1, 26, 6);
+    app.last_org_sidebar_rect = Some(rect);
+    app.org_sidebar_row_targets = app.org_sidebar_rows().iter().map(|r| r.target).collect();
+    app.org_sidebar_scroll = 0;
+    assert!(
+        app.org_sidebar_row_targets.len() > 4,
+        "need rows past the viewport for the bottom-border case"
+    );
+
+    for border_row in [rect.y, rect.y + rect.height - 1] {
+        app.switch_tab(3);
+        app.handle_mouse_event(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 5,
+            row: border_row,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert_eq!(
+            app.active_tab, 3,
+            "clicking border row {border_row} must not switch tabs"
+        );
+    }
+
+    // The inner rows still work.
+    app.handle_mouse_event(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: 5,
+        row: rect.y + 1,
+        modifiers: KeyModifiers::NONE,
+    });
+    assert_eq!(app.active_tab, 0, "the first inner row is tab 1's header");
+}
+
+#[test]
+fn the_file_tree_border_drag_recovers_after_the_tree_degrades_away() {
+    // The drag handler was gated on `last_file_tree_rect`, which the
+    // renderer sets to `None` as soon as a wide-enough drag trips the
+    // degrade ladder. The width then froze at its widest value: the
+    // tree could not be dragged back, its border no longer hit-tested,
+    // and only a terminal resize got it back.
+    let mut app = App::new(40, 75).expect("App::new");
+    app.last_term_size = (75, 40);
+    app.ws_mut().file_tree_visible = true;
+    app.ws_mut().last_file_tree_rect = None; // as if degraded out
+    app.dragging = Some(DragTarget::FileTreeBorder);
+
+    app.handle_mouse_event(MouseEvent {
+        kind: MouseEventKind::Drag(MouseButton::Left),
+        column: 30,
+        row: 10,
+        modifiers: KeyModifiers::NONE,
+    });
+
+    assert_eq!(
+        app.file_tree_width, 30,
+        "dragging back left must still narrow the tree"
+    );
+}
+
 // ─── geometry agreement ───────────────────────────────────
 
 #[test]

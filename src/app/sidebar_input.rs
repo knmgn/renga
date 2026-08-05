@@ -182,8 +182,9 @@ impl App {
             // Mirrors the preview's Ctrl+W: close the panel rather than
             // falling through to the pane/tab close confirmation, which
             // is what an unhandled Ctrl+W here would otherwise reach.
-            (KeyModifiers::CONTROL, KeyCode::Char('w'))
-            | (KeyModifiers::CONTROL, KeyCode::Char('b')) => {
+            // (Ctrl+B never reaches here — `handle_key` takes it before
+            // the per-panel dispatch so it works from any focus.)
+            (KeyModifiers::CONTROL, KeyCode::Char('w')) => {
                 self.toggle_org_sidebar();
                 Ok(true)
             }
@@ -239,8 +240,13 @@ impl App {
     /// visible+focused closes, visible+unfocused just takes focus,
     /// hidden opens and focuses.
     ///
-    /// Inert when `[ui] org_sidebar = off` so the keystroke reaches the
-    /// PTY untouched, matching how `[ime] mode = off` frees Ctrl+;.
+    /// A no-op when `[ui] org_sidebar = off`. Note that the *key* is
+    /// released back to the PTY by the dispatcher in `handle_key`, which
+    /// declines to consume Ctrl+B unless the feature is enabled —
+    /// returning early here only guards direct callers, and on its own
+    /// would leave the keystroke swallowed. `off` is the documented
+    /// escape hatch for readline / vim / nested tmux, the same way
+    /// `[ime] mode = off` frees Ctrl+;.
     pub(crate) fn toggle_org_sidebar(&mut self) {
         if !self.org_sidebar_enabled() {
             return;
@@ -273,7 +279,7 @@ impl App {
         let suppressed_by_sidebar = self.org_sidebar_mode == crate::config::OrgSidebarMode::Replace
             && self.org_sidebar_visible;
         let sidebar_was_visible = self.org_sidebar_visible;
-        let showing = self.ws().file_tree_visible && !suppressed_by_sidebar;
+        let showing = self.file_tree_painted();
 
         if showing && self.ws().focus_target == FocusTarget::FileTree {
             let ws = self.ws_mut();
@@ -296,9 +302,7 @@ impl App {
             ws.focus_target = FocusTarget::FileTree;
         }
 
-        let now_showing = self.ws().file_tree_visible
-            && !(self.org_sidebar_mode == crate::config::OrgSidebarMode::Replace
-                && self.org_sidebar_visible);
+        let now_showing = self.file_tree_painted();
         if showing != now_showing || sidebar_was_visible != self.org_sidebar_visible {
             self.mark_layout_change();
         }

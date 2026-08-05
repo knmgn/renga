@@ -104,6 +104,7 @@ impl App {
             org_sidebar_scroll: 0,
             org_sidebar_selection: None,
             org_sidebar_row_targets: Vec::new(),
+            org_sidebar_follow_selection: true,
             claude_snapshots: HashMap::new(),
             last_claude_sweep: None,
         })
@@ -495,7 +496,14 @@ impl App {
             changed = true;
         }
 
-        if changed {
+        // Honour the IME overlay freeze (#37 / #82). `drain_pty_events`
+        // suppresses PTY-driven repaints while the overlay is open so
+        // composition doesn't flicker; marking dirty here on every
+        // background-tab status change would punch straight through
+        // that at up to 4 Hz. The cache is still refreshed above, so
+        // the sidebar is correct at the next repaint — which the
+        // overlay catch-up tick already schedules.
+        if changed && !(self.overlay.is_some() && self.ime_freeze_panes_on_overlay) {
             self.dirty = true;
         }
     }

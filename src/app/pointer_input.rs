@@ -231,6 +231,16 @@ impl App {
         None
     }
 
+    /// Column the file tree starts at, derived from the panel to its
+    /// left rather than from the tree's own cached rect so it stays
+    /// answerable while the tree is not being painted (mid-drag through
+    /// the degrade ladder, or `replace` mode).
+    fn file_tree_origin_x(&self) -> u16 {
+        self.last_org_sidebar_rect
+            .map(|r| r.x + r.width)
+            .unwrap_or(0)
+    }
+
     fn is_on_org_sidebar_border(&self, col: u16) -> bool {
         if let Some(rect) = self.last_org_sidebar_rect {
             let border_col = rect.x + rect.width;
@@ -516,16 +526,28 @@ impl App {
                         && row < rect.y + rect.height
                     {
                         self.ws_mut().focus_target = FocusTarget::OrgSidebar;
-                        // Row 0 of the rect is the block border.
+                        // The rect includes the block's border rows, and
+                        // `org_sidebar_row_targets` holds *every* row,
+                        // not just the visible window. Clip to the inner
+                        // area explicitly: without it a click on the
+                        // " ORG " title row saturated to inner row 0 and
+                        // activated whatever was at the top of the view,
+                        // and a click on the bottom border resolved one
+                        // row *past* the window and jumped to a tab that
+                        // was never on screen. Activation switches tabs
+                        // and moves pane focus, so a stray hit is not a
+                        // cosmetic slip.
+                        let visible_height = rect.height.saturating_sub(2) as usize;
+                        let on_inner_row = row > rect.y && row + 1 < rect.y + rect.height;
                         let inner_y = row.saturating_sub(rect.y + 1) as usize;
-                        let idx = self.org_sidebar_scroll + inner_y;
-                        // `org_sidebar_row_targets` is republished every
-                        // paint and cleared whenever the tab set changes,
-                        // so a click can only ever land on a row that was
-                        // on screen; `switch_tab` re-validates the index
-                        // against `workspaces` regardless.
-                        if let Some(&target) = self.org_sidebar_row_targets.get(idx) {
-                            self.org_sidebar_activate_target(target);
+                        if on_inner_row && inner_y < visible_height {
+                            let idx = self.org_sidebar_scroll + inner_y;
+                            // `switch_tab` re-validates the tab index
+                            // against `workspaces` regardless, since an
+                            // MCP close can land between paint and click.
+                            if let Some(&target) = self.org_sidebar_row_targets.get(idx) {
+                                self.org_sidebar_activate_target(target);
+                            }
                         }
                         self.last_edge_click = None;
                         self.last_boundary_click = None;
@@ -646,19 +668,30 @@ impl App {
                             // Was `col.clamp(10, 60)`, which silently
                             // assumed the tree starts at column 0. With
                             // the org sidebar to its left that is no
-                            // longer true, so measure from the tree's
-                            // own left edge like the preview does.
-                            if let Some(rect) = self.ws().last_file_tree_rect {
-                                self.file_tree_width = col.saturating_sub(rect.x).clamp(10, 60);
-                            }
+                            // longer true.
+                            //
+                            // Derived from the sidebar's width rather
+                            // than read off `last_file_tree_rect`: a
+                            // drag wide enough to trip the degrade
+                            // ladder makes the tree's own rect `None`
+                            // mid-drag, and gating on it would freeze
+                            // the width there — dragging back left
+                            // could never restore the tree, and the
+                            // border would no longer hit-test, so there
+                            // was no way out short of resizing the
+                            // terminal.
+                            self.file_tree_width =
+                                col.saturating_sub(self.file_tree_origin_x()).clamp(10, 60);
                         }
                         DragTarget::OrgSidebarBorder => {
-                            if let Some(rect) = self.last_org_sidebar_rect {
-                                self.org_sidebar_width = col.saturating_sub(rect.x).clamp(
-                                    crate::app::layout_geometry::ORG_SIDEBAR_MIN_WIDTH,
-                                    crate::app::layout_geometry::ORG_SIDEBAR_MAX_WIDTH,
-                                );
-                            }
+                            // The sidebar is always the outermost panel,
+                            // so its left edge is the main area's x — no
+                            // cached rect needed, and the same mid-drag
+                            // recovery argument as above applies.
+                            self.org_sidebar_width = col.clamp(
+                                crate::app::layout_geometry::ORG_SIDEBAR_MIN_WIDTH,
+                                crate::app::layout_geometry::ORG_SIDEBAR_MAX_WIDTH,
+                            );
                         }
                         DragTarget::PreviewBorder => {
                             if let Some(rect) = self.ws().last_preview_rect {
@@ -895,9 +928,11 @@ impl App {
                 && row >= rect.y
                 && row < rect.y + rect.height
             {
-                // Scrolls the view only — the selection stays put, and
-                // the renderer will pull it back on screen the moment
-                // the user moves it with j/k.
+                // Scrolls the view only; the selection stays put. The
+                // renderer re-anchors on the selection only when
+                // `org_sidebar_follow_selection` is set (i.e. after a
+                // j/k/Enter), which is what keeps this from being
+                // undone on the very next frame.
                 let rows = self.org_sidebar_row_targets.len();
                 let visible = rect.height.saturating_sub(2) as usize;
                 let max_scroll = rows.saturating_sub(visible);

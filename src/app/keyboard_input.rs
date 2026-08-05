@@ -315,6 +315,25 @@ impl App {
             return Ok(true);
         }
 
+        // Ctrl+B — toggle the org sidebar. Kept off Ctrl+F so the file
+        // tree binding users already have in their fingers is untouched
+        // (the two panels coexist by default).
+        //
+        // Checked *before* the per-panel dispatch below so it reaches
+        // the sidebar from any focus, the way Ctrl+F already does from
+        // the file tree. Gated on `org_sidebar_enabled` rather than
+        // swallowed unconditionally: `[ui] org_sidebar = "off"` is the
+        // documented escape hatch for users who need Ctrl+B in their
+        // shell / tmux / readline, so with the feature off the key has
+        // to fall through to the PTY untouched.
+        if key.modifiers == KeyModifiers::CONTROL
+            && key.code == KeyCode::Char('b')
+            && self.org_sidebar_enabled()
+        {
+            self.toggle_org_sidebar();
+            return Ok(true);
+        }
+
         // Org sidebar mode.
         //
         // This dispatch chain is `if` / `==`, not an exhaustive `match`,
@@ -332,8 +351,11 @@ impl App {
             return self.handle_preview_key(key);
         }
 
-        // File tree mode
-        if self.ws().focus_target == FocusTarget::FileTree {
+        // File tree mode. Gated on `file_tree_painted` for the same
+        // reason as the sidebar above — in `replace` mode the tree can
+        // hold focus while not being drawn, and routing keys there
+        // swallows them (and turns a bare `c` / `v` into a pane split).
+        if self.ws().focus_target == FocusTarget::FileTree && self.file_tree_painted() {
             if key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char('f') {
                 self.toggle_file_tree();
                 return Ok(true);
@@ -344,14 +366,6 @@ impl App {
         // Ctrl+F — toggle file tree
         if key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char('f') {
             self.toggle_file_tree();
-            return Ok(true);
-        }
-
-        // Ctrl+B — toggle the org sidebar. Kept off Ctrl+F so the file
-        // tree binding users already have in their fingers is untouched
-        // (the two panels coexist by default).
-        if key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char('b') {
-            self.toggle_org_sidebar();
             return Ok(true);
         }
 

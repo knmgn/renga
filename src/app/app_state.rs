@@ -371,6 +371,11 @@ pub struct App {
     /// Click-target list published by the renderer, indexed by row.
     /// Cleared whenever the tab set changes.
     pub(crate) org_sidebar_row_targets: Vec<org_sidebar::OrgSidebarTarget>,
+    /// Set when something moved the selection, so the next paint scrolls
+    /// it back into view. Without the flag the renderer would re-anchor
+    /// the view on the selection every frame and the mouse wheel could
+    /// never move the panel.
+    pub(crate) org_sidebar_follow_selection: bool,
     /// Display-only Claude state, one entry per live pane, refreshed on
     /// a timer by [`App::tick_claude_snapshots`] instead of per frame.
     /// Painting the sidebar straight from `ClaudeMonitor::state()` would
