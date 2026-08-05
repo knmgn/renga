@@ -389,8 +389,9 @@ Peer messaging tools:\n\
 - send_message: Send a message to another instance by peer ID or name.\n\
 - set_summary: Set a 1-2 sentence summary of what you're working on; surfaced on list_panes / list_peers for other peers.\n\
 - check_messages: Drain any queued peer messages still waiting for this client.\n\n\
-Pane control tools (all scoped to the current renga tab, except new_tab which is the one \
-cross-tab tool):\n\
+Pane control tools (most are scoped to the current renga tab; the exceptions are close_pane \
+and set_pane_identity, which resolve their targets across all tabs, and new_tab, which \
+creates a whole new tab):\n\
 - list_panes: Inspect all panes in the current tab, including geometry and the focus flag.\n\
 - spawn_pane: Split an existing pane to create a new one. Optionally runs a startup command, \
 assigns a stable name, attaches a role label, or sets an explicit working directory via \
@@ -404,10 +405,12 @@ for orchestrator flows — keeps Claude launch policy in renga instead of in eve
 structured `args[]` instead of a free-form command string and launches plain `codex`. Prefer \
 this over `spawn_pane(command=\"codex ...\")` so orchestrator prompts do not have to synthesize \
 shell-quoted Codex commands.\n\
-- close_pane: Close a pane by id or name. Refuses when it's the last pane of the last tab.\n\
+- close_pane: Close a pane by id or name. The target is resolved across all tabs (names \
+prefer the current tab before searching the others). Refuses when it's the last pane of \
+the last tab.\n\
 - focus_pane: Move keyboard focus to another pane in the same tab.\n\
-- new_tab: Open a brand-new tab with a fresh pane and switch focus to it. Unlike the other \
-pane-control tools, this reaches outside the current tab. Accepts the same `cwd` option \
+- new_tab: Open a brand-new tab with a fresh pane and switch focus to it. The only tool \
+that creates something outside the current tab. Accepts the same `cwd` option \
 as spawn_pane for setting the new pane's working directory.\n\
 - inspect_pane: Snapshot the visible screen of a pane so you can detect interactive \
 prompts, banners, or mode indicators in another pane without asking it. Returns plain \
@@ -416,10 +419,15 @@ the last N rows.\n\
 - send_keys: Send raw key input (y/n, Shift+Tab, Esc, arrow keys, Ctrl+letters, etc.) to a \
 pane's PTY. Use this to answer interactive prompts or drive a TUI when the target isn't a \
 peer-enabled agent that can read send_message. DISTINCT from send_message, which delivers \
-logical peer messages rather than PTY bytes.\n\n\
+logical peer messages rather than PTY bytes.\n\
+- set_pane_identity: Rename or (re)assign the stable `name` and/or `role` of an existing \
+pane. The target is resolved across all tabs (names prefer the current tab); name \
+uniqueness is checked within the target pane's tab.\n\n\
 Event monitoring:\n\
 - poll_events: Long-poll for pane lifecycle events (pane_started, pane_exited, \
-events_dropped). First call (no `since`) starts at \"right now\" — no historical replay. \
+events_dropped). Events are process-wide: pane lifecycle from every renga tab is \
+delivered, not just the current tab's. First call (no `since`) starts at \"right now\" — \
+no historical replay. \
 Each response includes a `next_since` cursor to pass back on the next call. Optional \
 `types` filter narrows returned events without losing the cursor advance, but it does \
 not extend the long-poll: a non-matching event still returns early with events=[] \
@@ -602,7 +610,7 @@ fn tools_spec() -> Value {
         },
         {
             "name": "close_pane",
-            "description": "Close a pane in the current renga tab, terminating its process. Fails with code 'last_pane' when the target is the last pane of the only remaining tab.",
+            "description": "Close a pane, terminating its process. The target is resolved across all renga tabs — numeric ids match a pane in any tab, and names prefer the current tab before searching the others. Fails with code 'last_pane' when the target is the last pane of the only remaining tab.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -714,7 +722,7 @@ fn tools_spec() -> Value {
         },
         {
             "name": "set_pane_identity",
-            "description": "Rename or (re)assign the stable `name` and/or `role` of an existing pane in the current tab. Use this to recover from sessions launched without the intended layout (e.g. when the secretary pane was spawned without an `id`, so peers can't address it as `to_id=\"secretary\"`). Both fields use three-state semantics: omit the key to keep the current value, pass `null` to clear it, or pass a string to set it. Validation: name cannot be empty, all-digits, or collide with another pane in this tab; allowed characters are [A-Za-z0-9_-]. Role has no uniqueness constraint. Returns the updated pane record so callers can confirm without a separate list round-trip.",
+            "description": "Rename or (re)assign the stable `name` and/or `role` of an existing pane. The target is resolved across all renga tabs — numeric ids match a pane in any tab, and names prefer the current tab before searching the others. Use this to recover from sessions launched without the intended layout (e.g. when the secretary pane was spawned without an `id`, so peers can't address it as `to_id=\"secretary\"`). Both fields use three-state semantics: omit the key to keep the current value, pass `null` to clear it, or pass a string to set it. Validation: name cannot be empty, all-digits, or collide with another pane in the target pane's tab (uniqueness is per tab, not global); allowed characters are [A-Za-z0-9_-]. Role has no uniqueness constraint. Returns the updated pane record so callers can confirm without a separate list round-trip.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -735,7 +743,7 @@ fn tools_spec() -> Value {
         },
         {
             "name": "poll_events",
-            "description": "Long-poll for pane lifecycle events (pane_started, pane_exited, events_dropped, and any forward-compatible variants). Returns events accumulated since the given cursor; if none are buffered, blocks up to `timeout_ms` for the next one. The first call (omit `since`) starts at \"right now\" — no historical replay, matching `renga events --timeout` semantics. Each response body is a JSON object with `next_since` (an opaque cursor string to pass back) and `events` (an array of event objects in renga's wire format).",
+            "description": "Long-poll for pane lifecycle events (pane_started, pane_exited, events_dropped, and any forward-compatible variants). Events are process-wide: pane lifecycle from every renga tab is delivered, not just the caller's tab. Returns events accumulated since the given cursor; if none are buffered, blocks up to `timeout_ms` for the next one. The first call (omit `since`) starts at \"right now\" — no historical replay, matching `renga events --timeout` semantics. Each response body is a JSON object with `next_since` (an opaque cursor string to pass back) and `events` (an array of event objects in renga's wire format).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
