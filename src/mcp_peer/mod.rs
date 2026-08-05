@@ -1176,18 +1176,17 @@ fn parse_spawn_placement(args: &Value) -> std::result::Result<SpawnPlacement, St
             )),
             _ => Err(format!("tab.name must be a non-empty string; {FORM}")),
         },
-        "index" => match val.as_u64() {
-            Some(n) => Ok(SpawnPlacement::Tab(crate::ipc::TabSelector::Index(
-                n as usize,
-            ))),
+        // Checked conversions, not `as`: on a 32-bit target an
+        // oversized u64 would silently truncate — `4294967296` becomes
+        // index 0 — and route the spawn into the wrong tab.
+        "index" => match val.as_u64().and_then(|n| usize::try_from(n).ok()) {
+            Some(n) => Ok(SpawnPlacement::Tab(crate::ipc::TabSelector::Index(n))),
             None => Err(format!(
                 "tab.index must be a non-negative integer (0-based, as reported by list_peers); {FORM}"
             )),
         },
-        "pane_id" => match val.as_u64() {
-            Some(n) => Ok(SpawnPlacement::Tab(crate::ipc::TabSelector::PaneId(
-                n as usize,
-            ))),
+        "pane_id" => match val.as_u64().and_then(|n| usize::try_from(n).ok()) {
+            Some(n) => Ok(SpawnPlacement::Tab(crate::ipc::TabSelector::PaneId(n))),
             None => Err(format!(
                 "tab.pane_id must be a non-negative integer pane id; {FORM}"
             )),
