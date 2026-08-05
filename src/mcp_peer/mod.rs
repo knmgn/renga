@@ -1165,10 +1165,15 @@ fn parse_spawn_placement(args: &Value) -> std::result::Result<SpawnPlacement, St
     }
     let (key, val) = obj.iter().next().expect("len checked above");
     match key.as_str() {
-        "name" => match val.as_str().map(str::trim) {
-            Some(s) if !s.is_empty() => Ok(SpawnPlacement::Tab(crate::ipc::TabSelector::Name(
-                s.to_string(),
-            ))),
+        // Deliberately NOT trimmed: tab selection is an exact
+        // display-name match, and raw-IPC `new_tab` labels are stored
+        // verbatim — trimming here would turn a valid selector for a
+        // whitespace-padded label into `tab_not_found`, or worse,
+        // match a *different* tab whose label is the trimmed form.
+        "name" => match val.as_str() {
+            Some(s) if !s.trim().is_empty() => Ok(SpawnPlacement::Tab(
+                crate::ipc::TabSelector::Name(s.to_string()),
+            )),
             _ => Err(format!("tab.name must be a non-empty string; {FORM}")),
         },
         "index" => match val.as_u64() {
@@ -3028,6 +3033,15 @@ mod tests {
                 "workers".into()
             )))
         );
+        // Exact match means exact: surrounding whitespace is part of
+        // the label (raw-IPC `new_tab` stores labels verbatim), so the
+        // selector must not be trimmed into naming a different tab.
+        assert_eq!(
+            parse_spawn_placement(&json!({ "tab": { "name": " workers " } })),
+            Ok(SpawnPlacement::Tab(crate::ipc::TabSelector::Name(
+                " workers ".into()
+            )))
+        );
         assert_eq!(
             parse_spawn_placement(&json!({ "tab": { "index": 2 } })),
             Ok(SpawnPlacement::Tab(crate::ipc::TabSelector::Index(2)))
@@ -3063,6 +3077,7 @@ mod tests {
             // unknown key, wrong types
             json!({ "tab": { "nme": "a" } }),
             json!({ "tab": { "name": "" } }),
+            json!({ "tab": { "name": "   " } }),
             json!({ "tab": { "name": 3 } }),
             json!({ "tab": { "index": -1 } }),
             json!({ "tab": { "index": "2" } }),
