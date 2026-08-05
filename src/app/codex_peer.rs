@@ -206,9 +206,14 @@ pub(crate) fn write_input_to_pane(
 }
 
 impl App {
-    /// Route `body` from `from_pane` to `target` when both share a
-    /// workspace. Cross-tab targets are silently dropped so the MCP
-    /// server cannot enumerate panes in other tabs by probing ids.
+    /// Route `body` from `from_pane` to `target` — in any tab since
+    /// Issue #289 dropped the same-tab restriction. Target resolution
+    /// is caller-scoped ([`Self::resolve_target_from`]): a numeric id
+    /// reaches every tab, while a name or `focused` stays inside the
+    /// *sender's* workspace — names are only unique per tab, so
+    /// resolving them against the tab the human happens to be viewing
+    /// would misroute background-tab senders. An unresolvable target
+    /// fails with `pane_not_found` instead of pretending to deliver.
     /// Self-sends loop back to the sender pane: tooling like
     /// claude-org-ja's peer_notify resolves "secretary" from a shell
     /// running inside the secretary pane, and a silent drop there
@@ -227,13 +232,16 @@ impl App {
                     format!("sender pane {from_pane} not found"),
                 )
             })?;
-        let (target_ws, target_id) = match self.resolve_pane_across_workspaces(target) {
-            Some(pair) => pair,
-            None => return Ok(()),
-        };
-        if sender_ws != target_ws {
-            return Ok(());
-        }
+        let (target_ws, target_id) =
+            self.resolve_target_from(sender_ws, target).ok_or_else(|| {
+                ipc::CodedError::new(
+                    ipc::err_code::PANE_NOT_FOUND,
+                    format!(
+                        "peer target not found: {target:?} (names only resolve inside the \
+                         sender's tab; use the numeric pane id from list_peers for other tabs)"
+                    ),
+                )
+            })?;
         if self.is_duplicate_peer_send(target_id, from_pane, &body) {
             // Same (target, from, body) within the dedupe window —
             // treat as a no-op so duplicate dispatcher acks /
@@ -447,11 +455,19 @@ impl App {
     pub(crate) fn flush_pending_codex_peer_messages(&mut self) {
         self.materialize_unfocused_codex_peer_notification();
         let now = Instant::now();
+        let active_tab = self.active_tab;
         let mut empty_panes = Vec::new();
-        for ws in &mut self.workspaces {
+        for (ws_idx, ws) in self.workspaces.iter_mut().enumerate() {
             let pane_ids: Vec<usize> = ws.panes.keys().copied().collect();
             for pane_id in pane_ids {
-                if ws.focused_pane_id == pane_id {
+                // Only the pane the human is actually looking at is
+                // exempt from PTY nudges (the focused-pane overlay
+                // covers it). A background tab's `focused_pane_id` is
+                // just a bookmark — skipping it too would strand
+                // cross-tab nudges forever on single-pane tabs, where
+                // the only pane is always the workspace-focused one
+                // (Issue #289).
+                if ws_idx == active_tab && ws.focused_pane_id == pane_id {
                     continue;
                 }
                 let Some(queue) = self.pending_codex_peer_messages.get_mut(&pane_id) else {

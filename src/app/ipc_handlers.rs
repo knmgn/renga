@@ -197,12 +197,15 @@ impl App {
     }
 
     /// Resolve `from_pane` to its workspace, then return every other
-    /// pane in that workspace as a [`PeerInfo`].
+    /// pane in **every** workspace as a [`PeerInfo`] (Issue #289). The
+    /// caller's own tab is emitted first so same-tab siblings — the
+    /// ones addressable by bare name — stay at the top; the remaining
+    /// tabs follow in index order.
     pub(crate) fn handle_peer_list(
         &self,
         from_pane: usize,
     ) -> std::result::Result<Vec<PeerInfo>, ipc::CodedError> {
-        let (ws_idx, _) = self
+        let (caller_ws, _) = self
             .resolve_pane_across_workspaces(&PaneRef::Id(from_pane))
             .ok_or_else(|| {
                 ipc::CodedError::new(
@@ -210,34 +213,42 @@ impl App {
                     format!("caller pane {from_pane} not found in any workspace"),
                 )
             })?;
-        let ws = &self.workspaces[ws_idx];
-        let name_by_id: HashMap<usize, String> = ws
-            .pane_names
-            .iter()
-            .map(|(n, id)| (*id, n.clone()))
-            .collect();
-        let peers: Vec<PeerInfo> = ws
-            .layout
-            .collect_pane_ids()
-            .into_iter()
-            .filter(|id| *id != from_pane)
-            .map(|id| {
-                let pane = ws.panes.get(&id);
-                PeerInfo {
-                    id,
-                    name: name_by_id.get(&id).cloned(),
-                    role: pane.and_then(|p| p.role.clone()),
-                    cwd: pane.map(|p| p.cwd.to_string_lossy().to_string()),
-                    kind: self.peer_client_kinds.get(&id).copied(),
-                    receive_mode: self
-                        .peer_client_kinds
-                        .get(&id)
-                        .copied()
-                        .map(|k| k.receive_mode()),
-                    summary: pane.and_then(|p| p.summary.clone()),
-                }
-            })
-            .collect();
+        let ordered_ws = std::iter::once(caller_ws)
+            .chain((0..self.workspaces.len()).filter(|i| *i != caller_ws));
+        let mut peers = Vec::new();
+        for ws_idx in ordered_ws {
+            let ws = &self.workspaces[ws_idx];
+            let name_by_id: HashMap<usize, String> = ws
+                .pane_names
+                .iter()
+                .map(|(n, id)| (*id, n.clone()))
+                .collect();
+            peers.extend(
+                ws.layout
+                    .collect_pane_ids()
+                    .into_iter()
+                    .filter(|id| *id != from_pane)
+                    .map(|id| {
+                        let pane = ws.panes.get(&id);
+                        PeerInfo {
+                            id,
+                            name: name_by_id.get(&id).cloned(),
+                            role: pane.and_then(|p| p.role.clone()),
+                            tab: Some(ws_idx),
+                            tab_name: Some(ws.display_name().to_string()),
+                            same_tab: Some(ws_idx == caller_ws),
+                            cwd: pane.map(|p| p.cwd.to_string_lossy().to_string()),
+                            kind: self.peer_client_kinds.get(&id).copied(),
+                            receive_mode: self
+                                .peer_client_kinds
+                                .get(&id)
+                                .copied()
+                                .map(|k| k.receive_mode()),
+                            summary: pane.and_then(|p| p.summary.clone()),
+                        }
+                    }),
+            );
+        }
         Ok(peers)
     }
 
