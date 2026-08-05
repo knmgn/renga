@@ -339,4 +339,46 @@ pub struct App {
     /// Marker path to touch on dismissal. `None` when the config dir
     /// couldn't be resolved — dismissal stays in-memory for this run.
     pub(crate) macos_tip_marker: Option<PathBuf>,
+
+    // ─── Org sidebar (Issue #291) ─────────────────────────
+    //
+    // All of this lives on `App`, not `Workspace`, because the panel is
+    // a *cross-tab* view: it lists every tab at once, so per-tab copies
+    // of its scroll position and selection would fight each other on
+    // every tab switch. `FocusTarget::OrgSidebar` is the one piece that
+    // stays per-workspace, since focus is inherently per-tab — see
+    // [`App::switch_tab`] for how sidebar focus is carried across.
+    /// Resolved `[ui] org_sidebar` mode. `Off` disables the panel and
+    /// its toggle key outright.
+    pub org_sidebar_mode: crate::config::OrgSidebarMode,
+    /// Runtime visibility toggle (Ctrl+B). Meaningless when the mode is
+    /// `Off`; gate on [`App::org_sidebar_active`] rather than reading
+    /// this directly.
+    pub org_sidebar_visible: bool,
+    /// User-resized width, clamped to `ORG_SIDEBAR_MIN_WIDTH..=MAX` by
+    /// the layout helper. This is the *requested* width — the effective
+    /// one can be smaller when the degrade ladder forces compact mode.
+    pub org_sidebar_width: u16,
+    /// Cached rect from the last paint, used for mouse hit-testing.
+    /// `None` when the panel was not painted (toggled off, or squeezed
+    /// out by a narrow terminal).
+    pub(crate) last_org_sidebar_rect: Option<Rect>,
+    /// First visible row index.
+    pub(crate) org_sidebar_scroll: usize,
+    /// Keyboard selection, stored as `(tab, pane)` rather than a row
+    /// index so it survives tabs and panes appearing or disappearing.
+    pub(crate) org_sidebar_selection: Option<org_sidebar::OrgSidebarTarget>,
+    /// Click-target list published by the renderer, indexed by row.
+    /// Cleared whenever the tab set changes.
+    pub(crate) org_sidebar_row_targets: Vec<org_sidebar::OrgSidebarTarget>,
+    /// Display-only Claude state, one entry per live pane, refreshed on
+    /// a timer by [`App::tick_claude_snapshots`] instead of per frame.
+    /// Painting the sidebar straight from `ClaudeMonitor::state()` would
+    /// clone a `Vec<TodoItem>` and several `String`s for every pane of
+    /// every tab on every frame; the snapshot is a small `PartialEq`
+    /// value so the tick can also tell when nothing actually changed.
+    pub(crate) claude_snapshots: HashMap<usize, crate::claude_monitor::ClaudeSnapshot>,
+    /// Throttle for the snapshot sweep itself, so the cross-tab walk
+    /// runs a few times a second rather than once per event-loop turn.
+    pub(crate) last_claude_sweep: Option<Instant>,
 }

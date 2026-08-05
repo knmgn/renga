@@ -16,6 +16,9 @@ impl App {
         self.workspaces.push(ws);
         self.active_tab = self.workspaces.len() - 1;
         self.suspend_overlay();
+        // Sidebar rows are keyed by tab index, so the whole cache is
+        // stale the moment the tab set changes.
+        self.reset_org_sidebar_caches();
         Ok(pane_id)
     }
 
@@ -67,11 +70,26 @@ impl App {
 
         self.workspaces[index].shutdown();
         self.workspaces.remove(index);
+        // `remove` shifts every later tab down one slot. Clamping only
+        // when `active_tab` runs off the end (the pre-#291 behaviour)
+        // silently retargets the active tab whenever an *earlier* tab
+        // closes: with [A,B,C,D] and the user on C (index 2), closing B
+        // leaves [A,C,D] and index 2 now points at D. Because the
+        // numeric value never changed, the `prev_active != active_tab`
+        // guard below also skipped `suspend_overlay`, stranding the IME
+        // overlay on a pane in a different tab. Follow the shift
+        // instead. Reachable from MCP `close_pane` / `close_tab` on a
+        // background tab, and now from the org sidebar's cross-tab view.
         let prev_active = self.active_tab;
-        if self.active_tab >= self.workspaces.len() {
+        if index < self.active_tab {
+            self.active_tab -= 1;
+        } else if self.active_tab >= self.workspaces.len() {
             self.active_tab = self.workspaces.len() - 1;
         }
-        if prev_active != self.active_tab {
+        // The *workspace* changed under us when the index shifted even
+        // though `active_tab` stayed numerically equal, so compare what
+        // the user is actually looking at, not the raw index.
+        if prev_active != self.active_tab || index == prev_active {
             self.suspend_overlay();
         }
         // Tab indices shift after removal; any pending outer-edge or
@@ -79,6 +97,8 @@ impl App {
         // would now point at a different workspace.
         self.last_edge_click = None;
         self.last_boundary_click = None;
+        self.last_tab_click = None;
+        self.reset_org_sidebar_caches();
         self.mark_layout_change();
         // A tab that vanished under a pending prompt (MCP close of its
         // last pane, or the tab itself) can no longer be confirmed.
@@ -542,76 +562,127 @@ impl App {
         }
     }
 
+    /// The non-pane focus stops `Ctrl+Right` visits after it runs out
+    /// of panes, in cycle order, filtered to the ones currently on
+    /// screen.
+    ///
+    /// Extracted when the org sidebar added a fourth [`FocusTarget`]:
+    /// the previous hand-written if-chains needed one more branch in
+    /// each of six places, and the two directions had already drifted
+    /// into subtly different shapes. Order is
+    /// `panes → file tree → preview → org sidebar → panes`; the sidebar
+    /// goes last so the pre-existing `Ctrl+Right` muscle memory
+    /// (pane → tree → preview) is untouched.
+    fn focus_cycle_targets(&self) -> Vec<FocusTarget> {
+        let ws = self.ws();
+        let mut targets = Vec::new();
+        if ws.file_tree_visible {
+            targets.push(FocusTarget::FileTree);
+        }
+        if ws.preview.is_active() {
+            targets.push(FocusTarget::Preview);
+        }
+        if self.org_sidebar_active() {
+            targets.push(FocusTarget::OrgSidebar);
+        }
+        targets
+    }
+
     pub(crate) fn focus_next_pane(&mut self) {
+        let cycle = self.focus_cycle_targets();
         let ws = self.ws_mut();
         let ids = ws.layout.collect_pane_ids();
-        let tree_visible = ws.file_tree_visible;
-        let preview_active = ws.preview.is_active();
 
-        match ws.focus_target {
-            FocusTarget::FileTree => {
-                if preview_active {
-                    ws.focus_target = FocusTarget::Preview;
-                } else {
-                    ws.focus_target = FocusTarget::Pane;
-                }
+        if ws.focus_target == FocusTarget::Pane {
+            let Some(idx) = ids.iter().position(|&id| id == ws.focused_pane_id) else {
+                return;
+            };
+            if idx + 1 < ids.len() {
+                ws.focused_pane_id = ids[idx + 1];
+            } else if let Some(&first) = cycle.first() {
+                ws.focus_target = first;
+            } else {
+                ws.focused_pane_id = ids[0];
             }
-            FocusTarget::Preview => {
-                ws.focus_target = FocusTarget::Pane;
-            }
-            FocusTarget::Pane => {
-                if let Some(idx) = ids.iter().position(|&id| id == ws.focused_pane_id) {
-                    if idx + 1 < ids.len() {
-                        ws.focused_pane_id = ids[idx + 1];
-                    } else if tree_visible {
-                        ws.focus_target = FocusTarget::FileTree;
-                    } else if preview_active {
-                        ws.focus_target = FocusTarget::Preview;
-                    } else {
-                        ws.focused_pane_id = ids[0];
-                    }
-                }
-            }
+            return;
+        }
+
+        // A panel can vanish while it holds focus (toggled off, or
+        // squeezed out by a narrow terminal), in which case it is no
+        // longer in the cycle and focus falls back to the panes.
+        match cycle.iter().position(|&t| t == ws.focus_target) {
+            Some(pos) if pos + 1 < cycle.len() => ws.focus_target = cycle[pos + 1],
+            _ => ws.focus_target = FocusTarget::Pane,
         }
     }
 
     pub(crate) fn focus_prev_pane(&mut self) {
+        let cycle = self.focus_cycle_targets();
         let ws = self.ws_mut();
         let ids = ws.layout.collect_pane_ids();
-        let tree_visible = ws.file_tree_visible;
-        let preview_active = ws.preview.is_active();
 
-        match ws.focus_target {
-            FocusTarget::FileTree => {
+        if ws.focus_target == FocusTarget::Pane {
+            let Some(idx) = ids.iter().position(|&id| id == ws.focused_pane_id) else {
+                return;
+            };
+            if idx > 0 {
+                ws.focused_pane_id = ids[idx - 1];
+            } else if let Some(&last) = cycle.last() {
+                ws.focus_target = last;
+            } else {
+                ws.focused_pane_id = ids[ids.len() - 1];
+            }
+            return;
+        }
+
+        match cycle.iter().position(|&t| t == ws.focus_target) {
+            Some(pos) if pos > 0 => ws.focus_target = cycle[pos - 1],
+            _ => {
                 ws.focus_target = FocusTarget::Pane;
                 if let Some(&last) = ids.last() {
                     ws.focused_pane_id = last;
                 }
             }
-            FocusTarget::Preview => {
-                if tree_visible {
-                    ws.focus_target = FocusTarget::FileTree;
-                } else {
-                    ws.focus_target = FocusTarget::Pane;
-                    if let Some(&last) = ids.last() {
-                        ws.focused_pane_id = last;
-                    }
-                }
-            }
-            FocusTarget::Pane => {
-                if let Some(idx) = ids.iter().position(|&id| id == ws.focused_pane_id) {
-                    if idx > 0 {
-                        ws.focused_pane_id = ids[idx - 1];
-                    } else if preview_active {
-                        ws.focus_target = FocusTarget::Preview;
-                    } else if tree_visible {
-                        ws.focus_target = FocusTarget::FileTree;
-                    } else {
-                        ws.focused_pane_id = ids[ids.len() - 1];
-                    }
-                }
-            }
         }
+    }
+
+    /// The one supported way to change the active tab.
+    ///
+    /// Tab switching used to be `self.active_tab = n` copy-pasted
+    /// across four call sites, each remembering a different subset of
+    /// the bookkeeping: the keyboard paths suspended the IME overlay
+    /// unconditionally (even when switching to the tab already active),
+    /// the mouse path was the only one clearing the double-click
+    /// caches, and none of them dropped the stale text selection. The
+    /// org sidebar adds a fifth caller and a piece of state that
+    /// *must* survive the switch, so the whole sequence lives here.
+    ///
+    /// Returns `true` when the active tab actually changed.
+    pub(crate) fn switch_tab(&mut self, index: usize) -> bool {
+        // `ws()` indexes `workspaces` directly and would panic. The
+        // sidebar renders from a snapshot that an MCP `close_tab` can
+        // invalidate between paint and click, so this is a live guard,
+        // not a formality.
+        if index >= self.workspaces.len() || index == self.active_tab {
+            return false;
+        }
+        self.suspend_overlay();
+        // Focus is per-workspace, so the incoming tab would otherwise
+        // restore whatever it was focused on last — knocking the user
+        // out of the sidebar they are currently driving.
+        let keep_sidebar_focus = self.ws().focus_target == FocusTarget::OrgSidebar;
+        self.active_tab = index;
+        if keep_sidebar_focus {
+            self.ws_mut().focus_target = FocusTarget::OrgSidebar;
+        }
+        // Every one of these is keyed by tab index or by a pane that
+        // belongs to the tab we just left.
+        self.last_tab_click = None;
+        self.last_edge_click = None;
+        self.last_boundary_click = None;
+        self.selection = None;
+        self.dirty = true;
+        true
     }
 }
 

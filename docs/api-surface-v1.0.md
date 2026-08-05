@@ -474,6 +474,7 @@ overlay_catchup_ms = 3000        # default 3000; non-zero clamped >= 100; 0 = pu
 
 [ui]
 lang = "auto"             # "auto" (default) | "ja" | "en"; case-insensitive
+org_sidebar = "coexist"   # "coexist" (default) | "replace" | "off"; case-insensitive
 ```
 
 Missing or malformed file → warning to stderr, defaults apply (never fails

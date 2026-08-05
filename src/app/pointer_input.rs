@@ -231,6 +231,15 @@ impl App {
         None
     }
 
+    fn is_on_org_sidebar_border(&self, col: u16) -> bool {
+        if let Some(rect) = self.last_org_sidebar_rect {
+            let border_col = rect.x + rect.width;
+            col >= border_col.saturating_sub(1) && col <= border_col
+        } else {
+            false
+        }
+    }
+
     fn is_on_file_tree_border(&self, col: u16) -> bool {
         if let Some(rect) = self.ws().last_file_tree_rect {
             let border_col = rect.x + rect.width;
@@ -344,19 +353,16 @@ impl App {
                                 if prev_idx == tab_idx
                                     && now.duration_since(prev_t).as_millis() < 500
                         );
-                        if self.active_tab != tab_idx {
-                            self.suspend_overlay();
-                        }
-                        self.active_tab = tab_idx;
+                        // `switch_tab` clears `last_tab_click` along with
+                        // the other tab-keyed caches, so the double-click
+                        // verdict is read above and re-armed below.
+                        self.switch_tab(tab_idx);
                         if is_double {
                             self.rename_input = Some(String::new());
                             self.last_tab_click = None;
                         } else {
                             self.last_tab_click = Some((tab_idx, now));
                         }
-                        // A tab click switches context; any in-flight
-                        // outer-edge or boundary double-click attempt is
-                        // now stale.
                         self.last_edge_click = None;
                         self.last_boundary_click = None;
                         self.dirty = true;
@@ -380,6 +386,15 @@ impl App {
                     }
                 }
 
+                // Checked before the file tree because in `coexist` the
+                // sidebar sits immediately to its left, so the two
+                // 2-column hit areas can abut. Outermost panel wins.
+                if self.is_on_org_sidebar_border(col) {
+                    self.dragging = Some(DragTarget::OrgSidebarBorder);
+                    self.last_edge_click = None;
+                    self.last_boundary_click = None;
+                    return;
+                }
                 if self.is_on_file_tree_border(col) {
                     self.dragging = Some(DragTarget::FileTreeBorder);
                     self.last_edge_click = None;
@@ -494,6 +509,31 @@ impl App {
                     }
                 }
 
+                if let Some(rect) = self.last_org_sidebar_rect {
+                    if col >= rect.x
+                        && col < rect.x + rect.width
+                        && row >= rect.y
+                        && row < rect.y + rect.height
+                    {
+                        self.ws_mut().focus_target = FocusTarget::OrgSidebar;
+                        // Row 0 of the rect is the block border.
+                        let inner_y = row.saturating_sub(rect.y + 1) as usize;
+                        let idx = self.org_sidebar_scroll + inner_y;
+                        // `org_sidebar_row_targets` is republished every
+                        // paint and cleared whenever the tab set changes,
+                        // so a click can only ever land on a row that was
+                        // on screen; `switch_tab` re-validates the index
+                        // against `workspaces` regardless.
+                        if let Some(&target) = self.org_sidebar_row_targets.get(idx) {
+                            self.org_sidebar_activate_target(target);
+                        }
+                        self.last_edge_click = None;
+                        self.last_boundary_click = None;
+                        self.dirty = true;
+                        return;
+                    }
+                }
+
                 if let Some(rect) = self.ws().last_file_tree_rect {
                     if col >= rect.x
                         && col < rect.x + rect.width
@@ -603,7 +643,22 @@ impl App {
                 if let Some(ref target) = self.dragging.clone() {
                     match target {
                         DragTarget::FileTreeBorder => {
-                            self.file_tree_width = col.clamp(10, 60);
+                            // Was `col.clamp(10, 60)`, which silently
+                            // assumed the tree starts at column 0. With
+                            // the org sidebar to its left that is no
+                            // longer true, so measure from the tree's
+                            // own left edge like the preview does.
+                            if let Some(rect) = self.ws().last_file_tree_rect {
+                                self.file_tree_width = col.saturating_sub(rect.x).clamp(10, 60);
+                            }
+                        }
+                        DragTarget::OrgSidebarBorder => {
+                            if let Some(rect) = self.last_org_sidebar_rect {
+                                self.org_sidebar_width = col.saturating_sub(rect.x).clamp(
+                                    crate::app::layout_geometry::ORG_SIDEBAR_MIN_WIDTH,
+                                    crate::app::layout_geometry::ORG_SIDEBAR_MAX_WIDTH,
+                                );
+                            }
                         }
                         DragTarget::PreviewBorder => {
                             if let Some(rect) = self.ws().last_preview_rect {
@@ -812,7 +867,9 @@ impl App {
                 let col = mouse.column;
                 let row = mouse.row;
                 let old_hover = self.hover_border.clone();
-                if self.is_on_file_tree_border(col) {
+                if self.is_on_org_sidebar_border(col) {
+                    self.hover_border = Some(DragTarget::OrgSidebarBorder);
+                } else if self.is_on_file_tree_border(col) {
                     self.hover_border = Some(DragTarget::FileTreeBorder);
                 } else if self.is_on_preview_border(col) {
                     self.hover_border = Some(DragTarget::PreviewBorder);
@@ -832,6 +889,27 @@ impl App {
     }
 
     fn handle_wheel(&mut self, col: u16, row: u16, scroll_down: bool) {
+        if let Some(rect) = self.last_org_sidebar_rect {
+            if col >= rect.x
+                && col < rect.x + rect.width
+                && row >= rect.y
+                && row < rect.y + rect.height
+            {
+                // Scrolls the view only — the selection stays put, and
+                // the renderer will pull it back on screen the moment
+                // the user moves it with j/k.
+                let rows = self.org_sidebar_row_targets.len();
+                let visible = rect.height.saturating_sub(2) as usize;
+                let max_scroll = rows.saturating_sub(visible);
+                self.org_sidebar_scroll = if scroll_down {
+                    (self.org_sidebar_scroll + 3).min(max_scroll)
+                } else {
+                    self.org_sidebar_scroll.saturating_sub(3)
+                };
+                self.dirty = true;
+                return;
+            }
+        }
         if let Some(rect) = self.ws().last_file_tree_rect {
             if col >= rect.x
                 && col < rect.x + rect.width

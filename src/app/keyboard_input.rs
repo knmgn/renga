@@ -234,8 +234,7 @@ impl App {
         // Alt+Right — next tab
         if key.modifiers == KeyModifiers::ALT && key.code == KeyCode::Right {
             if !self.workspaces.is_empty() {
-                self.active_tab = (self.active_tab + 1) % self.workspaces.len();
-                self.suspend_overlay();
+                self.switch_tab((self.active_tab + 1) % self.workspaces.len());
             }
             return Ok(true);
         }
@@ -243,12 +242,12 @@ impl App {
         // Alt+Left — previous tab
         if key.modifiers == KeyModifiers::ALT && key.code == KeyCode::Left {
             if !self.workspaces.is_empty() {
-                self.active_tab = if self.active_tab == 0 {
+                let target = if self.active_tab == 0 {
                     self.workspaces.len() - 1
                 } else {
                     self.active_tab - 1
                 };
-                self.suspend_overlay();
+                self.switch_tab(target);
             }
             return Ok(true);
         }
@@ -297,8 +296,7 @@ impl App {
             if let KeyCode::Char(c) = key.code {
                 if let Some(digit) = c.to_digit(10) {
                     if digit >= 1 && (digit as usize) <= self.workspaces.len() {
-                        self.active_tab = (digit as usize) - 1;
-                        self.suspend_overlay();
+                        self.switch_tab((digit as usize) - 1);
                         return Ok(true);
                     }
                 }
@@ -315,6 +313,18 @@ impl App {
         if key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Left {
             self.focus_prev_pane();
             return Ok(true);
+        }
+
+        // Org sidebar mode.
+        //
+        // This dispatch chain is `if` / `==`, not an exhaustive `match`,
+        // so the compiler will *not* flag a missing arm: leaving this
+        // branch out would let sidebar-focused keys fall through into
+        // the pane handlers below. Also gated on `org_sidebar_active`
+        // so focus stranded on a panel that has since been toggled off
+        // does not swallow input.
+        if self.ws().focus_target == FocusTarget::OrgSidebar && self.org_sidebar_active() {
+            return self.handle_org_sidebar_key(key);
         }
 
         // Preview mode
@@ -334,6 +344,14 @@ impl App {
         // Ctrl+F — toggle file tree
         if key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char('f') {
             self.toggle_file_tree();
+            return Ok(true);
+        }
+
+        // Ctrl+B — toggle the org sidebar. Kept off Ctrl+F so the file
+        // tree binding users already have in their fingers is untouched
+        // (the two panels coexist by default).
+        if key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char('b') {
+            self.toggle_org_sidebar();
             return Ok(true);
         }
 

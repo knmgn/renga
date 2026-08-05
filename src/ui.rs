@@ -28,7 +28,9 @@ const SCROLL_BG: Color = Color::Rgb(0x2a, 0x1f, 0x14);
 
 const MIN_TERMINAL_WIDTH: u16 = 40;
 const MIN_TERMINAL_HEIGHT: u16 = 10;
-const MIN_PANE_AREA_WIDTH: u16 = 20;
+// `MIN_PANE_AREA_WIDTH` now lives in `app::layout_geometry` — it was
+// duplicated here and in `App::relayout_panes`, which is exactly the
+// drift the shared helper exists to prevent.
 
 // ─── File type icons ──────────────────────────────────────
 fn file_icon(name: &str) -> (&'static str, Color) {
@@ -591,71 +593,167 @@ fn render_tab_bar(app: &mut App, frame: &mut Frame, area: Rect) {
 /// `render_terminal_content` so `render` can apply the caret-delivery policy
 /// once at the top level.
 fn render_main_area(app: &mut App, frame: &mut Frame, area: Rect) -> Option<(u16, u16)> {
-    let tree_width = app.file_tree_width;
-    let preview_width = app.preview_width;
+    // Widths, degrade order and panel positions all come from the
+    // shared helper so the painted geometry and the geometry
+    // `App::relayout_panes` reports to the PTYs cannot drift apart.
+    let layout = crate::app::layout_geometry::compute(app.main_area_input(area));
 
-    let mut has_tree = app.ws().file_tree_visible;
-    let mut has_preview = app.ws().preview.is_active();
-
-    let needed = MIN_PANE_AREA_WIDTH
-        + if has_tree { tree_width } else { 0 }
-        + if has_preview { preview_width } else { 0 };
-    if area.width < needed && has_preview {
-        has_preview = false;
-    }
-    let needed = MIN_PANE_AREA_WIDTH + if has_tree { tree_width } else { 0 };
-    if area.width < needed && has_tree {
-        has_tree = false;
-    }
-
-    let swapped = app.layout_swapped;
-
-    let mut constraints = Vec::new();
-    if has_tree {
-        constraints.push(Constraint::Length(tree_width));
-    }
-    if swapped && has_preview {
-        constraints.push(Constraint::Length(preview_width));
-    }
-    constraints.push(Constraint::Min(20));
-    if !swapped && has_preview {
-        constraints.push(Constraint::Length(preview_width));
-    }
-
-    let chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints(constraints)
-        .split(area);
-
-    let mut idx = 0;
-
-    if has_tree {
-        app.ws_mut().last_file_tree_rect = Some(chunks[idx]);
-        render_file_tree(app, frame, chunks[idx]);
-        idx += 1;
+    app.last_org_sidebar_rect = layout.org_sidebar;
+    if let Some(rect) = layout.org_sidebar {
+        render_org_sidebar(app, frame, rect, layout.org_sidebar_compact);
     } else {
-        app.ws_mut().last_file_tree_rect = None;
+        app.org_sidebar_row_targets.clear();
+        // Focus can be left pointing at a panel the degrade ladder just
+        // squeezed off screen. Hand it back to the panes rather than
+        // let `handle_org_sidebar_key` keep eating keystrokes for an
+        // invisible widget.
+        if app.ws().focus_target == FocusTarget::OrgSidebar {
+            app.ws_mut().focus_target = FocusTarget::Pane;
+        }
     }
 
-    if swapped && has_preview {
-        app.ws_mut().last_preview_rect = Some(chunks[idx]);
-        render_preview(app, frame, chunks[idx]);
-        idx += 1;
+    app.ws_mut().last_file_tree_rect = layout.file_tree;
+    if let Some(rect) = layout.file_tree {
+        render_file_tree(app, frame, rect);
     }
 
-    let pane_caret = render_panes(app, frame, chunks[idx]);
-    idx += 1;
-
-    if !swapped && has_preview {
-        app.ws_mut().last_preview_rect = Some(chunks[idx]);
-        render_preview(app, frame, chunks[idx]);
+    app.ws_mut().last_preview_rect = layout.preview;
+    if let Some(rect) = layout.preview {
+        render_preview(app, frame, rect);
     }
 
-    if !has_preview {
-        app.ws_mut().last_preview_rect = None;
-    }
+    render_panes(app, frame, layout.panes)
+}
 
-    pane_caret
+// ─── Org sidebar ──────────────────────────────────────────
+
+/// Paint the cross-tab org view: one header row per tab, one indented
+/// row per pane, with Claude activity pulled from the snapshot cache
+/// that [`App::tick_claude_snapshots`] maintains off the render path.
+///
+/// `compact` is set by the layout helper when a narrow terminal forced
+/// the panel down to [`ORG_SIDEBAR_COMPACT_WIDTH`]; in that mode the
+/// context meter is dropped rather than truncated into nonsense.
+///
+/// [`ORG_SIDEBAR_COMPACT_WIDTH`]: crate::app::layout_geometry::ORG_SIDEBAR_COMPACT_WIDTH
+fn render_org_sidebar(app: &mut App, frame: &mut Frame, area: Rect, compact: bool) {
+    let is_focused = app.ws().focus_target == FocusTarget::OrgSidebar;
+    let is_border_active = matches!(
+        app.dragging.as_ref().or(app.hover_border.as_ref()),
+        Some(DragTarget::OrgSidebarBorder)
+    );
+    let border_color = if is_border_active {
+        ACCENT_GREEN
+    } else if is_focused {
+        FOCUS_BORDER
+    } else {
+        BORDER
+    };
+    let title_style = if is_focused {
+        Style::default()
+            .fg(ACCENT_BLUE)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(TEXT_DIM)
+    };
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(border_color))
+        .title(Span::styled(" ORG ", title_style))
+        .style(Style::default().bg(PANEL_BG));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let rows = app.org_sidebar_rows();
+    let selected = app.org_sidebar_selected_index(&rows);
+    let visible_height = inner.height as usize;
+    app.org_sidebar_ensure_visible(selected, visible_height);
+    // Republished every paint so a click can only resolve to a row the
+    // user could actually see.
+    app.org_sidebar_row_targets = rows.iter().map(|r| r.target).collect();
+
+    let scroll = app.org_sidebar_scroll;
+    let max_width = inner.width as usize;
+
+    for (i, row) in rows.iter().skip(scroll).take(visible_height).enumerate() {
+        let y = inner.y + i as u16;
+        let is_selected = scroll + i == selected;
+
+        let indicator = if is_selected { "\u{258e}" } else { " " }; // ▎
+        let indicator_style = if is_selected {
+            Style::default().fg(ACCENT_BLUE).bg(ACTIVE_BG)
+        } else {
+            Style::default().fg(PANEL_BG).bg(PANEL_BG)
+        };
+        let row_bg = if is_selected { ACTIVE_BG } else { PANEL_BG };
+
+        let (content, content_color) = match row.kind {
+            // Tab header row.
+            None => {
+                let marker = if row.is_active_tab { "\u{25b8}" } else { " " }; // ▸
+                                                                               // `•2/3` — how many of this tab's panes are mid-turn.
+                                                                               // Only shown when something is actually running, so an
+                                                                               // idle tab list stays quiet.
+                let busy = if row.working_panes > 0 {
+                    format!(" \u{2022}{}/{}", row.working_panes, row.total_panes)
+                } else {
+                    String::new()
+                };
+                let color = if row.is_active_tab { TEXT } else { TEXT_DIM };
+                (
+                    format!("{} {} {}{}", marker, row.target.tab + 1, row.label, busy),
+                    color,
+                )
+            }
+            // Pane row.
+            Some(kind) => {
+                let working = row.snapshot.as_ref().is_some_and(|s| s.is_working);
+                let glyph = if working { "\u{25cf}" } else { "\u{25cb}" }; // ● / ○
+                let color = match kind {
+                    crate::app::org_sidebar::OrgPaneKind::Claude => ACCENT_CLAUDE,
+                    crate::app::org_sidebar::OrgPaneKind::Codex => ACCENT_CODEX,
+                    crate::app::org_sidebar::OrgPaneKind::Shell => TEXT_DIM,
+                };
+                let focus_mark = if row.is_focused_pane { "*" } else { " " };
+                let mut text = format!("  {}{} {}", glyph, focus_mark, row.label);
+                if !compact {
+                    if let Some(snap) = row.snapshot.as_ref() {
+                        if let Some(tool) = snap.current_tool.as_deref() {
+                            if working {
+                                text.push_str(&format!(" {tool}"));
+                            }
+                        }
+                        if snap.todo_total > 0 {
+                            text.push_str(&format!(" {}/{}", snap.todo_done, snap.todo_total));
+                        } else if snap.context_usage > 0 {
+                            text.push_str(&format!(" {}%", snap.context_usage));
+                        }
+                    }
+                }
+                (text, color)
+            }
+        };
+
+        let truncated = truncate_to_width(&content, max_width.saturating_sub(1));
+        let content_style = if is_selected {
+            Style::default()
+                .fg(TEXT)
+                .bg(ACTIVE_BG)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(content_color).bg(row_bg)
+        };
+        let spans = vec![
+            Span::styled(indicator, indicator_style),
+            Span::styled(truncated, content_style),
+        ];
+        frame.render_widget(
+            Paragraph::new(Line::from(spans)),
+            Rect::new(inner.x, y, inner.width, 1),
+        );
+    }
 }
 
 // ─── File tree ────────────────────────────────────────────
@@ -1799,6 +1897,18 @@ fn render_status_bar(app: &App, frame: &mut Frame, area: Rect) {
                 Span::styled("^Q", Style::default().fg(ACCENT_BLUE)),
                 Span::styled(m.tree_quit, Style::default().fg(TEXT_DIM)),
             ]),
+            FocusTarget::OrgSidebar => Line::from(vec![
+                Span::styled(" j/k", Style::default().fg(ACCENT_BLUE)),
+                Span::styled(m.org_move, Style::default().fg(TEXT_DIM)),
+                Span::styled("Enter", Style::default().fg(ACCENT_BLUE)),
+                Span::styled(m.org_activate, Style::default().fg(TEXT_DIM)),
+                Span::styled("Esc", Style::default().fg(ACCENT_BLUE)),
+                Span::styled(m.org_back, Style::default().fg(TEXT_DIM)),
+                Span::styled("^B", Style::default().fg(ACCENT_BLUE)),
+                Span::styled(m.org_close, Style::default().fg(TEXT_DIM)),
+                Span::styled("^Q", Style::default().fg(ACCENT_BLUE)),
+                Span::styled(m.org_quit, Style::default().fg(TEXT_DIM)),
+            ]),
             FocusTarget::Pane => Line::from(vec![
                 Span::styled(" ^D", Style::default().fg(ACCENT_BLUE)),
                 Span::styled(m.pane_split_vertical, Style::default().fg(TEXT_DIM)),
@@ -1812,6 +1922,8 @@ fn render_status_bar(app: &App, frame: &mut Frame, area: Rect) {
                 Span::styled(m.pane_rename_tab, Style::default().fg(TEXT_DIM)),
                 Span::styled("^F", Style::default().fg(ACCENT_BLUE)),
                 Span::styled(m.pane_tree, Style::default().fg(TEXT_DIM)),
+                Span::styled("^B", Style::default().fg(ACCENT_BLUE)),
+                Span::styled(m.pane_org, Style::default().fg(TEXT_DIM)),
                 Span::styled("^P", Style::default().fg(ACCENT_BLUE)),
                 Span::styled(m.pane_swap, Style::default().fg(TEXT_DIM)),
                 Span::styled("^;/A-;", Style::default().fg(ACCENT_BLUE)),
