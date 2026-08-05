@@ -203,6 +203,39 @@ fn focus_resolving_into_a_hidden_tab_brings_that_tab_forward() {
     app.shutdown();
 }
 
+/// A cross-tab focus is a tab switch, so it has to do a tab switch's
+/// bookkeeping. Every one of these caches is keyed to a pane or a tab
+/// index in the tab being left; leaving them behind means the next
+/// click or copy acts on geometry that is no longer on screen.
+#[test]
+fn focus_across_tabs_drops_the_state_keyed_to_the_tab_it_leaves() {
+    let (mut app, caller, active) = two_tabs();
+    app.selection = Some(TextSelection {
+        target: SelectionTarget::Pane(active),
+        start_row: 0,
+        start_col: 0,
+        end_row: 0,
+        end_col: 3,
+        content_rect: Rect::new(0, 0, 10, 2),
+    });
+    app.last_tab_click = Some((1, std::time::Instant::now()));
+    app.last_edge_click = Some((1, 0, 0, std::time::Instant::now()));
+
+    app.handle_focus(&ipc::PaneRef::Id(caller), Some(caller))
+        .expect("cross-tab focus");
+
+    assert_eq!(app.active_tab, 0);
+    assert!(app.selection.is_none(), "selection is bound to the old tab");
+    assert!(app.last_tab_click.is_none());
+    assert!(app.last_edge_click.is_none());
+    assert!(app.last_boundary_click.is_none());
+    // The request named a pane, so the keyboard goes to the pane even
+    // though `switch_tab` would otherwise carry sidebar focus over.
+    assert!(matches!(app.workspaces[0].focus_target, FocusTarget::Pane));
+    assert_eq!(app.workspaces[0].focused_pane_id, caller);
+    app.shutdown();
+}
+
 #[test]
 fn focus_across_tabs_by_id_also_switches_the_visible_tab() {
     let (mut app, caller, active) = two_tabs();

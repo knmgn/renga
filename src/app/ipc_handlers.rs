@@ -641,16 +641,18 @@ impl App {
         from_pane: Option<usize>,
     ) -> std::result::Result<(), ipc::CodedError> {
         let (ws_idx, pane_id) = self.resolve_request_target(from_pane, target)?;
+        // Go through the shared tab switch rather than assigning
+        // `active_tab`: it also drops the overlay and the selection and
+        // double-click caches, every one of which is keyed to a pane or
+        // tab index in the tab being left. A no-op when the target is
+        // already the visible tab.
+        self.switch_tab(ws_idx);
+        // After the switch, not before: `switch_tab` carries org-sidebar
+        // focus into the incoming tab, and this request is an explicit
+        // instruction to put the keyboard on a *pane*.
         let ws = &mut self.workspaces[ws_idx];
         ws.focused_pane_id = pane_id;
         ws.focus_target = FocusTarget::Pane;
-        if ws_idx != self.active_tab {
-            self.active_tab = ws_idx;
-            // Mirrors the Alt+Left / Alt+Right / Alt+N tab switch: an
-            // overlay anchored to the tab we just left has nothing to
-            // point at any more.
-            self.suspend_overlay();
-        }
         self.dirty = true;
         Ok(())
     }
