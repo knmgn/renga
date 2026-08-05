@@ -96,24 +96,64 @@ fn inspect_focused_resolves_in_the_callers_tab() {
     app.shutdown();
 }
 
+/// The vt100 screen size of a pane in workspace `ws_index`.
+///
+/// This is the observable for "was this pane resized?": `Pane::resize`
+/// is the only caller of `set_size`, and it is also what clears the
+/// screen. Asserting on it tests the mechanism directly.
+///
+/// The obvious alternative — write a marker into the parser, then check
+/// it is still there — cannot work here. Every pane hosts a real shell
+/// whose reader thread feeds the same parser, so the marker survives
+/// only until the child's startup output lands. That window is long
+/// enough on Linux and too short on macOS and Windows, which is exactly
+/// how this started life as a green test that failed on two of three CI
+/// platforms.
+fn pty_size(app: &App, ws_index: usize, pane_id: usize) -> (u16, u16) {
+    let pane = app.workspaces[ws_index]
+        .panes
+        .get(&pane_id)
+        .expect("pane exists");
+    let parser = pane.parser.lock().unwrap_or_else(|e| e.into_inner());
+    parser.screen().size()
+}
+
+/// The size `Pane::resize` *would* apply to `pane_id` if the workspace
+/// were relaid out right now. Used to assert that a resize would have
+/// been observable, so a "nothing was resized" assertion cannot pass
+/// vacuously.
+fn would_be_pty_size(app: &App, ws_index: usize, pane_id: usize) -> (u16, u16) {
+    let area = app.main_area_layout_for(ws_index).panes;
+    let rects = app.workspaces[ws_index].layout.calculate_rects(area);
+    let (_, rect) = rects
+        .iter()
+        .find(|(id, _)| *id == pane_id)
+        .expect("pane has a rect");
+    (rect.height.saturating_sub(2), rect.width.saturating_sub(2))
+}
+
 /// `Pane::resize` clears the vt100 buffer and leaves the child to
 /// redraw on SIGWINCH. Refreshing a hidden pane's geometry on the way
 /// into `inspect_pane` would therefore erase the screen this call exists
 /// to report and snapshot the blank — the caller sees nothing wrong,
 /// just an empty pane.
 #[test]
-fn inspect_does_not_blank_the_pane_it_is_about_to_read() {
+fn inspect_does_not_resize_the_pane_it_is_about_to_read() {
     let (mut app, caller, _active) = two_tabs();
     app.relayout_workspace(0);
-    if let Some(pane) = app.workspaces[0].panes.get_mut(&caller) {
-        let mut parser = pane.parser.lock().unwrap_or_else(|e| e.into_inner());
-        parser.process(b"\x1b[2J\x1b[Hhello from the background tab");
-    }
 
-    // A global layout change: refreshed for the active tab only, so
-    // workspace 0's geometry is now out of date.
+    // A global layout change: applied to the active tab only, so
+    // workspace 0's geometry is now out of date and a refresh here would
+    // resize — and therefore clear — the pane being inspected.
     app.status_bar_visible = !app.status_bar_visible;
     app.mark_layout_change();
+
+    let before = pty_size(&app, 0, caller);
+    assert_ne!(
+        before,
+        would_be_pty_size(&app, 0, caller),
+        "precondition: a refresh would have resized this pane"
+    );
 
     let (reply_tx, reply_rx) = oneshot::channel();
     app.handle_app_command(AppCommand::Inspect {
@@ -123,11 +163,12 @@ fn inspect_does_not_blank_the_pane_it_is_about_to_read() {
         from_pane: Some(caller),
         reply: reply_tx,
     });
-    let payload = reply_rx.recv().expect("inspect reply").expect("inspect ok");
-    let text = payload["text"].as_str().unwrap_or_default();
-    assert!(
-        text.contains("hello from the background tab"),
-        "inspect returned {text:?} — the pane was cleared before it was read"
+    let _ = reply_rx.recv().expect("inspect reply").expect("inspect ok");
+
+    assert_eq!(
+        pty_size(&app, 0, caller),
+        before,
+        "inspect resized the pane, clearing the screen it exists to report"
     );
     app.shutdown();
 }
@@ -139,41 +180,35 @@ fn inspect_does_not_blank_the_pane_it_is_about_to_read() {
 /// nothing to regenerate it. Only rects are recomputed; the real resize
 /// waits until that tab is rendered.
 #[test]
-fn background_pane_contents_survive_a_resize_and_an_unrelated_list() {
+fn a_resize_and_an_unrelated_list_never_resize_a_hidden_pane() {
     let (mut app, caller, active) = two_tabs();
     app.relayout_workspace(0);
-    let seed = |app: &mut App, pane_id: usize| {
-        if let Some(pane) = app.workspaces[0].panes.get_mut(&pane_id) {
-            let mut parser = pane.parser.lock().unwrap_or_else(|e| e.into_inner());
-            parser.process(b"\x1b[2J\x1b[Hscrollback nobody asked to lose");
-        }
-    };
-    let reads_back = |app: &mut App| -> String {
-        let (tx, rx) = oneshot::channel();
-        app.handle_app_command(AppCommand::Inspect {
-            target: ipc::PaneRef::Focused,
-            lines: None,
-            include_cursor: false,
-            from_pane: Some(caller),
-            reply: tx,
-        });
-        rx.recv()
-            .expect("inspect reply")
-            .expect("inspect ok")
-            .get("text")
-            .and_then(|t| t.as_str())
-            .unwrap_or_default()
-            .to_string()
-    };
+    let before = pty_size(&app, 0, caller);
 
-    seed(&mut app, caller);
     app.on_terminal_resize(70, 24);
+    assert_ne!(
+        before,
+        would_be_pty_size(&app, 0, caller),
+        "precondition: the new terminal size implies a different pane size"
+    );
+    assert_eq!(
+        pty_size(&app, 0, caller),
+        before,
+        "a terminal resize resized a hidden pane, clearing its screen"
+    );
+    // The pure half still ran: the cached rects describe the new
+    // terminal even though no PTY was touched.
+    let rect_width = app.workspaces[0]
+        .last_pane_rects
+        .iter()
+        .find(|(id, _)| *id == caller)
+        .map(|(_, r)| r.width)
+        .expect("caller rect");
     assert!(
-        reads_back(&mut app).contains("scrollback nobody asked to lose"),
-        "a terminal resize wiped a hidden pane's screen"
+        rect_width <= 70,
+        "hidden tab still reports {rect_width} cols for a 70-col terminal"
     );
 
-    seed(&mut app, caller);
     // `list_panes` issued from the *other* tab must not touch this one.
     let (tx, rx) = oneshot::channel();
     app.handle_app_command(AppCommand::List {
@@ -181,9 +216,10 @@ fn background_pane_contents_survive_a_resize_and_an_unrelated_list() {
         reply: tx,
     });
     let _ = rx.recv().expect("list reply").expect("list ok");
-    assert!(
-        reads_back(&mut app).contains("scrollback nobody asked to lose"),
-        "a list_panes for another tab wiped this pane's screen"
+    assert_eq!(
+        pty_size(&app, 0, caller),
+        before,
+        "a list_panes for another tab resized this pane, clearing its screen"
     );
 
     app.shutdown();
