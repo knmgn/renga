@@ -422,6 +422,13 @@ fn run_event_loop(
         // Cheap no-op when the banner isn't showing.
         app.check_macos_tip_timeout();
 
+        // Org sidebar (#291): refresh the cross-tab Claude status
+        // cache. Deliberately outside the `app.dirty` gate below —
+        // the whole point is to notice that a *background* tab started
+        // working, which by definition nothing else marks dirty. Self-
+        // throttled, and a no-op while the sidebar is hidden.
+        app.tick_claude_snapshots();
+
         // Only render when something changed (and no cooldown is active)
         if app.dirty && app.paste_cooldown == 0 && app.resize_cooldown == 0 {
             app.dirty = false;

@@ -234,8 +234,7 @@ impl App {
         // Alt+Right — next tab
         if key.modifiers == KeyModifiers::ALT && key.code == KeyCode::Right {
             if !self.workspaces.is_empty() {
-                self.active_tab = (self.active_tab + 1) % self.workspaces.len();
-                self.suspend_overlay();
+                self.switch_tab((self.active_tab + 1) % self.workspaces.len());
             }
             return Ok(true);
         }
@@ -243,12 +242,12 @@ impl App {
         // Alt+Left — previous tab
         if key.modifiers == KeyModifiers::ALT && key.code == KeyCode::Left {
             if !self.workspaces.is_empty() {
-                self.active_tab = if self.active_tab == 0 {
+                let target = if self.active_tab == 0 {
                     self.workspaces.len() - 1
                 } else {
                     self.active_tab - 1
                 };
-                self.suspend_overlay();
+                self.switch_tab(target);
             }
             return Ok(true);
         }
@@ -297,8 +296,7 @@ impl App {
             if let KeyCode::Char(c) = key.code {
                 if let Some(digit) = c.to_digit(10) {
                     if digit >= 1 && (digit as usize) <= self.workspaces.len() {
-                        self.active_tab = (digit as usize) - 1;
-                        self.suspend_overlay();
+                        self.switch_tab((digit as usize) - 1);
                         return Ok(true);
                     }
                 }
@@ -317,13 +315,49 @@ impl App {
             return Ok(true);
         }
 
+        // Ctrl+B — toggle the org sidebar. Kept off Ctrl+F so the file
+        // tree binding users already have in their fingers is untouched
+        // (the two panels coexist by default).
+        //
+        // Checked *before* the per-panel dispatch below so it reaches
+        // the sidebar from any focus, the way Ctrl+F already does from
+        // the file tree. Gated on `org_sidebar_enabled` rather than
+        // swallowed unconditionally: `[ui] org_sidebar = "off"` is the
+        // documented escape hatch for users who need Ctrl+B in their
+        // shell / tmux / readline, so with the feature off the key has
+        // to fall through to the PTY untouched.
+        if key.modifiers == KeyModifiers::CONTROL
+            && key.code == KeyCode::Char('b')
+            && self.org_sidebar_enabled()
+        {
+            self.toggle_org_sidebar();
+            return Ok(true);
+        }
+
+        // Org sidebar mode.
+        //
+        // This dispatch chain is `if` / `==`, not an exhaustive `match`,
+        // so the compiler will *not* flag a missing arm: leaving this
+        // branch out would let sidebar-focused keys fall through into
+        // the pane handlers below. Also gated on `org_sidebar_active`
+        // so focus stranded on a panel that has since been toggled off
+        // does not swallow input.
+        if self.ws().focus_target == FocusTarget::OrgSidebar && self.org_sidebar_painted() {
+            return self.handle_org_sidebar_key(key);
+        }
+
         // Preview mode
-        if self.ws().focus_target == FocusTarget::Preview {
+        if self.ws().focus_target == FocusTarget::Preview && self.preview_painted() {
             return self.handle_preview_key(key);
         }
 
-        // File tree mode
-        if self.ws().focus_target == FocusTarget::FileTree {
+        // File tree mode. Gated on `file_tree_painted` for the same
+        // reason as the sidebar above: a panel can hold focus while
+        // being nowhere on screen — `replace` mode takes the tree's
+        // slot, and the degrade ladder drops it on a narrow terminal —
+        // and routing keys there swallows them (turning a bare `c` /
+        // `v` into a pane split).
+        if self.ws().focus_target == FocusTarget::FileTree && self.file_tree_painted() {
             if key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char('f') {
                 self.toggle_file_tree();
                 return Ok(true);

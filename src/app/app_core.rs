@@ -1,5 +1,12 @@
 use super::*;
 
+/// How often [`App::tick_claude_snapshots`] is allowed to walk every
+/// tab. The per-pane monitors have their own 500 ms / 2 s throttles;
+/// this one bounds the cost of the walk itself (a `collect_pane_ids`
+/// per tab plus a mutex round-trip per pane) so it stays a few times a
+/// second instead of once per event-loop turn (~30 Hz by default).
+const SNAPSHOT_SWEEP_INTERVAL: Duration = Duration::from_millis(250);
+
 impl App {
     #[allow(dead_code)] // retained as a test-ergonomic alias for new_with_cwd(None)
     pub fn new(rows: u16, cols: u16) -> Result<Self> {
@@ -87,6 +94,19 @@ impl App {
             macos_tip_visible: false,
             macos_tip_shown_at: None,
             macos_tip_marker: None,
+            // Placeholder mode; the real `[ui] org_sidebar` value lands
+            // in `apply_config`, mirroring how `ime_mode` / `lang` are
+            // seeded here and resolved there.
+            org_sidebar_mode: crate::config::OrgSidebarMode::default(),
+            org_sidebar_visible: false,
+            org_sidebar_width: crate::app::layout_geometry::DEFAULT_ORG_SIDEBAR_WIDTH,
+            last_org_sidebar_rect: None,
+            org_sidebar_scroll: 0,
+            org_sidebar_selection: None,
+            org_sidebar_row_targets: Vec::new(),
+            org_sidebar_follow_selection: true,
+            claude_snapshots: HashMap::new(),
+            last_claude_sweep: None,
         })
     }
 
@@ -184,6 +204,11 @@ impl App {
                 .overlay_catchup_ms
                 .max(crate::config::MIN_OVERLAY_CATCHUP_MS)
         };
+        self.org_sidebar_mode = cfg.ui.org_sidebar;
+        // `coexist` / `replace` both mean "the user wants this panel",
+        // so it comes up with the app; `off` leaves it disabled and
+        // makes Ctrl+B inert.
+        self.org_sidebar_visible = self.org_sidebar_enabled();
     }
 
     /// Resolved message table for the current UI language. Prefer this
@@ -331,53 +356,10 @@ impl App {
             return false;
         }
 
-        // Mirror the area math in ui::render / render_main_area,
-        // including the fallback where tree / preview are hidden when
-        // the terminal is too narrow. Keeping these in sync prevents
-        // PTY size drift from the actually-painted pane size.
-        const MIN_PANE_AREA_WIDTH: u16 = 20;
-        let tab_h = 1u16;
-        let status_h: u16 = if self.status_bar_visible || self.rename_input.is_some() {
-            1
-        } else {
-            0
-        };
-        // The IME composition overlay is drawn as a centered floating
-        // box on top of the pane area (see `ui::render_ime_overlay`),
-        // so unlike the old single-row widget it does not claim a
-        // layout slot — panes keep their full height whether the
-        // overlay is open or not.
-        let main_h = rows.saturating_sub(tab_h + status_h);
-
-        let mut has_tree = self.ws().file_tree_visible;
-        let mut has_preview = self.ws().preview.is_active();
-        let tree_w_nom = self.file_tree_width;
-        let preview_w_nom = self.preview_width;
-
-        let needed = MIN_PANE_AREA_WIDTH
-            + if has_tree { tree_w_nom } else { 0 }
-            + if has_preview { preview_w_nom } else { 0 };
-        if cols < needed && has_preview {
-            has_preview = false;
-        }
-        let needed = MIN_PANE_AREA_WIDTH + if has_tree { tree_w_nom } else { 0 };
-        if cols < needed && has_tree {
-            has_tree = false;
-        }
-
-        let tree_w = if has_tree { tree_w_nom } else { 0 };
-        let preview_w = if has_preview { preview_w_nom } else { 0 };
-        let pane_w = cols.saturating_sub(tree_w).saturating_sub(preview_w);
-
-        // Mirror ui::render_main_area's chunk ordering so the cached
-        // rects reflect actual on-screen positions (not just sizes).
-        // The IPC `list` response and mouse hit-testing both read x/y
-        // from last_pane_rects, so getting the origin right matters
-        // here even between renders. Chunk order there is:
-        //   [tree?] [preview(if swapped)?] [panes] [preview(if !swapped)?]
-        let pane_x = tree_w + if self.layout_swapped { preview_w } else { 0 };
-        let pane_area = Rect::new(pane_x, tab_h, pane_w, main_h);
-        let rects = self.ws().layout.calculate_rects(pane_area);
+        let rects = self
+            .ws()
+            .layout
+            .calculate_rects(self.main_area_layout().panes);
 
         let mut any_changed = false;
         for (pane_id, rect) in &rects {
@@ -392,6 +374,150 @@ impl App {
 
         self.ws_mut().last_pane_rects = rects;
         any_changed
+    }
+
+    /// Resolve the main area's geometry from the cached terminal size,
+    /// without needing a `Frame`.
+    ///
+    /// This is what lets non-render code ask "is the file tree actually
+    /// on screen?" — a question the raw `file_tree_visible` flag cannot
+    /// answer once `replace` mode and the narrow-terminal degrade
+    /// ladder are in play, and one that focus and key routing have to
+    /// get right or they hand the keyboard to an invisible panel.
+    /// Reading `last_*_rect` instead would be wrong before the first
+    /// paint and stale right after a resize.
+    ///
+    /// The vertical slots still mirror `ui::render` by hand (tab bar,
+    /// main area, macOS tip, status bar); only the horizontal split is
+    /// shared, via `layout_geometry::compute`.
+    pub(crate) fn main_area_layout(&self) -> layout_geometry::MainAreaLayout {
+        let (cols, rows) = self.last_term_size;
+        let tab_h = 1u16;
+        let status_h: u16 = if self.status_bar_visible || self.rename_input.is_some() {
+            1
+        } else {
+            0
+        };
+        // The IME composition overlay is drawn as a centered floating
+        // box on top of the pane area (see `ui::render_ime_overlay`),
+        // so unlike the old single-row widget it does not claim a
+        // layout slot — panes keep their full height whether the
+        // overlay is open or not. The first-launch macOS tip *does*
+        // claim two rows, so it has to come off the pane height here
+        // as well or the PTYs spend the banner's lifetime believing
+        // they are two rows taller than what gets painted.
+        let macos_tip_h: u16 = if self.macos_tip_visible { 2 } else { 0 };
+        let main_h = rows.saturating_sub(tab_h + status_h + macos_tip_h);
+        layout_geometry::compute(self.main_area_input(Rect::new(0, tab_h, cols, main_h)))
+    }
+
+    /// Collect the horizontal-layout inputs for `area`.
+    ///
+    /// Both callers of [`layout_geometry::compute`] go through this so
+    /// the renderer and the PTY-resize path cannot disagree about *what*
+    /// they asked for, on top of already agreeing about how it resolves.
+    ///
+    /// [`layout_geometry::compute`]: crate::app::layout_geometry::compute
+    pub(crate) fn main_area_input(&self, area: Rect) -> layout_geometry::MainAreaInput {
+        layout_geometry::MainAreaInput {
+            area,
+            org_sidebar_mode: self.org_sidebar_mode,
+            org_sidebar_visible: self.org_sidebar_visible,
+            org_sidebar_width: self.org_sidebar_width,
+            file_tree_visible: self.ws().file_tree_visible,
+            file_tree_width: self.file_tree_width,
+            preview_active: self.ws().preview.is_active(),
+            preview_width: self.preview_width,
+            layout_swapped: self.layout_swapped,
+        }
+    }
+
+    /// Refresh the org sidebar's per-pane Claude snapshots.
+    ///
+    /// Called once per event-loop turn (alongside the other
+    /// `maybe_*` / `check_*` tickers) rather than from the renderer,
+    /// because the sidebar shows *every* tab and the renderer only ever
+    /// walks the active one. Three separate throttles keep the cost
+    /// bounded:
+    ///
+    /// * this sweep itself runs at most every [`SNAPSHOT_SWEEP_INTERVAL`],
+    /// * panes in the visible tab are polled at the usual
+    ///   `CHECK_INTERVAL` (unchanged from the pre-sidebar behaviour),
+    /// * panes in background tabs are polled at
+    ///   `BACKGROUND_CHECK_INTERVAL`, since nobody is watching them
+    ///   closely enough to notice a two-second lag.
+    ///
+    /// Repaints are only requested when a snapshot actually differs
+    /// from the cached one — without that the sweep would mark the UI
+    /// dirty several times a second forever.
+    pub(crate) fn tick_claude_snapshots(&mut self) {
+        if !self.org_sidebar_active() {
+            // Nothing reads the cache while the panel is down. The
+            // active tab keeps being polled by `render_panes`, so the
+            // pane borders and status bar are unaffected.
+            return;
+        }
+        let now = Instant::now();
+        if self
+            .last_claude_sweep
+            .is_some_and(|t| now.duration_since(t) < SNAPSHOT_SWEEP_INTERVAL)
+        {
+            return;
+        }
+        self.last_claude_sweep = Some(now);
+
+        // Snapshot the (pane, cwd, interval) triples before touching the
+        // monitor so the workspace borrow ends first.
+        let active = self.active_tab;
+        let targets: Vec<(usize, PathBuf, Duration)> = self
+            .workspaces
+            .iter()
+            .enumerate()
+            .flat_map(|(tab, ws)| {
+                let interval = if tab == active {
+                    crate::claude_monitor::CHECK_INTERVAL
+                } else {
+                    crate::claude_monitor::BACKGROUND_CHECK_INTERVAL
+                };
+                ws.layout
+                    .collect_pane_ids()
+                    .into_iter()
+                    .filter_map(move |id| ws.panes.get(&id).map(|p| (id, p.cwd.clone(), interval)))
+            })
+            .collect();
+
+        let mut changed = false;
+        for (pane_id, cwd, interval) in &targets {
+            self.claude_monitor
+                .update_throttled(*pane_id, cwd, *interval);
+            let snapshot = self.claude_monitor.snapshot(*pane_id);
+            match self.claude_snapshots.get(pane_id) {
+                Some(prev) if *prev == snapshot => {}
+                _ => {
+                    self.claude_snapshots.insert(*pane_id, snapshot);
+                    changed = true;
+                }
+            }
+        }
+
+        // Drop entries for panes that have gone away, so a long session
+        // that churns through panes doesn't grow the map forever.
+        if self.claude_snapshots.len() > targets.len() {
+            let live: HashSet<usize> = targets.iter().map(|(id, _, _)| *id).collect();
+            self.claude_snapshots.retain(|id, _| live.contains(id));
+            changed = true;
+        }
+
+        // Honour the IME overlay freeze (#37 / #82). `drain_pty_events`
+        // suppresses PTY-driven repaints while the overlay is open so
+        // composition doesn't flicker; marking dirty here on every
+        // background-tab status change would punch straight through
+        // that at up to 4 Hz. The cache is still refreshed above, so
+        // the sidebar is correct at the next repaint — which the
+        // overlay catch-up tick already schedules.
+        if changed && !(self.overlay.is_some() && self.ime_freeze_panes_on_overlay) {
+            self.dirty = true;
+        }
     }
 
     /// Mark a layout change: apply resizes immediately and, if sizes
