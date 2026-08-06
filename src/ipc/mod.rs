@@ -102,10 +102,30 @@ pub const CAP_CROSS_TAB_PEERS: &str = "cross_tab_peers";
 /// absent.
 pub const CAP_SPAWN_TAB: &str = "spawn_tab";
 
+/// Capability token advertised by servers that understand `from_pane`
+/// on the two *mutating* requests that #288 left behind:
+/// [`Request::Close`] and [`Request::SetPaneIdentity`] (Issue #296).
+///
+/// Deliberately distinct from [`CAP_CALLER_SCOPE`]: a #288-era server
+/// advertises `caller_scope` while still resolving `Focused` / `Name`
+/// on these two against the **active** tab. Since `Request` does not
+/// use `deny_unknown_fields`, such a server drops the new `from_pane`
+/// silently — and `close_pane(target: "focused")` from a background
+/// tab then terminates a pane in whatever tab the human is watching.
+/// That is the exact accident this token exists to make impossible, so
+/// clients must gate on it via [`client::send_request_requiring`] and
+/// fail closed when it is absent.
+pub const CAP_CALLER_SCOPE_CLOSE_IDENTITY: &str = "caller_scope_close_identity";
+
 /// Every capability token this build's server advertises. Additive by
 /// construction — clients match on tokens they know and ignore the
 /// rest.
-pub const SERVER_CAPABILITIES: &[&str] = &[CAP_CALLER_SCOPE, CAP_CROSS_TAB_PEERS, CAP_SPAWN_TAB];
+pub const SERVER_CAPABILITIES: &[&str] = &[
+    CAP_CALLER_SCOPE,
+    CAP_CROSS_TAB_PEERS,
+    CAP_SPAWN_TAB,
+    CAP_CALLER_SCOPE_CLOSE_IDENTITY,
+];
 
 /// One IPC call from a client to the running renga instance.
 ///
@@ -126,6 +146,13 @@ pub const SERVER_CAPABILITIES: &[&str] = &[CAP_CALLER_SCOPE, CAP_CROSS_TAB_PEERS
 ///   cross-tab escape hatch [`Request::Close`] already established).
 ///   An unknown / vanished `from_pane` fails with `pane_not_found`
 ///   before the target is even looked at.
+///
+/// [`Request::Close`] and [`Request::SetPaneIdentity`] joined the set
+/// in Issue #296 and gate on their own [`CAP_CALLER_SCOPE_CLOSE_IDENTITY`]
+/// token. They differ from the five above in their **legacy** branch
+/// only: with `from_pane: None` they keep searching every workspace
+/// (`renga close --id`/`--name` has always been cross-tab), whereas the
+/// five resolve strictly inside the active tab.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "cmd", rename_all = "snake_case")]
 pub enum Request {
@@ -214,7 +241,22 @@ pub enum Request {
     /// is the only leaf in its workspace and other workspaces exist,
     /// the whole tab is closed. Fails with `last_pane` if it's the last
     /// pane of the only remaining tab.
-    Close { target: PaneRef },
+    ///
+    /// `from_pane` (Issue #296) scopes the *relative* targets exactly
+    /// as it does for [`Request::Send`] & co: `Focused` and `Name`
+    /// resolve inside the caller's own tab, `Id` still reaches any tab.
+    /// Closing is destructive and irreversible, which is why the
+    /// pre-#296 behavior — `Focused` meaning "whatever pane the human
+    /// is looking at" — was the worst place for the #288 bug to
+    /// survive. `None` keeps the pre-#296 cross-tab search for the
+    /// `renga close` CLI. Send `Some(_)` only through
+    /// [`client::send_request_requiring`] with
+    /// [`CAP_CALLER_SCOPE_CLOSE_IDENTITY`].
+    Close {
+        target: PaneRef,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from_pane: Option<usize>,
+    },
     /// Create a new tab with a fresh single pane. The server switches
     /// focus to the new tab (matching the existing Alt+T keybinding).
     NewTab {
@@ -371,6 +413,15 @@ pub enum Request {
     ///   (`name_invalid`).
     /// - setting `name` to the target's current name or `role` to the
     ///   target's current role is a silent no-op (idempotent).
+    ///
+    /// `from_pane` (Issue #296) scopes `Focused` / `Name` to the
+    /// caller's own tab, leaving `Id` cross-tab; `None` keeps the
+    /// pre-#296 all-workspace search. Name uniqueness is still checked
+    /// inside the *resolved* pane's tab, which is what makes per-tab
+    /// names coherent: a caller can only mint a name in a tab it can
+    /// actually address. Send `Some(_)` only through
+    /// [`client::send_request_requiring`] with
+    /// [`CAP_CALLER_SCOPE_CLOSE_IDENTITY`].
     SetPaneIdentity {
         target: PaneRef,
         #[serde(
@@ -385,6 +436,8 @@ pub enum Request {
             skip_serializing_if = "Option::is_none"
         )]
         role: Option<Option<String>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from_pane: Option<usize>,
     },
     /// Set or clear the per-pane summary string. The summary is
     /// surfaced on `PaneInfo.summary` / `PeerInfo.summary` so other
@@ -1058,6 +1111,102 @@ mod tests {
         );
     }
 
+    #[test]
+    fn hello_response_advertises_caller_scope_close_identity() {
+        let with = serde_json::to_string(&Response::Hello {
+            server_pid: 1,
+            session_token: "t".into(),
+            capabilities: SERVER_CAPABILITIES.iter().map(|s| s.to_string()).collect(),
+        })
+        .unwrap();
+        assert!(
+            with.contains(CAP_CALLER_SCOPE_CLOSE_IDENTITY),
+            "server must advertise caller-scoped close / rename: {with}"
+        );
+    }
+
+    // ─── Issue #296 wire compatibility ────────────────────
+
+    /// `from_pane` is optional on `Close` / `SetPaneIdentity` too, and
+    /// must not leak onto the wire for the `renga` CLI, which never
+    /// sets it.
+    #[test]
+    fn close_and_identity_raw_json_shape_is_unchanged_without_from_pane() {
+        let close = serde_json::to_string(&Request::Close {
+            target: PaneRef::Focused,
+            from_pane: None,
+        })
+        .unwrap();
+        assert_eq!(close, r#"{"cmd":"close","target":"focused"}"#);
+
+        let identity = serde_json::to_string(&Request::SetPaneIdentity {
+            target: PaneRef::Focused,
+            name: None,
+            role: None,
+            from_pane: None,
+        })
+        .unwrap();
+        assert!(!identity.contains("from_pane"), "{identity}");
+    }
+
+    #[test]
+    fn scoped_close_and_identity_requests_carry_from_pane() {
+        let close = serde_json::to_string(&Request::Close {
+            target: PaneRef::Focused,
+            from_pane: Some(7),
+        })
+        .unwrap();
+        assert_eq!(close, r#"{"cmd":"close","target":"focused","from_pane":7}"#);
+
+        let identity = serde_json::to_string(&Request::SetPaneIdentity {
+            target: PaneRef::Focused,
+            name: Some(Some("worker".into())),
+            role: None,
+            from_pane: Some(7),
+        })
+        .unwrap();
+        assert!(identity.contains(r#""from_pane":7"#), "{identity}");
+    }
+
+    /// Verbatim payloads a pre-#296 client puts on the wire. Both must
+    /// decode onto the legacy `from_pane: None` (cross-tab) semantics.
+    #[test]
+    fn pre_296_raw_requests_decode_as_legacy_cross_tab_scope() {
+        let close: Request = serde_json::from_str(r#"{"cmd":"close","target":{"id":3}}"#).unwrap();
+        assert_eq!(
+            close,
+            Request::Close {
+                target: PaneRef::Id(3),
+                from_pane: None,
+            }
+        );
+
+        let identity: Request = serde_json::from_str(
+            r#"{"cmd":"set_pane_identity","target":{"name":"worker"},"role":"lead"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            identity,
+            Request::SetPaneIdentity {
+                target: PaneRef::Name("worker".into()),
+                name: None,
+                role: Some(Some("lead".into())),
+                from_pane: None,
+            }
+        );
+    }
+
+    #[test]
+    fn close_request_roundtrips_with_from_pane() {
+        for from_pane in [None, Some(4)] {
+            let r = Request::Close {
+                target: PaneRef::Name("worker".into()),
+                from_pane,
+            };
+            assert_eq!(roundtrip(&r), r);
+        }
+    }
+
     /// The wire shapes the docs promise for the tab selector — one per
     /// variant, byte-exact, since MCP callers construct these by hand.
     #[test]
@@ -1269,6 +1418,7 @@ mod tests {
                 target,
                 name: None,
                 role: None,
+                from_pane: None,
             } => {
                 assert!(matches!(target, PaneRef::Focused));
             }
@@ -1320,6 +1470,7 @@ mod tests {
             target: PaneRef::Focused,
             name: None,
             role: None,
+            from_pane: None,
         };
         let s = serde_json::to_string(&r).unwrap();
         assert!(!s.contains("\"name\""), "name key leaked: {s}");
@@ -1332,6 +1483,7 @@ mod tests {
             target: PaneRef::Name("worker".into()),
             name: Some(Some("renamed".into())),
             role: Some(None),
+            from_pane: Some(4),
         };
         assert_eq!(roundtrip(&r), r);
     }

@@ -450,7 +450,7 @@ fn mcp_close_of_the_target_expires_the_prompt() {
     let right = pane_id(&app, "right");
 
     app.handle_key_event(ctrl('w')).expect("ctrl+w");
-    app.handle_close(&ipc::PaneRef::Id(right))
+    app.handle_close(&ipc::PaneRef::Id(right), None)
         .expect("mcp close of the confirmation target");
 
     assert_eq!(
@@ -479,7 +479,7 @@ fn pane_prompt_expires_rather_than_escalating_to_a_tab_close() {
         Some(CloseConfirm::Pane { pane_id: right })
     );
 
-    app.handle_close(&ipc::PaneRef::Id(left))
+    app.handle_close(&ipc::PaneRef::Id(left), None)
         .expect("mcp closes the sibling");
 
     assert_eq!(app.close_confirm, None, "prompt must expire");
@@ -568,7 +568,7 @@ fn mcp_close_never_arms_a_confirmation() {
     let right = pane_id(&app, "right");
 
     let closed = app
-        .handle_close(&ipc::PaneRef::Id(right))
+        .handle_close(&ipc::PaneRef::Id(right), None)
         .expect("mcp close");
 
     assert_eq!(closed, right);
@@ -583,7 +583,7 @@ fn mcp_close_of_a_single_pane_tab_closes_the_tab_immediately() {
     app.new_tab().expect("new_tab");
     let second = app.ws().focused_pane_id;
 
-    app.handle_close(&ipc::PaneRef::Id(second))
+    app.handle_close(&ipc::PaneRef::Id(second), None)
         .expect("mcp close");
 
     assert_eq!(app.close_confirm, None);

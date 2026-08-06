@@ -87,8 +87,12 @@ impl App {
                 let result = self.handle_inspect(&target, lines, include_cursor, from_pane);
                 let _ = reply.send(result);
             }
-            AppCommand::Close { target, reply } => {
-                let result = self.handle_close(&target);
+            AppCommand::Close {
+                target,
+                from_pane,
+                reply,
+            } => {
+                let result = self.handle_close(&target, from_pane);
                 let _ = reply.send(result);
             }
             AppCommand::PeerList { from_pane, reply } => {
@@ -116,9 +120,10 @@ impl App {
                 target,
                 name,
                 role,
+                from_pane,
                 reply,
             } => {
-                let result = self.handle_set_pane_identity(&target, name, role);
+                let result = self.handle_set_pane_identity(&target, name, role, from_pane);
                 let _ = reply.send(result);
             }
             AppCommand::SetSummary {
@@ -273,18 +278,20 @@ impl App {
         Ok(peers)
     }
 
+    /// `from_pane` scopes `Focused` / `Name` to the caller's own tab
+    /// (Issue #296) — renaming "the focused pane" from a background
+    /// agent used to retarget whichever pane the human had in view.
+    /// Numeric ids stay cross-tab, and the `name_in_use` check below
+    /// keeps running against the *resolved* pane's workspace, so
+    /// per-tab name uniqueness is unchanged.
     pub(crate) fn handle_set_pane_identity(
         &mut self,
         target: &PaneRef,
         name: Option<Option<String>>,
         role: Option<Option<String>>,
+        from_pane: Option<usize>,
     ) -> std::result::Result<PaneInfo, ipc::CodedError> {
-        let (ws_idx, pane_id) = self.resolve_pane_across_workspaces(target).ok_or_else(|| {
-            ipc::CodedError::new(
-                ipc::err_code::PANE_NOT_FOUND,
-                format!("pane not found: {target:?}"),
-            )
-        })?;
+        let (ws_idx, pane_id) = self.resolve_target_with_global_fallback(from_pane, target)?;
 
         if let Some(Some(new_name)) = &name {
             let trimmed = validate_pane_name(new_name)?;

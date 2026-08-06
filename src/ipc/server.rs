@@ -415,11 +415,12 @@ fn dispatch_request(req: Request, command_tx: &Sender<AppCommand>) -> Response {
                 reply,
             })
         }
-        Request::Close { target } => {
+        Request::Close { target, from_pane } => {
             let (reply_tx, reply_rx) = oneshot::channel();
             if command_tx
                 .send(AppCommand::Close {
                     target,
+                    from_pane,
                     reply: reply_tx,
                 })
                 .is_err()
@@ -633,13 +634,19 @@ fn dispatch_request(req: Request, command_tx: &Sender<AppCommand>) -> Response {
                 }
             }
         }
-        Request::SetPaneIdentity { target, name, role } => {
+        Request::SetPaneIdentity {
+            target,
+            name,
+            role,
+            from_pane,
+        } => {
             let (reply_tx, reply_rx) = oneshot::channel();
             if command_tx
                 .send(AppCommand::SetPaneIdentity {
                     target,
                     name,
                     role,
+                    from_pane,
                     reply: reply_tx,
                 })
                 .is_err()
@@ -1118,6 +1125,7 @@ mod tests {
         let resp = dispatch_request(
             Request::Close {
                 target: PaneRef::Name("worker-foo".into()),
+                from_pane: None,
             },
             &tx,
         );
@@ -1147,6 +1155,7 @@ mod tests {
         let resp = dispatch_request(
             Request::Close {
                 target: PaneRef::Focused,
+                from_pane: None,
             },
             &tx,
         );

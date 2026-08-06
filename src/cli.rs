@@ -419,6 +419,10 @@ impl IpcCommand {
             }),
             IpcCommand::Close { name, id } => Ok(Request::Close {
                 target: pick_ref(name, id, false)?,
+                // Same reasoning as `Send`, plus: `renga close` has
+                // always searched every tab, and `from_pane: None` is
+                // what preserves that (Issue #296).
+                from_pane: None,
             }),
             IpcCommand::Split {
                 target_name,
@@ -476,6 +480,8 @@ impl IpcCommand {
                     target: pick_ref(name, id, *focused)?,
                     name: name_change,
                     role: role_change,
+                    // Same reasoning as `Close` (Issue #296).
+                    from_pane: None,
                 })
             }
             IpcCommand::Events { .. } => Ok(Request::Subscribe),
@@ -643,8 +649,9 @@ mod tests {
         let cli = Cli::try_parse_from(["renga", "close", "--id", "5"]).unwrap();
         let req = cli.command.unwrap().to_request().unwrap();
         match req {
-            crate::ipc::Request::Close { target } => {
+            crate::ipc::Request::Close { target, from_pane } => {
                 assert!(matches!(target, crate::ipc::PaneRef::Id(5)));
+                assert_eq!(from_pane, None, "the CLI never claims a caller pane");
             }
             other => panic!("expected Close, got {other:?}"),
         }

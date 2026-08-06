@@ -1,5 +1,7 @@
 //! Issue #288 — the pane-control IPC requests resolve against the
 //! **caller's** tab, not the tab the user happens to be looking at.
+//! Issue #296 extends the same rule to `close_pane` /
+//! `set_pane_identity`, the two mutating requests #288 left behind.
 //!
 //! Every test here builds the same shape: workspace 0 holds the caller
 //! (a background tab), workspace 1 is the active tab the human is
@@ -744,6 +746,328 @@ fn a_cross_tab_split_keeps_a_selection_that_belongs_to_another_tab() {
         app.selection.is_none(),
         "a selection in the split workspace is stale and must be dropped"
     );
+    app.shutdown();
+}
+
+// ─── close_pane / set_pane_identity (Issue #296) ──────────
+
+/// [`two_tabs`] with a second pane in each tab, so closing one pane
+/// neither closes a whole tab nor trips the `last_pane` guard. Returns
+/// `(app, caller_ws0, sibling_ws0, active_ws1, sibling_ws1)`; the two
+/// siblings are also registered under the names `bg-sibling` /
+/// `fg-sibling`.
+fn two_tabs_two_panes() -> (App, usize, usize, usize, usize) {
+    let (mut app, caller, active) = two_tabs();
+    app.relayout_workspace(0);
+    let bg_sibling = app
+        .handle_split(
+            &ipc::PaneRef::Id(caller),
+            ipc::Direction::Vertical,
+            None,
+            Some("bg-sibling".into()),
+            None,
+            None,
+            Some(caller),
+            None,
+        )
+        .expect("split the background tab");
+    let fg_sibling = app
+        .handle_split(
+            &ipc::PaneRef::Id(active),
+            ipc::Direction::Vertical,
+            None,
+            Some("fg-sibling".into()),
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("split the visible tab");
+    (app, caller, bg_sibling, active, fg_sibling)
+}
+
+/// The bug in one test: a background orchestrator asking to close "the
+/// focused pane" used to kill a pane in whatever tab the human was
+/// typing in, and closing is not undoable.
+#[test]
+fn close_focused_from_a_background_caller_never_touches_the_visible_tab() {
+    let (mut app, caller, bg_sibling, active, fg_sibling) = two_tabs_two_panes();
+    let bg_focus = app.workspaces[0].focused_pane_id;
+    assert!(
+        bg_focus == caller || bg_focus == bg_sibling,
+        "precondition: the caller's tab has its own focus"
+    );
+
+    let closed = app
+        .handle_close(&ipc::PaneRef::Focused, Some(caller))
+        .expect("close the caller tab's focused pane");
+
+    assert_eq!(closed, bg_focus, "`focused` means the caller's tab");
+    assert!(!app.workspaces[0].panes.contains_key(&bg_focus));
+    assert!(
+        app.workspaces[1].panes.contains_key(&active)
+            && app.workspaces[1].panes.contains_key(&fg_sibling),
+        "the tab the user is watching must be untouched"
+    );
+    app.shutdown();
+}
+
+#[test]
+fn close_focused_without_from_pane_still_targets_the_visible_tab() {
+    let (mut app, caller, bg_sibling, _active, _fg_sibling) = two_tabs_two_panes();
+    let visible_focus = app.workspaces[1].focused_pane_id;
+
+    let closed = app
+        .handle_close(&ipc::PaneRef::Focused, None)
+        .expect("legacy close");
+
+    assert_eq!(
+        closed, visible_focus,
+        "`renga close --focused` is unchanged"
+    );
+    assert!(
+        app.workspaces[0].panes.contains_key(&caller)
+            && app.workspaces[0].panes.contains_key(&bg_sibling),
+        "the other tab keeps both panes"
+    );
+    app.shutdown();
+}
+
+/// The escape hatch #296 must not remove: a numeric id is globally
+/// unique, so naming one is an explicit cross-tab request.
+#[test]
+fn close_by_numeric_id_still_reaches_another_tab() {
+    let (mut app, caller, _bg_sibling, _active, fg_sibling) = two_tabs_two_panes();
+    let closed = app
+        .handle_close(&ipc::PaneRef::Id(fg_sibling), Some(caller))
+        .expect("numeric ids stay cross-tab");
+    assert_eq!(closed, fg_sibling);
+    assert!(!app.workspaces[1].panes.contains_key(&fg_sibling));
+    app.shutdown();
+}
+
+/// Names are unique per tab, never globally — a caller-scoped name that
+/// silently matched another tab's pane would be the #288 bug with a
+/// destructive payload. The legacy CLI path keeps its cross-tab search.
+#[test]
+fn close_by_name_stays_inside_the_callers_tab() {
+    let (mut app, caller, bg_sibling, _active, fg_sibling) = two_tabs_two_panes();
+
+    let err = app
+        .handle_close(&ipc::PaneRef::Name("fg-sibling".into()), Some(caller))
+        .expect_err("a name from another tab is not addressable");
+    assert_eq!(err.code, Some(ipc::err_code::PANE_NOT_FOUND));
+    assert!(
+        app.workspaces[1].panes.contains_key(&fg_sibling),
+        "a refused close must not have closed anything"
+    );
+
+    // `renga close --name bg-sibling` still finds a pane in a
+    // non-visible tab, exactly as before #296.
+    let closed = app
+        .handle_close(&ipc::PaneRef::Name("bg-sibling".into()), None)
+        .expect("the CLI's cross-tab name search is preserved");
+    assert_eq!(closed, bg_sibling);
+    app.shutdown();
+}
+
+/// A caller we cannot attribute is an error, not a reason to fall back
+/// to the visible tab — including for an `Id` target that would have
+/// resolved on its own.
+#[test]
+fn close_rejects_an_unknown_from_pane_instead_of_falling_back() {
+    let (mut app, _caller, _bg_sibling, active, fg_sibling) = two_tabs_two_panes();
+
+    for target in [ipc::PaneRef::Focused, ipc::PaneRef::Id(fg_sibling)] {
+        let err = app
+            .handle_close(&target, Some(9999))
+            .expect_err("unknown caller pane");
+        assert_eq!(err.code, Some(ipc::err_code::PANE_NOT_FOUND));
+    }
+    assert!(
+        app.workspaces[1].panes.contains_key(&active)
+            && app.workspaces[1].panes.contains_key(&fg_sibling),
+        "nothing was closed"
+    );
+    app.shutdown();
+}
+
+/// The scoping has to survive the IPC boundary, not just the handler:
+/// a dropped `from_pane` in `AppCommand` plumbing would restore the bug
+/// while every handler-level test above stayed green.
+#[test]
+fn close_through_the_app_command_boundary_is_caller_scoped() {
+    let (mut app, caller, _bg_sibling, active, fg_sibling) = two_tabs_two_panes();
+    let bg_focus = app.workspaces[0].focused_pane_id;
+
+    let (reply_tx, reply_rx) = oneshot::channel();
+    app.handle_app_command(AppCommand::Close {
+        target: ipc::PaneRef::Focused,
+        from_pane: Some(caller),
+        reply: reply_tx,
+    });
+    let closed = reply_rx.recv().expect("close reply").expect("close ok");
+
+    assert_eq!(closed, bg_focus);
+    assert!(
+        app.workspaces[1].panes.contains_key(&active)
+            && app.workspaces[1].panes.contains_key(&fg_sibling)
+    );
+    app.shutdown();
+}
+
+#[test]
+fn set_identity_focused_from_a_background_caller_renames_its_own_pane() {
+    let (mut app, caller, _bg_sibling, _active, _fg_sibling) = two_tabs_two_panes();
+    let bg_focus = app.workspaces[0].focused_pane_id;
+    let visible_focus = app.workspaces[1].focused_pane_id;
+
+    let info = app
+        .handle_set_pane_identity(
+            &ipc::PaneRef::Focused,
+            Some(Some("renamed".into())),
+            Some(Some("worker".into())),
+            Some(caller),
+        )
+        .expect("rename the caller tab's focused pane");
+
+    assert_eq!(info.id, bg_focus);
+    assert_eq!(
+        app.workspaces[0].pane_names.get("renamed").copied(),
+        Some(bg_focus)
+    );
+    assert!(
+        !app.workspaces[1].pane_names.contains_key("renamed"),
+        "the visible tab must not have been renamed"
+    );
+    assert_eq!(
+        app.workspaces[1].focused_pane_id, visible_focus,
+        "and its focus is untouched"
+    );
+    app.shutdown();
+}
+
+#[test]
+fn set_identity_focused_without_from_pane_still_targets_the_visible_tab() {
+    let (mut app, _caller, _bg_sibling, _active, _fg_sibling) = two_tabs_two_panes();
+    let visible_focus = app.workspaces[1].focused_pane_id;
+
+    let info = app
+        .handle_set_pane_identity(
+            &ipc::PaneRef::Focused,
+            Some(Some("renamed".into())),
+            None,
+            None,
+        )
+        .expect("legacy rename");
+
+    assert_eq!(info.id, visible_focus, "`renga rename --focused` unchanged");
+    assert!(app.workspaces[1].pane_names.contains_key("renamed"));
+    app.shutdown();
+}
+
+/// Cross-tab by id survives, and the `name_in_use` check keeps running
+/// against the *resolved* pane's tab — which is what makes per-tab name
+/// uniqueness coherent once a caller can address two tabs.
+#[test]
+fn set_identity_by_id_crosses_tabs_and_judges_uniqueness_in_the_targets_tab() {
+    let (mut app, caller, bg_sibling, _active, fg_sibling) = two_tabs_two_panes();
+
+    // `bg-sibling` is taken in tab 0 and free in tab 1.
+    let info = app
+        .handle_set_pane_identity(
+            &ipc::PaneRef::Id(fg_sibling),
+            Some(Some("bg-sibling".into())),
+            None,
+            Some(caller),
+        )
+        .expect("names are unique per tab, not globally");
+    assert_eq!(info.id, fg_sibling);
+    assert_eq!(
+        app.workspaces[0].pane_names.get("bg-sibling").copied(),
+        Some(bg_sibling),
+        "tab 0's holder of the name is undisturbed"
+    );
+
+    // A collision *inside* the resolved pane's own tab still refuses.
+    let err = app
+        .handle_set_pane_identity(
+            &ipc::PaneRef::Id(caller),
+            Some(Some("bg-sibling".into())),
+            None,
+            Some(caller),
+        )
+        .expect_err("same-tab collision");
+    assert_eq!(err.code, Some(ipc::err_code::NAME_IN_USE));
+    app.shutdown();
+}
+
+#[test]
+fn set_identity_by_name_stays_inside_the_callers_tab() {
+    let (mut app, caller, _bg_sibling, _active, _fg_sibling) = two_tabs_two_panes();
+
+    let err = app
+        .handle_set_pane_identity(
+            &ipc::PaneRef::Name("fg-sibling".into()),
+            Some(Some("stolen".into())),
+            None,
+            Some(caller),
+        )
+        .expect_err("a name from another tab is not addressable");
+    assert_eq!(err.code, Some(ipc::err_code::PANE_NOT_FOUND));
+    assert!(
+        app.workspaces[1].pane_names.contains_key("fg-sibling")
+            && !app.workspaces[1].pane_names.contains_key("stolen"),
+        "the other tab's naming is untouched"
+    );
+
+    // The CLI's cross-tab name search is preserved.
+    let info = app
+        .handle_set_pane_identity(
+            &ipc::PaneRef::Name("bg-sibling".into()),
+            None,
+            Some(Some("worker".into())),
+            None,
+        )
+        .expect("legacy cross-tab name lookup");
+    assert_eq!(info.role.as_deref(), Some("worker"));
+    app.shutdown();
+}
+
+#[test]
+fn set_identity_rejects_an_unknown_from_pane_instead_of_falling_back() {
+    let (mut app, _caller, _bg_sibling, _active, fg_sibling) = two_tabs_two_panes();
+
+    for target in [ipc::PaneRef::Focused, ipc::PaneRef::Id(fg_sibling)] {
+        let err = app
+            .handle_set_pane_identity(&target, Some(Some("renamed".into())), None, Some(9999))
+            .expect_err("unknown caller pane");
+        assert_eq!(err.code, Some(ipc::err_code::PANE_NOT_FOUND));
+    }
+    assert!(
+        !app.workspaces[1].pane_names.contains_key("renamed"),
+        "nothing was renamed"
+    );
+    app.shutdown();
+}
+
+#[test]
+fn set_identity_through_the_app_command_boundary_is_caller_scoped() {
+    let (mut app, caller, _bg_sibling, _active, _fg_sibling) = two_tabs_two_panes();
+    let bg_focus = app.workspaces[0].focused_pane_id;
+
+    let (reply_tx, reply_rx) = oneshot::channel();
+    app.handle_app_command(AppCommand::SetPaneIdentity {
+        target: ipc::PaneRef::Focused,
+        name: Some(Some("renamed".into())),
+        role: None,
+        from_pane: Some(caller),
+        reply: reply_tx,
+    });
+    let info = reply_rx.recv().expect("identity reply").expect("ok");
+
+    assert_eq!(info.id, bg_focus);
+    assert!(!app.workspaces[1].pane_names.contains_key("renamed"));
     app.shutdown();
 }
 

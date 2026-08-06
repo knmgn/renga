@@ -78,11 +78,9 @@ Claude B の次のターンのコンテキストに `<channel source="renga-peer
 ペイン操作系ツール (`list_panes` / `spawn_pane` / `spawn_claude_pane` / `spawn_codex_pane` / `close_pane` / `focus_pane` / `new_tab` / `inspect_pane` / `send_keys` / `set_pane_identity` / `poll_events`) でオーケストレータが必要とする表面はほぼ揃います。各ツールのパラメータスキーマ、返り値の形、エラーコードの完全な一覧は [`api-surface-v1.0.md`](./api-surface-v1.0.md) §1 (英語) を参照してください。
 
 
-> **タブスコープ。** `list_panes` / `spawn_pane` / `spawn_claude_pane` / `spawn_codex_pane` / `focus_pane` / `inspect_pane` / `send_keys` の 7 つでいう「現在のタブ」は、**呼び出し元ペイン自身が属するタブ**であって、ユーザーがたまたま表示しているタブではありません。相対指定 (`target="focused"`、安定名) は自分のタブから出ず、数値のペイン id を明示した場合のみ他タブのペインに届きます。加えて `focus_pane` は解決先が表示中のタブに無い場合、ユーザーが**見ているタブ自体を切り替えます** — キーボードが届かない focus は focus ではないためです。
+> **タブスコープ。** `list_panes` / `spawn_pane` / `spawn_claude_pane` / `spawn_codex_pane` / `focus_pane` / `inspect_pane` / `send_keys` / `close_pane` / `set_pane_identity` の 9 つでいう「現在のタブ」は、**呼び出し元ペイン自身が属するタブ**であって、ユーザーがたまたま表示しているタブではありません。相対指定 (`target="focused"`、安定名) は自分のタブから出ず、数値のペイン id を明示した場合のみ他タブのペインに届きます。加えて `focus_pane` は解決先が表示中のタブに無い場合、ユーザーが**見ているタブ自体を切り替えます** — キーボードが届かない focus は focus ではないためです。
 >
-> **`close_pane` と `set_pane_identity` は例外です。** この 2 つは Issue #288 以前からタブ横断であり、`focused` と名前は今も**ユーザーが表示中のタブ**を基準に解決されます。バックグラウンドタブから `close_pane(target="focused")` を呼ぶと、ユーザーが見ているタブのペインを終了させます。この 2 つには必ず数値 id を明示してください。
->
-> 7 つの修正が Issue #288 です。修正前は表示中のタブを対象にしていたため、バックグラウンドタブで動くオーケストレータの `send_keys` がユーザーの切り替え先タブに黙って入り込んでいました。ツールが `[server_too_old] ... restart renga` を返す場合、ディスク上のバイナリは新しくても renga の**プロセス**が修正前のものです。renga を再起動してください。
+> 9 つのうち 7 つの修正が Issue #288、残る `close_pane` と `set_pane_identity` が Issue #296 です。修正前は表示中のタブを対象にしていたため、バックグラウンドタブで動くオーケストレータの `send_keys` がユーザーの切り替え先タブに黙って入り込み、`close_pane(target="focused")` はユーザーが今まさに触っているペインを終了させていました。ツールが `[server_too_old] ... restart renga` を返す場合、ディスク上のバイナリは新しくても renga の**プロセス**が修正前のものです。renga を再起動してください。
 
 > **`claude` 自動アップグレード。** `spawn_pane` / `new_tab` / `renga split` / `renga new-tab`、および layout TOML の `command = "claude"` 指定は、peer 対応の起動コマンドに自動で書き換えられます。各呼び出し側で `--dangerously-load-development-channels server:renga-peers` を覚えていなくても、新ペインが renga-peers ネットワークに参加します。orchestrator が Claude を起動したい場合は `spawn_pane(command="claude ...")` より `spawn_claude_pane` を推奨 — launch policy が renga 側に集約され、`args[]` に予約済みフラグが混入したら `invalid-params` で拒否されます。
 

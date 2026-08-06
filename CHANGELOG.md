@@ -37,6 +37,25 @@ rules in [`docs/semver-policy.md`](./docs/semver-policy.md).
 
 ### Changed
 
+- **`close_pane` / `set_pane_identity` now resolve `focused` and names
+  against the *caller's* tab.** (#296) The two tools #288 left behind
+  still resolved relative targets against the tab the **user was
+  viewing**, so `close_pane(target: "focused")` from a background
+  orchestrator terminated whatever pane the human was typing in — the
+  #288 wrong-tab bug, on the one operation that cannot be undone.
+  Both now use the same rule as the other seven pane tools: `focused`
+  and stable names stay inside the calling pane's tab, while an
+  explicit **numeric pane id still crosses tabs** (the deliberate
+  escape hatch, unchanged), and name uniqueness is still judged per
+  tab. On the wire this is an optional `from_pane` on the `close` and
+  `set_pane_identity` requests; omitting it — which is what the
+  `renga close` / `renga rename` CLI does — keeps their pre-existing
+  all-workspace search exactly. Version skew fails closed through a
+  new `caller_scope_close_identity` hello capability: a #290-era
+  server would drop the unknown `from_pane` and close a pane in the
+  visible tab, so the bundled mcp-peer answers `[server_too_old] …
+  restart renga` instead.
+
 - **BREAKING — peer messaging now crosses tabs.** (#289) `send_message`
   / `peer_send` deliver to panes in **any** tab when addressed by
   numeric pane id, and `list_peers` / `peer_list` enumerate **every**

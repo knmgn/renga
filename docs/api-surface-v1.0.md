@@ -206,6 +206,14 @@ silent-bifurcation behavior recorded in v1.0.
 
 Input: `{ target: string }` (required).
 
+**Tab scoping (#296)**: caller-scoped like the other pane tools — `"focused"`
+and stable names resolve inside the *calling pane's* tab, a numeric id may
+address any tab. Before #296 the relative selectors resolved against the tab
+the **user was viewing**, so a background orchestrator calling
+`close_pane(target: "focused")` terminated a pane on the human's screen.
+Requires the server to advertise `caller_scope_close_identity` (§3.4); the MCP
+layer fails closed with `server_too_old` otherwise.
+
 Errors: `pane_not_found`, `pane_vanished`, `last_pane` (only pane of only
 remaining tab — surfaced as an error, not silenced), `io_error`.
 
@@ -267,8 +275,12 @@ the pane sees the bytes.
 | `name` | string \| null | no | **Three-state**: omit = leave; `null` = clear; string = set. |
 | `role` | string \| null | no | Same three-state semantics. |
 
+**Tab scoping (#296)**: same rule as `close_pane` (§1.9) — `"focused"` and
+names resolve inside the caller's tab, numeric ids cross tabs, and
+`caller_scope_close_identity` (§3.4) is required.
+
 Validation: `name` non-empty, not all-digits, `[A-Za-z0-9_-]` only, unique
-within tab.
+within the **resolved pane's** tab (uniqueness is per tab, never global).
 
 Errors: `name_in_use`, `name_invalid`, `pane_not_found`.
 
@@ -428,7 +440,7 @@ Server budgets: 5 s `APP_REPLY_TIMEOUT` (server → app event loop) +
 | `send` | `target: PaneRef`, `data: string`, `append_enter: bool` (default false), `from_pane?: usize` | |
 | `split` | `target: PaneRef`, `direction: vertical\|horizontal`, `command?`, `id?`, `role?`, `cwd?`, `from_pane?: usize`, `tab?: TabSelector` | Relative `cwd` resolves against the **target** pane, not `from_pane`. `tab` (#290) is omitted on the wire when absent; senders must gate it on `spawn_tab` (§3.4). `{new: …}` is not valid here — that is `spawn_tab`'s job. |
 | `focus` | `target: PaneRef`, `from_pane?: usize` | Resolving outside the visible tab switches the visible tab. |
-| `close` | `target: PaneRef` | |
+| `close` | `target: PaneRef`, `from_pane?: usize` | `from_pane` added in #296; optional and omitted on the wire when absent, so `{"cmd":"close","target":"focused"}` is unchanged. Unlike the #288 five, the **legacy** (`from_pane` absent) branch searches every workspace — `renga close --id/--name` has always been cross-tab. Senders must gate `from_pane` on `caller_scope_close_identity` (§3.4). |
 | `new_tab` | `command?`, `id?`, `label?`, `role?`, `cwd?` | Creates **and focuses** — unchanged by #290. |
 | `spawn_tab` | `command?`, `id?`, `label?`, `role?`, `cwd?`, `from_pane?: usize` | #290. Creates a single-pane tab **in the background**: the active tab is untouched, geometry (rects + PTY size) is finalized before the reply, exactly one `pane_started` is emitted after name/role attach. Relative / omitted `cwd` follows the **caller pane** (falls back to the server cwd without `from_pane`). Replies `{ id, tab }` with the new pane id and 0-based tab index. Senders must gate on `spawn_tab` (§3.4). |
 | `subscribe` | — | Switches to event-stream mode after ack. |
@@ -436,7 +448,7 @@ Server budgets: 5 s `APP_REPLY_TIMEOUT` (server → app event loop) +
 | `peer_list` | `from_pane: usize` | |
 | `peer_send` | `from_pane: usize`, `target: PaneRef`, `body: string` | Cross-tab ids deliver since #289; names resolve in the sender's tab only; unresolvable targets fail `pane_not_found`. |
 | `peer_register_client` | `pane_id: usize`, `kind: claude\|codex` | Posted by `renga mcp-peer` on startup. |
-| `set_pane_identity` | `target: PaneRef`, `name?`, `role?` (three-state: missing / null / value) | Uses serde `double_option`. |
+| `set_pane_identity` | `target: PaneRef`, `name?`, `role?` (three-state: missing / null / value), `from_pane?: usize` | Uses serde `double_option`. `from_pane` (#296) behaves exactly as on `close`. |
 | `set_summary` | `from_pane: usize`, `summary: string` | Empty `summary` clears. >256 `chars` rejected with `summary_too_long`. |
 
 `PaneRef` = `{ id: usize } | { name: string } | "focused"`.
@@ -486,6 +498,14 @@ fails closed (`server_too_old`) when it is absent: `Request` tolerates
 unknown fields, so a #289-era server would silently drop the selector and
 split in the caller's tab, the wrong-tab accident again. Calls without `tab`
 keep requiring only `caller_scope`, so pre-#290 behavior is untouched.
+
+Servers that also scope `close` / `set_pane_identity` to the caller advertise
+`caller_scope_close_identity` (#296). The bundled mcp-peer sends `from_pane`
+on those two requests and requires this token, failing closed
+(`server_too_old`) when it is absent: a #290-era server advertises the three
+earlier tokens yet drops the unknown `from_pane` and closes a pane in the
+visible tab — irreversibly. A token of its own, for the same reason
+`cross_tab_peers` and `spawn_tab` are separate.
 
 ### 3.5 Event envelope — stable
 
@@ -636,13 +656,15 @@ major version.
   tools require an explicit `target`.
 - **Tab scoping (Q4)**: `list_panes`, `focus_pane`, `send_message`,
   `inspect_pane`, `send_keys`, `spawn_pane`, `spawn_claude_pane`,
-  `spawn_codex_pane`, and `peer_send` are **scoped to the caller's tab** — the
-  tab the calling pane lives in, *not* whichever tab the user is currently
-  looking at (Issue #288; before that fix these resolved against the visible
-  tab, which silently misdirected every call made from a background tab).
+  `spawn_codex_pane`, `close_pane`, `set_pane_identity`, and `peer_send` are
+  **scoped to the caller's tab** — the tab the calling pane lives in, *not*
+  whichever tab the user is currently looking at (Issue #288; before that fix
+  these resolved against the visible tab, which silently misdirected every
+  call made from a background tab. `close_pane` / `set_pane_identity` were
+  the two stragglers, fixed in #296).
   Relative selectors (`"focused"`, a stable name) never leave the caller's tab.
-  An explicit **numeric pane id** may address a pane in another tab, matching
-  the cross-tab behavior `close_pane` / `set_pane_identity` already had.
+  An explicit **numeric pane id** may address a pane in another tab — the
+  deliberate escape hatch, and the one thing #296 preserved unchanged.
   For `send_message` / `peer_send` the numeric-id escape hatch actually
   *delivers* across tabs since #289 (see Q5 below); the relative-selector
   rule is unchanged. `focus_pane` additionally switches the visible tab
@@ -650,11 +672,15 @@ major version.
   would not be focus.
 
   Wire-level: the five stable IPC requests (`list`, `send`, `split`, `focus`,
-  `inspect`) carry an **optional** `from_pane`. Omitting it preserves the
-  pre-#288 active-tab semantics exactly, which is what the `renga` CLI sends.
-  Servers advertise a `caller_scope` capability in the `hello` reply; clients
-  that depend on caller scoping refuse to run against a server that does not
-  advertise it rather than degrade silently.
+  `inspect`) carry an **optional** `from_pane`; `close` and `set_pane_identity`
+  gained the same field in #296. Omitting it preserves each request's
+  pre-existing semantics exactly, which is what the `renga` CLI sends — note
+  that "pre-existing" differs between the two groups: active-tab-only for the
+  #288 five, all-workspace search for the #296 two.
+  Servers advertise a `caller_scope` capability in the `hello` reply (plus
+  `caller_scope_close_identity` since #296); clients that depend on caller
+  scoping refuse to run against a server that does not advertise it rather
+  than degrade silently.
 - **Cross-tab `peer_send` delivers (Q5, revised by #289)**: v1.0 froze the
   cross-tab silent no-op; #289 removed it. A numeric-id target in another tab
   delivers; an unresolvable target fails `pane_not_found`; `peer_list` spans

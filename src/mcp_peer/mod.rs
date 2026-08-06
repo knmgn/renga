@@ -394,14 +394,11 @@ the numeric id from list_peers for peers in other tabs.\n\
 - set_summary: Set a 1-2 sentence summary of what you're working on; surfaced on list_panes / list_peers for other peers.\n\
 - check_messages: Drain any queued peer messages still waiting for this client.\n\n\
 Pane control tools. For list_panes, spawn_pane, spawn_claude_pane, spawn_codex_pane, \
-focus_pane, inspect_pane and send_keys, \"current tab\" means the tab YOUR pane lives in, \
-not whichever tab the user happens to be looking at — so these stay correct while the user \
-switches tabs. For those seven, relative targets (`focused`, a stable name) never leave your \
-tab; a numeric pane id from another tab does reach across, which is the deliberate escape \
-hatch for orchestrating sibling tabs. TWO TOOLS DO NOT FOLLOW THIS RULE: close_pane and \
-set_pane_identity resolve `focused` and names against the tab the USER is currently viewing, \
-so calling close_pane(target=\"focused\") from a background tab can terminate a pane the \
-user is typing in — always pass an explicit numeric id to those two. new_tab creates a whole \
+focus_pane, inspect_pane, send_keys, close_pane and set_pane_identity, \"current tab\" means \
+the tab YOUR pane lives in, not whichever tab the user happens to be looking at — so these \
+stay correct while the user switches tabs. For all nine, relative targets (`focused`, a \
+stable name) never leave your tab; a numeric pane id from another tab does reach across, \
+which is the deliberate escape hatch for orchestrating sibling tabs. new_tab creates a whole \
 new tab:\n\
 - list_panes: Inspect all panes in the current tab, including geometry and the focus flag.\n\
 - spawn_pane: Split an existing pane to create a new one. Optionally runs a startup command, \
@@ -416,9 +413,8 @@ for orchestrator flows — keeps Claude launch policy in renga instead of in eve
 structured `args[]` instead of a free-form command string and launches plain `codex`. Prefer \
 this over `spawn_pane(command=\"codex ...\")` so orchestrator prompts do not have to synthesize \
 shell-quoted Codex commands.\n\
-- close_pane: Close a pane by id or name. The target is resolved across all tabs (names \
-prefer the current tab before searching the others). Refuses when it's the last pane of \
-the last tab.\n\
+- close_pane: Close a pane by id, name, or `focused`. `focused` and names mean YOUR tab; a \
+numeric id may name a pane in any tab. Refuses when it's the last pane of the last tab.\n\
 - focus_pane: Move keyboard focus to another pane. Whenever the resolved pane is not in the \
 tab the user is currently viewing, this ALSO switches the visible tab to it — the user's \
 screen changes under them. That is by design (focus the keyboard cannot reach is not focus), \
@@ -436,8 +432,8 @@ pane's PTY. Use this to answer interactive prompts or drive a TUI when the targe
 peer-enabled agent that can read send_message. DISTINCT from send_message, which delivers \
 logical peer messages rather than PTY bytes.\n\
 - set_pane_identity: Rename or (re)assign the stable `name` and/or `role` of an existing \
-pane. The target is resolved across all tabs (names prefer the current tab); name \
-uniqueness is checked within the target pane's tab.\n\n\
+pane. `focused` and names mean YOUR tab; a numeric id may name a pane in any tab. Name \
+uniqueness is checked within the resolved pane's tab.\n\n\
 Event monitoring:\n\
 - poll_events: Long-poll for pane lifecycle events (pane_started, pane_exited, \
 events_dropped). Events are process-wide: pane lifecycle from every renga tab is \
@@ -661,13 +657,13 @@ fn tools_spec() -> Value {
         },
         {
             "name": "close_pane",
-            "description": "Close a pane, terminating its process. The target is resolved across all renga tabs — numeric ids match a pane in any tab, and names prefer the current tab before searching the others. Fails with code 'last_pane' when the target is the last pane of the only remaining tab.",
+            "description": "Close a pane, terminating its process. Relative targets ('focused', a name) resolve inside your own tab; a numeric id may name a pane in any tab, which is the deliberate cross-tab escape hatch. Fails with code 'last_pane' when the target is the last pane of the only remaining tab. Needs a renga server advertising the caller_scope_close_identity capability; older servers are refused (server_too_old) rather than closing a pane in whatever tab the user is viewing.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "target": {
                         "type": "string",
-                        "description": "Pane to close. Numeric id (from list_panes), stable name, or the literal 'focused'. All-digit strings are always interpreted as ids — a pane literally named '7' cannot be addressed by name, use its id instead."
+                        "description": "Pane to close. Numeric id (from list_panes), stable name, or the literal 'focused' (your own tab's focused pane — NOT whichever pane the user is looking at). Names and 'focused' resolve inside your own tab only; a numeric id may name a pane in any tab. All-digit strings are always interpreted as ids — a pane literally named '7' cannot be addressed by name, use its id instead."
                     }
                 },
                 "required": ["target"]
@@ -773,13 +769,13 @@ fn tools_spec() -> Value {
         },
         {
             "name": "set_pane_identity",
-            "description": "Rename or (re)assign the stable `name` and/or `role` of an existing pane. The target is resolved across all renga tabs — numeric ids match a pane in any tab, and names prefer the current tab before searching the others. Use this to recover from sessions launched without the intended layout (e.g. when the secretary pane was spawned without an `id`, so peers can't address it as `to_id=\"secretary\"`). Both fields use three-state semantics: omit the key to keep the current value, pass `null` to clear it, or pass a string to set it. Validation: name cannot be empty, all-digits, or collide with another pane in the target pane's tab (uniqueness is per tab, not global); allowed characters are [A-Za-z0-9_-]. Role has no uniqueness constraint. Returns the updated pane record so callers can confirm without a separate list round-trip.",
+            "description": "Rename or (re)assign the stable `name` and/or `role` of an existing pane. Relative targets ('focused', a name) resolve inside your own tab; a numeric id may name a pane in any tab. Needs a renga server advertising the caller_scope_close_identity capability; older servers are refused (server_too_old) rather than renaming a pane in whatever tab the user is viewing. Use this to recover from sessions launched without the intended layout (e.g. when the secretary pane was spawned without an `id`, so peers can't address it as `to_id=\"secretary\"`). Both fields use three-state semantics: omit the key to keep the current value, pass `null` to clear it, or pass a string to set it. Validation: name cannot be empty, all-digits, or collide with another pane in the target pane's tab (uniqueness is per tab, not global); allowed characters are [A-Za-z0-9_-]. Role has no uniqueness constraint. Returns the updated pane record so callers can confirm without a separate list round-trip.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "target": {
                         "type": "string",
-                        "description": "Pane to update. Numeric id (from list_panes), stable name, or the literal 'focused' (default). All-digit strings are always ids."
+                        "description": "Pane to update. Numeric id (from list_panes), stable name, or the literal 'focused' (default — your own tab's focused pane, NOT whichever pane the user is looking at). Names and 'focused' resolve inside your own tab only; a numeric id may name a pane in any tab. All-digit strings are always ids."
                     },
                     "name": {
                         "type": ["string", "null"],
@@ -2103,11 +2099,22 @@ fn handle_close_pane(id: &Value, args: &Value, ctx: &PeerCtx) -> Value {
         );
     }
     let target = parse_target(Some(raw));
-    let (_caller_pane, endpoint) = match require_connected(ctx, id, "close pane") {
+    let (caller_pane, endpoint) = match require_connected(ctx, id, "close pane") {
         Ok(t) => t,
         Err(resp) => return resp,
     };
-    match client::send_request(endpoint, &Request::Close { target }) {
+    // Issue #296: `focused` / a name must mean *this* pane's tab.
+    // Gated on its own capability because a pre-#296 server would drop
+    // `from_pane` and close a pane in the user's visible tab instead —
+    // silently, and irreversibly.
+    match client::send_request_requiring(
+        endpoint,
+        &Request::Close {
+            target,
+            from_pane: Some(caller_pane),
+        },
+        crate::ipc::CAP_CALLER_SCOPE_CLOSE_IDENTITY,
+    ) {
         Ok(Response::Ok { data }) => {
             let closed_id = data.get("id").and_then(|v| v.as_u64());
             let msg = match closed_id {
@@ -2259,11 +2266,21 @@ fn handle_set_pane_identity(id: &Value, args: &Value, ctx: &PeerCtx) -> Value {
         );
     }
 
-    let (_caller_pane, endpoint) = match require_connected(ctx, id, "set pane identity") {
+    let (caller_pane, endpoint) = match require_connected(ctx, id, "set pane identity") {
         Ok(t) => t,
         Err(resp) => return resp,
     };
-    match client::send_request(endpoint, &Request::SetPaneIdentity { target, name, role }) {
+    // Issue #296 — see `handle_close_pane` for why this is gated.
+    match client::send_request_requiring(
+        endpoint,
+        &Request::SetPaneIdentity {
+            target,
+            name,
+            role,
+            from_pane: Some(caller_pane),
+        },
+        crate::ipc::CAP_CALLER_SCOPE_CLOSE_IDENTITY,
+    ) {
         Ok(Response::Ok { data }) => {
             // Surface the updated pane record as a human-readable
             // line so Claude can confirm the new identity without

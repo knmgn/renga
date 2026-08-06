@@ -452,6 +452,36 @@ mod tests {
         assert!(require_capability(super::super::CAP_SPAWN_TAB, &advertised).is_ok());
     }
 
+    /// A #290-era server advertises the three earlier tokens but still
+    /// resolves `close`'s `focused` against the visible tab, dropping
+    /// the unknown `from_pane`. Since `close_pane` is destructive and
+    /// irreversible, that server must be refused rather than trusted
+    /// (Issue #296).
+    #[test]
+    fn require_caller_scope_close_identity_fails_closed_against_a_290_server() {
+        let advertised = vec![
+            super::super::CAP_CALLER_SCOPE.to_string(),
+            super::super::CAP_CROSS_TAB_PEERS.to_string(),
+            super::super::CAP_SPAWN_TAB.to_string(),
+        ];
+        let err = require_capability(super::super::CAP_CALLER_SCOPE_CLOSE_IDENTITY, &advertised)
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("server_too_old"), "got: {msg}");
+        assert!(msg.contains("caller_scope_close_identity"), "got: {msg}");
+    }
+
+    #[test]
+    fn require_caller_scope_close_identity_accepts_a_296_server() {
+        let advertised: Vec<String> = super::super::SERVER_CAPABILITIES
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert!(
+            require_capability(super::super::CAP_CALLER_SCOPE_CLOSE_IDENTITY, &advertised).is_ok()
+        );
+    }
+
     #[test]
     fn verify_session_token_matches() {
         assert!(verify_session_token("abc-123", Some("abc-123")).is_ok());
