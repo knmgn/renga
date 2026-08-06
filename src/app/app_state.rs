@@ -87,8 +87,11 @@ pub enum AppCommand {
     },
     /// Close the target pane. Returns the id of the pane that was
     /// closed, so the caller can confirm which pane was resolved.
+    /// `from_pane` scopes `Focused` / `Name` to the caller's tab
+    /// (Issue #296); `None` keeps the pre-#296 all-workspace search.
     Close {
         target: PaneRef,
+        from_pane: Option<usize>,
         reply: oneshot::Sender<std::result::Result<usize, ipc::CodedError>>,
     },
     /// List peers visible to `from_pane` — every other pane in every
@@ -123,10 +126,13 @@ pub enum AppCommand {
     /// of each field. Success returns the pane's updated [`PaneInfo`]
     /// so callers can confirm the new identity without a separate
     /// `List` round-trip.
+    /// `from_pane` scopes `Focused` / `Name` to the caller's tab
+    /// (Issue #296); `None` keeps the pre-#296 all-workspace search.
     SetPaneIdentity {
         target: PaneRef,
         name: Option<Option<String>>,
         role: Option<Option<String>>,
+        from_pane: Option<usize>,
         reply: oneshot::Sender<std::result::Result<PaneInfo, ipc::CodedError>>,
     },
     /// Set or clear the summary string of a specific pane. Used by the

@@ -653,13 +653,9 @@ impl App {
     pub(crate) fn handle_close(
         &mut self,
         target: &PaneRef,
+        from_pane: Option<usize>,
     ) -> std::result::Result<usize, ipc::CodedError> {
-        let (ws_index, pane_id) = self.resolve_pane_across_workspaces(target).ok_or_else(|| {
-            ipc::CodedError::new(
-                ipc::err_code::PANE_NOT_FOUND,
-                format!("pane not found: {target:?}"),
-            )
-        })?;
+        let (ws_index, pane_id) = self.resolve_target_with_global_fallback(from_pane, target)?;
 
         let is_only_pane = self.workspaces[ws_index].layout.pane_count() <= 1;
         if is_only_pane {
@@ -766,6 +762,50 @@ impl App {
             Some(_) => self
                 .resolve_target_from(ws_idx, target)
                 .ok_or_else(not_found),
+        }
+    }
+
+    /// The [`Self::resolve_request_target`] sibling for `Close` and
+    /// `SetPaneIdentity` (Issue #296). Same caller-scoped rules once
+    /// `from_pane` is present — `Focused` / `Name` stay in the caller's
+    /// tab, `Id` still crosses tabs — but a *different legacy branch*.
+    ///
+    /// These two requests predate `from_pane` with an all-workspace
+    /// search (`renga close --id 7` closes pane 7 wherever it lives,
+    /// and `--name worker` falls back to other tabs when the visible
+    /// one has no such pane). Narrowing that to the active tab would
+    /// break the CLI, so `None` keeps
+    /// [`Self::resolve_pane_across_workspaces`] verbatim. The five
+    /// #288 requests cannot do this: their legacy contract was
+    /// active-tab-only, and widening *that* would be the mirror-image
+    /// silent change.
+    ///
+    /// What #296 actually removes is the case that made `close_pane`
+    /// dangerous: `Focused` from a pane-bound agent used to mean "the
+    /// pane the human is currently looking at".
+    pub(crate) fn resolve_target_with_global_fallback(
+        &self,
+        from_pane: Option<usize>,
+        target: &PaneRef,
+    ) -> std::result::Result<(usize, usize), ipc::CodedError> {
+        let not_found = || {
+            ipc::CodedError::new(
+                ipc::err_code::PANE_NOT_FOUND,
+                format!("pane not found: {target:?}"),
+            )
+        };
+        match from_pane {
+            None => self
+                .resolve_pane_across_workspaces(target)
+                .ok_or_else(not_found),
+            // Caller first, and its failure is fatal even for an `Id`
+            // target — same ordering rationale as
+            // `resolve_request_target`.
+            Some(_) => {
+                let ws_idx = self.resolve_caller_workspace(from_pane)?;
+                self.resolve_target_from(ws_idx, target)
+                    .ok_or_else(not_found)
+            }
         }
     }
 

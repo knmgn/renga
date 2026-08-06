@@ -146,7 +146,7 @@ fn handle_close_refuses_last_pane_of_only_tab() {
     let only = app.ws().focused_pane_id;
 
     let err = app
-        .handle_close(&ipc::PaneRef::Id(only))
+        .handle_close(&ipc::PaneRef::Id(only), None)
         .expect_err("closing the last pane must fail");
     assert_eq!(err.code, Some(ipc::err_code::LAST_PANE));
 
@@ -159,7 +159,7 @@ fn handle_close_refuses_last_pane_of_only_tab() {
 fn handle_close_returns_pane_not_found_for_bogus_id() {
     let mut app = App::new(40, 80).expect("App::new");
     let err = app
-        .handle_close(&ipc::PaneRef::Id(9_999))
+        .handle_close(&ipc::PaneRef::Id(9_999), None)
         .expect_err("bogus id should fail");
     assert_eq!(err.code, Some(ipc::err_code::PANE_NOT_FOUND));
     app.shutdown();
@@ -186,7 +186,7 @@ fn handle_close_removes_pane_and_returns_id() {
     let left_id = *app.ws().pane_names.get("left").expect("left registered");
 
     let closed = app
-        .handle_close(&ipc::PaneRef::Name("right".into()))
+        .handle_close(&ipc::PaneRef::Name("right".into()), None)
         .expect("close right pane");
     assert_eq!(closed, right_id);
 
@@ -242,7 +242,7 @@ fn handle_close_in_background_tab_marks_dirty_and_updates_list() {
         .expect("bg-right registered");
 
     let closed = app
-        .handle_close(&ipc::PaneRef::Id(bg_right_id))
+        .handle_close(&ipc::PaneRef::Id(bg_right_id), None)
         .expect("close bg-right");
     assert_eq!(closed, bg_right_id);
 
@@ -280,7 +280,7 @@ fn close_releases_pane_name_for_reuse() {
     app.apply_layout(&cfg).expect("apply_layout");
 
     let victim_id_before = *app.ws().pane_names.get("victim").expect("registered");
-    app.handle_close(&ipc::PaneRef::Name("victim".into()))
+    app.handle_close(&ipc::PaneRef::Name("victim".into()), None)
         .expect("close victim");
     assert!(!app.ws().pane_names.contains_key("victim"));
 
@@ -341,7 +341,7 @@ fn close_after_natural_exit_does_not_double_emit() {
         .exit_event_emitted = true;
 
     let closed = app
-        .handle_close(&ipc::PaneRef::Id(b_id))
+        .handle_close(&ipc::PaneRef::Id(b_id), None)
         .expect("close pane b");
     assert_eq!(closed, b_id);
     assert!(!app.ws().panes.contains_key(&b_id));

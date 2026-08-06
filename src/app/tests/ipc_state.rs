@@ -10,6 +10,7 @@ fn handle_set_pane_identity_sets_name_and_role() {
             &ipc::PaneRef::Focused,
             Some(Some("secretary".into())),
             Some(Some("leader".into())),
+            None,
         )
         .expect("set identity succeeds");
     assert_eq!(info.id, pane_id);
@@ -37,7 +38,7 @@ fn handle_set_pane_identity_null_clears_existing_value() {
     }
 
     let info = app
-        .handle_set_pane_identity(&ipc::PaneRef::Focused, Some(None), Some(None))
+        .handle_set_pane_identity(&ipc::PaneRef::Focused, Some(None), Some(None), None)
         .expect("clear succeeds");
     assert!(info.name.is_none());
     assert!(info.role.is_none());
@@ -59,7 +60,12 @@ fn handle_set_pane_identity_keep_leaves_values_untouched() {
     // allows it (MCP layer guards against accidental no-op). Here
     // we exercise "update role only, keep name".
     let info = app
-        .handle_set_pane_identity(&ipc::PaneRef::Focused, None, Some(Some("updated".into())))
+        .handle_set_pane_identity(
+            &ipc::PaneRef::Focused,
+            None,
+            Some(Some("updated".into())),
+            None,
+        )
         .expect("role-only update");
     assert_eq!(info.name.as_deref(), Some("keeper"));
     assert_eq!(info.role.as_deref(), Some("updated"));
@@ -88,7 +94,12 @@ fn handle_set_pane_identity_rejects_name_collision() {
         .expect("split");
 
     let err = app
-        .handle_set_pane_identity(&ipc::PaneRef::Id(b_id), Some(Some("alpha".into())), None)
+        .handle_set_pane_identity(
+            &ipc::PaneRef::Id(b_id),
+            Some(Some("alpha".into())),
+            None,
+            None,
+        )
         .expect_err("colliding rename must fail");
     assert_eq!(err.code, Some(ipc::err_code::NAME_IN_USE));
     // Pre-collision state preserved.
@@ -104,7 +115,12 @@ fn handle_set_pane_identity_idempotent_on_self_name() {
     app.ws_mut().pane_names.insert("keeper".into(), pane_id);
 
     let info = app
-        .handle_set_pane_identity(&ipc::PaneRef::Focused, Some(Some("keeper".into())), None)
+        .handle_set_pane_identity(
+            &ipc::PaneRef::Focused,
+            Some(Some("keeper".into())),
+            None,
+            None,
+        )
         .expect("self-name must not collide");
     assert_eq!(info.name.as_deref(), Some("keeper"));
     assert_eq!(app.ws().pane_names.get("keeper").copied(), Some(pane_id));
@@ -115,7 +131,7 @@ fn handle_set_pane_identity_idempotent_on_self_name() {
 fn handle_set_pane_identity_rejects_all_digit_name() {
     let mut app = App::new(40, 80).expect("App::new");
     let err = app
-        .handle_set_pane_identity(&ipc::PaneRef::Focused, Some(Some("123".into())), None)
+        .handle_set_pane_identity(&ipc::PaneRef::Focused, Some(Some("123".into())), None, None)
         .expect_err("all-digit name must fail");
     assert_eq!(err.code, Some(ipc::err_code::NAME_INVALID));
     app.shutdown();
@@ -125,7 +141,12 @@ fn handle_set_pane_identity_rejects_all_digit_name() {
 fn handle_set_pane_identity_rejects_invalid_characters() {
     let mut app = App::new(40, 80).expect("App::new");
     let err = app
-        .handle_set_pane_identity(&ipc::PaneRef::Focused, Some(Some("has space".into())), None)
+        .handle_set_pane_identity(
+            &ipc::PaneRef::Focused,
+            Some(Some("has space".into())),
+            None,
+            None,
+        )
         .expect_err("space in name must fail");
     assert_eq!(err.code, Some(ipc::err_code::NAME_INVALID));
     app.shutdown();
@@ -145,7 +166,12 @@ fn handle_set_pane_identity_removes_all_stale_name_entries() {
 
     // Rename to a fresh name — both stale entries must vanish.
     let info = app
-        .handle_set_pane_identity(&ipc::PaneRef::Focused, Some(Some("fresh".into())), None)
+        .handle_set_pane_identity(
+            &ipc::PaneRef::Focused,
+            Some(Some("fresh".into())),
+            None,
+            None,
+        )
         .expect("rename succeeds");
     assert_eq!(info.name.as_deref(), Some("fresh"));
     assert!(!app.ws().pane_names.contains_key("one"));
@@ -155,7 +181,7 @@ fn handle_set_pane_identity_removes_all_stale_name_entries() {
     // Plant two again and clear — both must be removed.
     app.ws_mut().pane_names.insert("alt".into(), pane_id);
     let info = app
-        .handle_set_pane_identity(&ipc::PaneRef::Focused, Some(None), None)
+        .handle_set_pane_identity(&ipc::PaneRef::Focused, Some(None), None, None)
         .expect("clear succeeds");
     assert!(info.name.is_none());
     assert!(!app.ws().pane_names.contains_key("fresh"));
@@ -167,7 +193,12 @@ fn handle_set_pane_identity_removes_all_stale_name_entries() {
 fn handle_set_pane_identity_rejects_unknown_pane() {
     let mut app = App::new(40, 80).expect("App::new");
     let err = app
-        .handle_set_pane_identity(&ipc::PaneRef::Id(9999), Some(Some("anything".into())), None)
+        .handle_set_pane_identity(
+            &ipc::PaneRef::Id(9999),
+            Some(Some("anything".into())),
+            None,
+            None,
+        )
         .expect_err("unknown pane must fail");
     assert_eq!(err.code, Some(ipc::err_code::PANE_NOT_FOUND));
     app.shutdown();
