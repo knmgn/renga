@@ -29,6 +29,14 @@ rules in [`docs/semver-policy-2.0.md`](./docs/semver-policy-2.0.md).
   a half-typed human draft, or any screen renga cannot read is
   **refused with zero bytes written** (`user_turn_not_ready`), and a
   mid-turn agent is refused too (`user_turn_busy`) rather than queued.
+  The same refusal covers a pane the human has scrolled back — every
+  screen read honors the scrollback offset, so renga would otherwise be
+  judging history while a live modal sits underneath it — a pane whose
+  agent has exited, and a pane with a Codex nudge still being typed
+  into the same composer. The structural proof is re-run on every read
+  *after* the body is written too, not only before it: a modal that
+  appears during the settle window is not adopted as the draft, so the
+  Enter that follows can never land on a permission menu.
   Body bytes and Enter are separate PTY writes with a settle and a
   stability check between them, and success is reported only once the
   draft is observed to be consumed; a delivery that wrote bytes without

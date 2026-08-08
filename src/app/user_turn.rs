@@ -30,8 +30,7 @@
 //! past the moment it was meant for.
 
 use super::codex_peer::{
-    codex_prompt_allows_peer_nudge_on_screen, screen_has_visible_text, screen_tail_lines,
-    write_input_to_pane,
+    codex_prompt_allows_peer_nudge_on_screen, screen_has_visible_text, write_input_to_pane,
 };
 use super::*;
 use crate::ui::{find_prompt_row, resolve_input_row_last};
@@ -47,10 +46,16 @@ pub(crate) const USER_TURN_SETTLE_DELAY: Duration = Duration::from_millis(300);
 pub(crate) const USER_TURN_CONFIRM_DELAY: Duration = Duration::from_millis(120);
 
 /// How many times the confirm stage may accept a *changed* composer and
-/// restart its stability window. A couple of restarts absorb a slow
-/// multi-frame repaint; an unbounded retry would let a human typing in
-/// the pane keep the delivery alive until the deadline and then submit
-/// whatever they happened to pause on.
+/// restart its stability window.
+///
+/// A couple of restarts absorb a slow multi-frame repaint. The bound
+/// matters because the restart re-anchors onto whatever is on screen:
+/// if a human edits the draft and pauses for one confirm window, renga
+/// submits the body *plus* their edit. Structural re-verification
+/// (`composer_block_text`) rules out submitting into a dialog, and the
+/// `empty` guard rules out a stray bare Enter, but two writers typing
+/// into one composer is not something renga can disentangle — it can
+/// only keep the window short.
 const USER_TURN_CONFIRM_MAX_RESTARTS: u8 = 3;
 
 /// Whole-delivery budget, measured from the moment the App accepts the
@@ -76,8 +81,11 @@ const COMPOSER_FRAME_MIN_CELLS: usize = 4;
 /// Box-drawing glyphs a composer frame row may be built from. Covers
 /// both shapes Claude Code has shipped: the bordered input box
 /// (`╭──╮` / `╰──╯`) and the current pair of plain horizontal rules.
+/// Deliberately excludes the T-junctions `├` / `┤`: those delimit rows
+/// *inside* a widget (a menu separator, a table rule), and accepting
+/// them let a highlighted list entry pass as a framed composer.
 const FRAME_GLYPHS: &[&str] = &[
-    "─", "━", "│", "┃", "╭", "╮", "╰", "╯", "┌", "┐", "└", "┘", "├", "┤", "═", "╌", "┄", "┈",
+    "─", "━", "│", "┃", "╭", "╮", "╰", "╯", "┌", "┐", "└", "┘", "═", "╌", "┄", "┈",
 ];
 
 /// Substrings that mean "this agent is mid-turn". Scanned only in the
@@ -162,6 +170,12 @@ pub(crate) enum UserTurnStage {
     /// Draft seen; waiting for a second identical read before Enter.
     AwaitConfirm {
         ready_at: Instant,
+        /// The pre-write snapshot, carried through: if the composer
+        /// reads as this again, our body left it before we submitted —
+        /// somebody else pressed Enter, or cleared it. Re-anchoring onto
+        /// it and pressing Enter would fire a stray submit into a pane
+        /// that is now doing something else.
+        empty: String,
         draft: String,
         restarts: u8,
     },
@@ -203,16 +217,23 @@ pub(crate) fn step_user_turn(
     let expired = now >= deadline;
     match stage {
         UserTurnStage::AwaitDraft { ready_at, empty } => {
+            // Expiry wins over progress here. Advancing at the deadline
+            // would park the delivery in a stage that has no budget left
+            // to confirm or submit from, so the reply would cost another
+            // frame — past `APP_REPLY_TIMEOUT` at low fps — for an
+            // outcome already decided.
+            if expired {
+                return UserTurnStep::Stalled(
+                    "the delivery budget ran out before the body appeared in the composer",
+                );
+            }
             if now < *ready_at {
-                return if expired {
-                    UserTurnStep::Stalled("the settle window never elapsed")
-                } else {
-                    UserTurnStep::Wait
-                };
+                return UserTurnStep::Wait;
             }
             match composer {
                 Some(text) if text != empty => UserTurnStep::Advance(UserTurnStage::AwaitConfirm {
                     ready_at: now + USER_TURN_CONFIRM_DELAY,
+                    empty: empty.clone(),
                     draft: text.to_string(),
                     restarts: 0,
                 }),
@@ -224,20 +245,34 @@ pub(crate) fn step_user_turn(
         }
         UserTurnStage::AwaitConfirm {
             ready_at,
+            empty,
             draft,
             restarts,
         } => {
+            if expired {
+                return UserTurnStep::Stalled(
+                    "the delivery budget ran out before the draft could be submitted",
+                );
+            }
             if now < *ready_at {
-                return if expired {
-                    UserTurnStep::Stalled("the draft never stopped changing")
-                } else {
-                    UserTurnStep::Wait
-                };
+                return UserTurnStep::Wait;
             }
             let Some(current) = composer else {
                 return UserTurnStep::Stalled("the composer disappeared before submit");
             };
+            if current == empty {
+                // Our body is gone and we never pressed Enter. Somebody
+                // else submitted or cleared it; pressing Enter now would
+                // land a bare submit on whatever they started.
+                return UserTurnStep::Stalled(
+                    "the body left the composer before renga could submit it",
+                );
+            }
             if current == draft {
+                // Reached only while budget remains (checked above):
+                // submitting costs at least one more frame to observe,
+                // and spending the last of it on a write nobody watches
+                // would report `app_timeout` for a turn that did land.
                 return UserTurnStep::Submit(UserTurnStage::AwaitSubmit {
                     draft: draft.clone(),
                 });
@@ -248,11 +283,9 @@ pub(crate) fn step_user_turn(
                      writer may own it",
                 );
             }
-            if expired {
-                return UserTurnStep::Stalled("the draft never stopped changing");
-            }
             UserTurnStep::Advance(UserTurnStage::AwaitConfirm {
                 ready_at: now + USER_TURN_CONFIRM_DELAY,
+                empty: empty.clone(),
                 draft: current.to_string(),
                 restarts: restarts.saturating_add(1),
             })
@@ -368,9 +401,13 @@ fn prompt_glyph_col(screen: &vt100::Screen, row: u16) -> Option<u16> {
     })
 }
 
-/// Whether the composer at `prompt_row` holds nothing. Everything right
-/// of the prompt glyph must be blank, ignoring the box's right-hand
-/// border, and the input block must not extend onto wrapped rows.
+/// Whether the composer at `prompt_row` holds nothing.
+///
+/// Scans the **whole** row, not just the part right of the glyph: the
+/// only cells allowed to be non-blank are the prompt glyph itself and
+/// the box's own borders. Skipping the columns left of the glyph would
+/// let a list widget's `2. no` sit there unseen, and the input block
+/// must not extend onto wrapped rows either.
 fn composer_is_empty(screen: &vt100::Screen, prompt_row: u16) -> bool {
     let Some(glyph_col) = prompt_glyph_col(screen, prompt_row) else {
         return false;
@@ -379,7 +416,10 @@ fn composer_is_empty(screen: &vt100::Screen, prompt_row: u16) -> bool {
         return false;
     }
     let cols = screen.size().1;
-    for col in glyph_col.saturating_add(1)..cols {
+    for col in 0..cols {
+        if col == glyph_col {
+            continue;
+        }
         let s = cell_text(screen, prompt_row, col);
         let s = s.trim();
         if s.is_empty() || FRAME_GLYPHS.contains(&s) {
@@ -395,19 +435,39 @@ fn composer_is_empty(screen: &vt100::Screen, prompt_row: u16) -> bool {
 /// the visible hardware cursor parked on the prompt row (2.x), and the
 /// painted inverse caret cell older builds used.
 fn caret_is_in_composer(screen: &vt100::Screen, prompt_row: u16) -> bool {
-    if !screen.hide_cursor() && screen.cursor_position().0 == prompt_row {
+    caret_is_in_composer_block(screen, prompt_row, prompt_row)
+}
+
+/// As [`caret_is_in_composer`], but over a possibly wrapped input block
+/// spanning `first..=last` — what a typed draft occupies.
+fn caret_is_in_composer_block(screen: &vt100::Screen, first: u16, last: u16) -> bool {
+    if !screen.hide_cursor() && (first..=last).contains(&screen.cursor_position().0) {
         return true;
     }
     let cols = screen.size().1;
-    (0..cols).any(|col| screen.cell(prompt_row, col).is_some_and(|c| c.inverse()))
+    (first..=last)
+        .any(|row| (0..cols).any(|col| screen.cell(row, col).is_some_and(|c| c.inverse())))
 }
 
-/// Scan the status rows below the composer for an "interrupt"
-/// affordance. Bounded to those rows on purpose — see [`BUSY_MARKERS`].
-fn busy_below_composer(screen: &vt100::Screen, prompt_row: u16) -> bool {
+/// Scan the status rows around the composer for an "interrupt"
+/// affordance.
+///
+/// `rows_above` extends the scan upward: Claude Code puts its footer
+/// below the composer (0), Codex puts its working indicator directly
+/// above it (1). The bound is the point — see [`BUSY_MARKERS`]. Scanning
+/// the whole screen, as the Codex *nudge* path does, means a peer
+/// message that merely quotes "esc to interrupt" sits in the transcript
+/// and pins the pane at `user_turn_busy` for as long as it stays
+/// visible, which on an idle pane is forever.
+fn busy_near_composer(screen: &vt100::Screen, prompt_row: u16, rows_above: u16) -> bool {
     let rows = screen.size().0;
+    let first = prompt_row.saturating_sub(rows_above);
     let mut haystack = String::new();
-    for row in prompt_row.saturating_add(1)..rows {
+    for row in first..rows {
+        if row == prompt_row {
+            // The composer itself holds user text, not chrome.
+            continue;
+        }
         haystack.push_str(&row_text(screen, row).to_lowercase());
         haystack.push('\n');
     }
@@ -415,18 +475,52 @@ fn busy_below_composer(screen: &vt100::Screen, prompt_row: u16) -> bool {
 }
 
 /// The current contents of the agent's input block, used as the draft
-/// fingerprint. Unlike [`composer_is_empty`] this makes no demands of
-/// the content — it just reports what is there, so the state machine can
-/// tell "still our draft" from "consumed".
-fn composer_block_text(screen: &vt100::Screen) -> Option<String> {
-    let prompt_row = find_prompt_row(screen)?;
-    let last = resolve_input_row_last(screen, prompt_row);
-    let mut out = String::new();
-    for row in prompt_row..=last {
-        out.push_str(&row_text(screen, row));
-        out.push('\n');
+/// fingerprint.
+///
+/// This re-proves the *structure* on every read, and that is the whole
+/// point of it. Readiness runs once, before the body is written; a
+/// modal can appear during the settle window that follows, and a
+/// permission menu's `❯ 1. Yes` row satisfies `find_prompt_row` just as
+/// well as a composer does. A reader that only found "the bottom-most
+/// prompt glyph" would adopt that row as the draft, watch it hold still
+/// for 120ms, and press Enter on it — auto-approving the dialog. So the
+/// framing is checked here too, and an unrecognized screen returns
+/// `None`, which the state machine treats as "the composer disappeared"
+/// and reports honestly rather than submitting into.
+///
+/// Unlike [`composer_is_empty`] it makes no demand of the *content* — a
+/// draft is exactly what it expects to find.
+fn composer_block_text(screen: &vt100::Screen, agent: TurnAgent) -> Option<String> {
+    if screen.alternate_screen() {
+        return None;
     }
-    Some(out)
+    match agent {
+        TurnAgent::Claude => {
+            let prompt_row = find_prompt_row(screen)?;
+            let last = resolve_input_row_last(screen, prompt_row);
+            // Same sandwich the readiness predicate requires, but around
+            // the whole (possibly wrapped) input block.
+            if prompt_row == 0 || !row_is_composer_frame(screen, prompt_row.saturating_sub(1)) {
+                return None;
+            }
+            if !row_is_composer_frame(screen, last.saturating_add(1)) {
+                return None;
+            }
+            if !caret_is_in_composer_block(screen, prompt_row, last) {
+                return None;
+            }
+            let mut out = String::new();
+            for row in prompt_row..=last {
+                out.push_str(&row_text(screen, row));
+                out.push('\n');
+            }
+            Some(out)
+        }
+        TurnAgent::Codex => {
+            let prompt_row = codex_prompt_row(screen)?;
+            Some(format!("{}\n", row_text(screen, prompt_row)))
+        }
+    }
 }
 
 /// Readiness for a Claude pane.
@@ -461,7 +555,7 @@ pub(crate) fn claude_turn_readiness(screen: &vt100::Screen) -> TurnReadiness {
     if !caret_is_in_composer(screen, prompt_row) {
         return TurnReadiness::NotReady;
     }
-    if busy_below_composer(screen, prompt_row) {
+    if busy_near_composer(screen, prompt_row, 0) {
         return TurnReadiness::Busy;
     }
     TurnReadiness::Ready
@@ -482,14 +576,46 @@ pub(crate) fn codex_turn_readiness(screen: &vt100::Screen) -> TurnReadiness {
     if !screen_has_visible_text(screen) {
         return TurnReadiness::NotReady;
     }
-    let tail = screen_tail_lines(screen).join("\n").to_ascii_lowercase();
-    if BUSY_MARKERS.iter().any(|m| tail.contains(m)) {
+    let Some(prompt_row) = codex_prompt_row(screen) else {
+        return TurnReadiness::NotReady;
+    };
+    // Codex paints its working indicator directly above the composer,
+    // so the scan reaches one row up — but no further, so transcript
+    // text cannot pin the pane at busy.
+    if busy_near_composer(screen, prompt_row, 1) {
         return TurnReadiness::Busy;
+    }
+    // `codex_prompt_allows_peer_nudge_on_screen` proves the caret is at
+    // the composer's edit position, which it treats as proof of an
+    // empty composer — but only when the caret is on the prompt row at
+    // all. A human who moved the caret home mid-draft leaves the text
+    // in place, so check the text itself too.
+    if !codex_composer_is_empty(screen, prompt_row) {
+        return TurnReadiness::NotReady;
     }
     match codex_prompt_allows_peer_nudge_on_screen(screen) {
         Some(true) => TurnReadiness::Ready,
         _ => TurnReadiness::NotReady,
     }
+}
+
+/// Bottom-most row carrying Codex's `›` composer glyph, searched the
+/// same way [`codex_prompt_allows_peer_nudge_on_screen`] searches.
+fn codex_prompt_row(screen: &vt100::Screen) -> Option<u16> {
+    let rows = screen.size().0;
+    (0..rows)
+        .rev()
+        .find(|&row| row_text(screen, row).trim_start().starts_with('\u{203A}'))
+}
+
+/// Whether Codex's composer holds nothing: the `›` glyph and nothing
+/// after it.
+fn codex_composer_is_empty(screen: &vt100::Screen, prompt_row: u16) -> bool {
+    row_text(screen, prompt_row)
+        .trim_start()
+        .trim_start_matches('\u{203A}')
+        .trim()
+        .is_empty()
 }
 
 // ── body handling ─────────────────────────────────────────────
@@ -503,7 +629,17 @@ pub(crate) fn codex_turn_readiness(screen: &vt100::Screen) -> TurnReadiness {
 /// glitch — the same reasoning as `ipc::sanitized_label`. Channel
 /// delivery is untouched by any of this and still accepts any body.
 pub(crate) fn normalize_user_turn_body(body: &str) -> std::result::Result<String, ipc::CodedError> {
-    let normalized = body.replace("\r\n", "\n").replace('\r', "\n");
+    // U+2028 / U+2029 are line separators that `char::is_control()` does
+    // not catch (they are Zl/Zp, not Cc), so folding them here is what
+    // keeps them from slipping past the multi-line branch below as if
+    // they were ordinary text.
+    let normalized = body
+        .replace("\r\n", "\n")
+        .replace(['\r', '\u{2028}', '\u{2029}'], "\n");
+    // A trailing newline is what a heredoc, `$(cat file)` or a generated
+    // string carries incidentally. Keeping it would make `/clear\n`
+    // "multi-line" and refuse it with a reason that is false for it.
+    let normalized = normalized.trim_end().to_string();
     if normalized.trim().is_empty() {
         return Err(ipc::CodedError::new(
             ipc::err_code::USER_TURN_INVALID_BODY,
@@ -540,6 +676,20 @@ fn user_turn_payload(
     pane_id: usize,
 ) -> std::result::Result<Vec<u8>, ipc::CodedError> {
     if !body.contains('\n') {
+        // Raw bytes are keystrokes, and Tab is a bound key in both
+        // agents (completion / queue-message), not composer text —
+        // renga's own send_keys vocabulary lowers `Tab` to this byte.
+        // Inside a bracketed paste below it is literal, so this refusal
+        // is specific to the unwrapped path.
+        if body.contains('\t') {
+            return Err(ipc::CodedError::new(
+                ipc::err_code::USER_TURN_INVALID_BODY,
+                "message contains a tab, which the recipient reads as a Tab keypress rather \
+                 than as text. Use spaces, or send it as a multi-line body so it goes out as \
+                 a paste."
+                    .to_string(),
+            ));
+        }
         return Ok(body.as_bytes().to_vec());
     }
     if !pane.is_bracketed_paste_enabled() {
@@ -600,6 +750,23 @@ impl App {
         if pane.pending_startup.is_some() {
             return TurnReadiness::NotReady;
         }
+        // A dead agent leaves its last frame painted, OSC title and all,
+        // so the screen still "proves" an idle composer. `write_input`
+        // on an exited pane silently writes nothing, which would be
+        // reported as `user_turn_stalled` — "the body WAS typed" — about
+        // a pane that received nothing at all.
+        if pane.exited {
+            return TurnReadiness::Unsupported;
+        }
+        // Every read below goes through `Screen::cell`, which honors the
+        // scrollback offset — so a pane the human wheel-scrolled up is
+        // judged on HISTORY. The live screen underneath may be showing
+        // the very permission prompt this predicate exists to refuse.
+        // Renga must not scroll the pane back down to look (that is the
+        // human's view), so refuse instead.
+        if pane.is_scrolled_back() {
+            return TurnReadiness::NotReady;
+        }
         let Some(agent) = self.user_turn_agent(ws_index, pane_id) else {
             return TurnReadiness::Unsupported;
         };
@@ -612,6 +779,30 @@ impl App {
         }
     }
 
+    /// The single place the user-turn path touches a PTY. Every byte it
+    /// writes is recorded for tests (see [`App::user_turn_writes`]), so
+    /// "this path wrote nothing" is an assertion and not a claim.
+    fn write_user_turn_bytes(
+        &mut self,
+        ws_index: usize,
+        pane_id: usize,
+        bytes: &[u8],
+    ) -> std::result::Result<(), ipc::CodedError> {
+        #[cfg(test)]
+        self.user_turn_writes.push((pane_id, bytes.to_vec()));
+        let pane = self
+            .workspaces
+            .get_mut(ws_index)
+            .and_then(|w| w.panes.get_mut(&pane_id))
+            .ok_or_else(|| {
+                ipc::CodedError::new(
+                    ipc::err_code::PANE_VANISHED,
+                    format!("pane {pane_id} vanished before delivery"),
+                )
+            })?;
+        write_input_to_pane(pane, bytes, false)
+    }
+
     /// Return true when an identical user turn was accepted within
     /// [`USER_TURN_DEDUPE_TTL`], recording the new one otherwise.
     /// Deliberately mirrors `is_duplicate_peer_send` — including the
@@ -622,10 +813,13 @@ impl App {
             .retain(|_, ts| now.duration_since(*ts) < USER_TURN_DEDUPE_TTL);
         let key = (target, from, body.to_string());
         match self.recent_user_turn_sends.get(&key).copied() {
-            Some(prev) if now.duration_since(prev) < USER_TURN_DEDUPE_TTL => {
-                self.recent_user_turn_sends.insert(key, now);
-                true
-            }
+            // Deliberately does NOT refresh the timestamp on a hit,
+            // unlike `is_duplicate_peer_send`. Refreshing keeps a chatty
+            // channel sender collapsed, which is what that window wants;
+            // here it would mean a caller retrying a `user_turn_stalled`
+            // every few seconds pushes the expiry back on every attempt
+            // and can never get through.
+            Some(prev) if now.duration_since(prev) < USER_TURN_DEDUPE_TTL => true,
             _ => false,
         }
     }
@@ -704,6 +898,22 @@ impl App {
             return;
         }
 
+        // Same hazard, different writer: a queued Codex nudge types its
+        // own text into that composer from `flush_pending_codex_peer_messages`,
+        // which runs on the same frames this delivery does. Two writers,
+        // one composer, one Enter — the submitted turn would be the
+        // concatenation. Let the nudge finish first.
+        if self.pending_codex_peer_messages.contains_key(&target_id) {
+            answer(Err(ipc::CodedError::new(
+                ipc::err_code::USER_TURN_NOT_READY,
+                format!(
+                    "pane {target_id} has a peer nudge still being typed into its composer; \
+                     nothing was written. Retry once it has been delivered."
+                ),
+            )));
+            return;
+        }
+
         if self.is_duplicate_user_turn(target_id, from_pane, &normalized) {
             // Unlike the channel path, say so out loud. A caller that
             // just got `user_turn_stalled` needs to know its retry was
@@ -739,6 +949,26 @@ impl App {
                 return;
             }
         };
+        // Readiness already proved this resolves; unwrapping to Claude
+        // would silently mis-read a Codex composer, so carry the real
+        // answer forward.
+        let Some(agent) = self.user_turn_agent(target_ws, target_id) else {
+            answer(Err(TurnReadiness::Unsupported
+                .into_error(target_id)
+                .expect("Unsupported always carries an error")));
+            return;
+        };
+        let Some(pane) = self
+            .workspaces
+            .get(target_ws)
+            .and_then(|w| w.panes.get(&target_id))
+        else {
+            answer(Err(ipc::CodedError::new(
+                ipc::err_code::PANE_VANISHED,
+                format!("pane {target_id} vanished before delivery"),
+            )));
+            return;
+        };
 
         // Snapshot the *empty* composer before writing. This is the
         // reference the settle stage compares against to decide the
@@ -747,7 +977,7 @@ impl App {
             .parser
             .lock()
             .ok()
-            .and_then(|p| composer_block_text(p.screen()))
+            .and_then(|p| composer_block_text(p.screen(), agent))
             .unwrap_or_default();
 
         // Past this line bytes may be on the wire, so the dedupe entry
@@ -755,21 +985,7 @@ impl App {
         // the refusals above, which must stay freely retryable.
         self.record_user_turn(target_id, from_pane, &normalized);
 
-        let pane = match self
-            .workspaces
-            .get_mut(target_ws)
-            .and_then(|w| w.panes.get_mut(&target_id))
-        {
-            Some(p) => p,
-            None => {
-                answer(Err(ipc::CodedError::new(
-                    ipc::err_code::PANE_VANISHED,
-                    format!("pane {target_id} vanished before delivery"),
-                )));
-                return;
-            }
-        };
-        if let Err(e) = write_input_to_pane(pane, &payload, false) {
+        if let Err(e) = self.write_user_turn_bytes(target_ws, target_id, &payload) {
             answer(Err(e));
             return;
         }
@@ -794,10 +1010,16 @@ impl App {
     /// This never sleeps: each stage either makes progress against the
     /// current screen or leaves the delivery parked for the next frame.
     pub(crate) fn flush_pending_user_turns(&mut self) {
+        self.flush_pending_user_turns_at(Instant::now());
+    }
+
+    /// [`Self::flush_pending_user_turns`] with the clock supplied, so
+    /// tests can drive settle / confirm / deadline transitions without
+    /// sleeping through them.
+    pub(crate) fn flush_pending_user_turns_at(&mut self, now: Instant) {
         if self.pending_user_turns.is_empty() {
             return;
         }
-        let now = Instant::now();
         let mut still_pending = Vec::with_capacity(self.pending_user_turns.len());
         for mut pending in std::mem::take(&mut self.pending_user_turns) {
             match self.advance_user_turn(&mut pending, now) {
@@ -829,15 +1051,18 @@ impl App {
                 ),
             )));
         };
+        let agent = self.user_turn_agent(ws_index, target_id);
         let composer = self
             .workspaces
             .get(ws_index)
             .and_then(|w| w.panes.get(&target_id))
-            .and_then(|pane| {
+            .filter(|pane| !pane.exited && !pane.is_scrolled_back())
+            .zip(agent)
+            .and_then(|(pane, agent)| {
                 pane.parser
                     .lock()
                     .ok()
-                    .and_then(|p| composer_block_text(p.screen()))
+                    .and_then(|p| composer_block_text(p.screen(), agent))
             });
 
         match step_user_turn(&pending.stage, composer.as_deref(), now, pending.deadline) {
@@ -847,18 +1072,11 @@ impl App {
                 None
             }
             UserTurnStep::Submit(stage) => {
-                let Some(pane) = self
-                    .workspaces
-                    .get_mut(ws_index)
-                    .and_then(|w| w.panes.get_mut(&target_id))
-                else {
-                    return Some(Err(stalled_error(target_id, "pane vanished before submit")));
-                };
                 // Enter goes out as its own write, deliberately: the
                 // agent has to have taken the body as input before the
                 // submit key arrives, which is exactly what a combined
                 // write does not guarantee.
-                if let Err(e) = write_input_to_pane(pane, b"\r", false) {
+                if let Err(e) = self.write_user_turn_bytes(ws_index, target_id, b"\r") {
                     return Some(Err(e));
                 }
                 pending.stage = stage;

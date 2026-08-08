@@ -730,7 +730,7 @@ fn forward_unit(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ipc::{Direction, PaneRef, Request};
+    use crate::ipc::{Direction, PaneRef, PeerDelivery, Request};
     use std::sync::mpsc;
 
     #[test]
@@ -917,6 +917,67 @@ mod tests {
                 assert_eq!(data.get("id").and_then(|v| v.as_u64()), Some(11));
             }
             other => panic!("expected Ok, got {other:?}"),
+        }
+    }
+
+    /// The two `deliver` arms route to different App commands, and
+    /// which one a request lands on decides whether a body is *shown*
+    /// to the recipient or *typed into its composer and submitted*.
+    /// Swapping them would type every routine status report into a
+    /// recipient's prompt — so pin both directions.
+    #[test]
+    fn peer_send_routes_channel_and_user_turn_to_different_commands() {
+        let (tx, rx) = mpsc::channel::<AppCommand>();
+        let handle = thread::spawn(move || {
+            // Reply to each before waiting for the next: the caller
+            // blocks on the first reply, so draining both up front
+            // deadlocks.
+            let first = rx.recv().expect("channel send arrives");
+            match first {
+                AppCommand::PeerSend { body, reply, .. } => {
+                    assert_eq!(body, "status report");
+                    reply.send(Ok(())).unwrap();
+                }
+                other => panic!("channel delivery must not take the user-turn path: {other:?}"),
+            }
+            let second = rx.recv().expect("user turn arrives");
+            match second {
+                AppCommand::PeerSendUserTurn { body, reply, .. } => {
+                    assert_eq!(body, "/loop");
+                    reply
+                        .send(Ok(serde_json::json!({ "status": "submitted" })))
+                        .unwrap();
+                }
+                other => panic!("user-turn delivery must not take the channel path: {other:?}"),
+            }
+        });
+
+        // A pre-#323 caller sends no `deliver` at all; that deserializes
+        // to Channel, which is the case this must never mis-route.
+        let legacy: Request = serde_json::from_str(
+            r#"{"cmd":"peer_send","from_pane":1,"target":{"id":4},"body":"status report"}"#,
+        )
+        .expect("legacy peer_send");
+        let channel_resp = dispatch_request(legacy, &tx);
+        let user_turn_resp = dispatch_request(
+            Request::PeerSend {
+                from_pane: 1,
+                target: PaneRef::Id(4),
+                body: "/loop".into(),
+                deliver: PeerDelivery::UserTurn,
+            },
+            &tx,
+        );
+        handle.join().unwrap();
+
+        // Channel keeps the pre-#323 unit reply verbatim.
+        assert_eq!(channel_resp, Response::ok_unit());
+        match user_turn_resp {
+            Response::Ok { data } => assert_eq!(
+                data.get("status").and_then(|v| v.as_str()),
+                Some("submitted")
+            ),
+            other => panic!("expected Ok with a payload, got {other:?}"),
         }
     }
 

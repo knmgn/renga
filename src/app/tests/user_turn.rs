@@ -210,15 +210,34 @@ fn codex_ready_prompt_is_ready() {
     );
 }
 
+/// Codex paints its working indicator on the row directly above the
+/// composer, which is why the busy scan reaches one row up there and
+/// not for Claude.
 #[test]
 fn codex_busy_banner_is_busy() {
     assert_eq!(
         codex_readiness_of(
-            b"\x1b[2J\x1b[H\x1b[?25hworking\xE2\x80\xA6 esc to interrupt\r\n\xE2\x80\xBA \x1b[1;3H",
+            b"\x1b[2J\x1b[H\x1b[?25hworking\xE2\x80\xA6 esc to interrupt\r\n\xE2\x80\xBA \x1b[2;3H",
             8,
             40
         ),
         TurnReadiness::Busy
+    );
+}
+
+/// ...and no further up. A peer message that merely quotes the phrase
+/// sits in the transcript; treating that as "mid-turn" would refuse
+/// every user turn to that pane until the text scrolls off, which on an
+/// idle pane never happens.
+#[test]
+fn codex_transcript_quoting_a_busy_marker_does_not_pin_the_pane() {
+    assert_eq!(
+        codex_readiness_of(
+            b"\x1b[2J\x1b[H\x1b[?25hpeer said: if it hangs, esc to interrupt\r\n\r\n\xE2\x80\xBA \x1b[3;3H",
+            8,
+            40
+        ),
+        TurnReadiness::Ready
     );
 }
 
@@ -304,6 +323,11 @@ fn t0() -> Instant {
     Instant::now()
 }
 
+/// What an empty Claude composer's input block reads as: the prompt
+/// glyph and nothing else. Not blank — which is the whole reason the
+/// machine carries a pre-write reference instead of testing for blank.
+const EMPTY: &str = "\u{276F}\n";
+
 /// An empty Claude composer renders as its prompt glyph, not as blank
 /// text — so "the block is non-empty" is true before a single byte
 /// arrives. The settle stage compares against the pre-write snapshot
@@ -313,13 +337,13 @@ fn settle_stage_waits_for_the_composer_to_differ_from_the_pre_write_snapshot() {
     let now = t0();
     let stage = UserTurnStage::AwaitDraft {
         ready_at: now,
-        empty: "\u{276F}\n".to_string(),
+        empty: EMPTY.to_string(),
     };
     let deadline = now + USER_TURN_DEADLINE;
 
     // Composer still reads exactly as it did before the write.
     assert_eq!(
-        step_user_turn(&stage, Some("\u{276F}\n"), now, deadline),
+        step_user_turn(&stage, Some(EMPTY), now, deadline),
         UserTurnStep::Wait
     );
 
@@ -340,7 +364,7 @@ fn settle_stage_holds_until_the_settle_delay_elapses() {
     let now = t0();
     let stage = UserTurnStage::AwaitDraft {
         ready_at: now + USER_TURN_SETTLE_DELAY,
-        empty: "\u{276F}\n".to_string(),
+        empty: EMPTY.to_string(),
     };
     assert_eq!(
         step_user_turn(&stage, Some("\u{276F} hi\n"), now, now + USER_TURN_DEADLINE),
@@ -353,6 +377,7 @@ fn a_stable_draft_is_submitted() {
     let now = t0();
     let stage = UserTurnStage::AwaitConfirm {
         ready_at: now,
+        empty: EMPTY.to_string(),
         draft: "\u{276F} /loop\n".to_string(),
         restarts: 0,
     };
@@ -376,6 +401,7 @@ fn a_changing_draft_restarts_the_stability_window() {
     let now = t0();
     let stage = UserTurnStage::AwaitConfirm {
         ready_at: now,
+        empty: EMPTY.to_string(),
         draft: "\u{276F} /lo\n".to_string(),
         restarts: 0,
     };
@@ -389,6 +415,7 @@ fn a_changing_draft_restarts_the_stability_window() {
             draft,
             restarts,
             ready_at,
+            ..
         }) => {
             assert_eq!(draft, "\u{276F} /loop\n");
             assert_eq!(restarts, 1);
@@ -405,6 +432,7 @@ fn an_endlessly_changing_draft_stalls_instead_of_submitting() {
     let now = t0();
     let stage = UserTurnStage::AwaitConfirm {
         ready_at: now,
+        empty: EMPTY.to_string(),
         draft: "\u{276F} a\n".to_string(),
         restarts: 3,
     };
@@ -552,6 +580,59 @@ fn seed_claude_idle_pane(app: &mut App, prefix: &[u8]) -> usize {
     seed_focused_pane_screen(app, &bytes)
 }
 
+/// Repaint the focused pane's composer so it holds `draft`.
+fn seed_claude_draft_pane(app: &mut App, draft: &str) {
+    let pane_id = app.ws().focused_pane_id;
+    let (rows, cols) = {
+        let pane = app.ws().panes.get(&pane_id).expect("focused pane exists");
+        let parser = pane.parser.lock().unwrap_or_else(|e| e.into_inner());
+        parser.screen().size()
+    };
+    let rule = "─".repeat(cols.saturating_sub(1) as usize);
+    let col = draft.chars().count() as u16 + 3;
+    let bytes = format!(
+        "\x1b[2J\x1b[H\x1b[?25htranscript\
+         \x1b[{};1H{rule}\
+         \x1b[{};1H\u{276F} {draft}\
+         \x1b[{};1H{rule}\
+         \x1b[{};1H\u{23F5}\u{23F5} auto mode on (shift+tab to cycle)\
+         \x1b[{};{col}H",
+        rows - 3,
+        rows - 2,
+        rows - 1,
+        rows,
+        rows - 2,
+    );
+    seed_focused_pane_screen(app, bytes.as_bytes());
+}
+
+/// Paint a Claude permission dialog — the shape whose option row also
+/// starts with a prompt glyph.
+fn seed_claude_dialog_pane(app: &mut App) {
+    let pane_id = app.ws().focused_pane_id;
+    let rows = {
+        let pane = app.ws().panes.get(&pane_id).expect("focused pane exists");
+        let parser = pane.parser.lock().unwrap_or_else(|e| e.into_inner());
+        parser.screen().size().0
+    };
+    let bytes = format!(
+        "\x1b[2J\x1b[H\x1b[?25h\
+         \x1b[{};1H\u{256D}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{256E}\
+         \x1b[{};1H\u{2502} Bash command   \u{2502}\
+         \x1b[{};1H\u{2502} \u{276F} 1. Yes       \u{2502}\
+         \x1b[{};1H\u{2502}   2. No        \u{2502}\
+         \x1b[{};1H\u{2570}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{256F}\
+         \x1b[{};4H",
+        rows - 4,
+        rows - 3,
+        rows - 2,
+        rows - 1,
+        rows,
+        rows - 2,
+    );
+    seed_focused_pane_screen(app, bytes.as_bytes());
+}
+
 /// Stand up a pane that the predicate will accept: registered as
 /// Claude, painting an idle composer.
 fn app_with_ready_claude_pane() -> (App, usize) {
@@ -560,6 +641,36 @@ fn app_with_ready_claude_pane() -> (App, usize) {
     app.peer_client_kinds
         .insert(pane_id, PeerClientKind::Claude);
     (app, pane_id)
+}
+
+/// The composer the pane paints when idle, as the machine reads it.
+fn composer_now(app: &App, pane_id: usize) -> String {
+    let pane = app.ws().panes.get(&pane_id).expect("pane");
+    let parser = pane.parser.lock().unwrap_or_else(|e| e.into_inner());
+    let screen = parser.screen();
+    let rows = screen.size().0;
+    (0..rows)
+        .rev()
+        .find(|&r| {
+            (0..screen.size().1).any(|c| {
+                screen
+                    .cell(r, c)
+                    .is_some_and(|cell| cell.contents() == "\u{276F}")
+            })
+        })
+        .map(|r| {
+            let mut line = String::new();
+            for c in 0..screen.size().1 {
+                line.push_str(
+                    &screen
+                        .cell(r, c)
+                        .map(|x| x.contents().to_string())
+                        .unwrap_or_default(),
+                );
+            }
+            format!("{}\n", line.trim_end())
+        })
+        .unwrap_or_default()
 }
 
 /// The happy path defers: the handler writes the body and parks the
@@ -686,4 +797,438 @@ fn channel_dedupe_does_not_suppress_a_later_user_turn() {
         "the channel ledger must not stand in for the user-turn one"
     );
     app.shutdown();
+}
+
+// ── the guarantees the refusals rest on ───────────────────────
+
+/// "Refused with zero bytes written" is what makes every refusal safe
+/// to retry, and it is the one claim a real PTY cannot be asked about —
+/// the bytes are gone. `App::user_turn_writes` records them instead, so
+/// this is an assertion rather than a promise.
+#[test]
+fn every_refusal_writes_nothing_to_the_pty() {
+    // Busy: the composer is there, the footer says it is mid-turn.
+    let (mut app, pane_id) = app_with_ready_claude_pane();
+    let (rows, _) = {
+        let pane = app.ws().panes.get(&pane_id).expect("pane");
+        let parser = pane.parser.lock().unwrap_or_else(|e| e.into_inner());
+        parser.screen().size()
+    };
+    seed_focused_pane_screen(
+        &mut app,
+        format!(
+            "\x1b[{rows};1H\u{23F5}\u{23F5} auto mode on \u{00B7} esc to interrupt\x1b[{};3H",
+            rows - 2
+        )
+        .as_bytes(),
+    );
+    assert_eq!(app.user_turn_readiness(0, pane_id), TurnReadiness::Busy);
+    let err = user_turn_result(&mut app, pane_id, ipc::PaneRef::Id(pane_id), "/loop")
+        .expect_err("busy refusal");
+    assert_eq!(err.code, Some(ipc::err_code::USER_TURN_BUSY));
+    assert!(
+        app.user_turn_writes.is_empty(),
+        "a busy refusal wrote {:?}",
+        app.user_turn_writes
+    );
+    app.shutdown();
+
+    // NotReady: a permission dialog owns the screen.
+    let (mut app, pane_id) = app_with_ready_claude_pane();
+    seed_claude_dialog_pane(&mut app);
+    assert_eq!(app.user_turn_readiness(0, pane_id), TurnReadiness::NotReady);
+    let err = user_turn_result(&mut app, pane_id, ipc::PaneRef::Id(pane_id), "/loop")
+        .expect_err("dialog refusal");
+    assert_eq!(err.code, Some(ipc::err_code::USER_TURN_NOT_READY));
+    assert!(
+        app.user_turn_writes.is_empty(),
+        "a dialog refusal wrote {:?} — that text went into the dialog",
+        app.user_turn_writes
+    );
+    assert!(app.recent_user_turn_sends.is_empty());
+    app.shutdown();
+
+    // Unsupported: a plain shell.
+    let mut app = App::new(40, 120).expect("App::new");
+    let pane_id = app.ws().focused_pane_id;
+    let err = user_turn_result(&mut app, pane_id, ipc::PaneRef::Id(pane_id), "/loop")
+        .expect_err("shell refusal");
+    assert_eq!(err.code, Some(ipc::err_code::USER_TURN_UNSUPPORTED_TARGET));
+    assert!(app.user_turn_writes.is_empty());
+    app.shutdown();
+}
+
+/// An accepted delivery writes the body — and only the body, with no
+/// Enter riding along in the same call.
+#[test]
+fn an_accepted_delivery_writes_the_body_without_enter() {
+    let (mut app, pane_id) = app_with_ready_claude_pane();
+    let (tx, _rx) = oneshot::channel();
+    app.handle_peer_send_user_turn(pane_id, &ipc::PaneRef::Id(pane_id), "/loop".into(), tx);
+    assert_eq!(app.user_turn_writes, vec![(pane_id, b"/loop".to_vec())]);
+    app.shutdown();
+}
+
+/// A human scrolled the pane up to re-read output. Every screen read
+/// goes through the scrollback offset, so the predicate would be
+/// judging history — while the live screen underneath may be showing
+/// the permission prompt it exists to refuse.
+#[test]
+fn a_scrolled_back_pane_is_never_ready() {
+    let (mut app, pane_id) = app_with_ready_claude_pane();
+    assert_eq!(app.user_turn_readiness(0, pane_id), TurnReadiness::Ready);
+
+    // Scrolling only moves if there is history to move into.
+    seed_focused_pane_screen(&mut app, "line\r\n".repeat(80).as_bytes());
+    seed_claude_idle_pane(&mut app, b"");
+    app.ws().panes.get(&pane_id).expect("pane").scroll_up(3);
+    assert!(app
+        .ws()
+        .panes
+        .get(&pane_id)
+        .expect("pane")
+        .is_scrolled_back());
+    assert_eq!(app.user_turn_readiness(0, pane_id), TurnReadiness::NotReady);
+
+    app.ws().panes.get(&pane_id).expect("pane").scroll_reset();
+    assert_eq!(app.user_turn_readiness(0, pane_id), TurnReadiness::Ready);
+    app.shutdown();
+}
+
+/// A dead agent leaves its last frame painted, composer and all, so the
+/// screen still "proves" readiness. Writing there silently succeeds
+/// while delivering nothing.
+#[test]
+fn an_exited_pane_is_unsupported() {
+    let (mut app, pane_id) = app_with_ready_claude_pane();
+    app.ws_mut().panes.get_mut(&pane_id).expect("pane").exited = true;
+    assert_eq!(
+        app.user_turn_readiness(0, pane_id),
+        TurnReadiness::Unsupported
+    );
+    let err = user_turn_result(&mut app, pane_id, ipc::PaneRef::Id(pane_id), "/loop")
+        .expect_err("exited pane refused");
+    assert_eq!(err.code, Some(ipc::err_code::USER_TURN_UNSUPPORTED_TARGET));
+    assert!(app.user_turn_writes.is_empty());
+    app.shutdown();
+}
+
+/// A queued Codex nudge types into the same composer from the same
+/// frames this delivery runs on. Two writers, one composer, one Enter —
+/// the submitted turn would be the concatenation.
+#[test]
+fn a_pending_codex_nudge_blocks_a_user_turn_to_that_pane() {
+    let (mut app, pane_id) = app_with_ready_claude_pane();
+    app.pending_codex_peer_messages
+        .entry(pane_id)
+        .or_default()
+        .push_back(PendingCodexPeerDelivery::Draft(PendingCodexPeerMessage {
+            from_pane: 99,
+            from_name: None,
+            from_kind: None,
+        }));
+    let err = user_turn_result(&mut app, pane_id, ipc::PaneRef::Id(pane_id), "/loop")
+        .expect_err("nudge in flight");
+    assert_eq!(err.code, Some(ipc::err_code::USER_TURN_NOT_READY));
+    assert!(app.user_turn_writes.is_empty());
+    app.shutdown();
+}
+
+// ── the delivery machine, end to end through the real adapter ──
+
+/// The full accepted path: body written, settle, confirm, Enter as its
+/// own write, then success only once the draft is observed gone.
+#[test]
+fn the_full_delivery_writes_body_then_enter_and_reports_submitted() {
+    let (mut app, pane_id) = app_with_ready_claude_pane();
+    let empty = composer_now(&app, pane_id);
+    let (tx, rx) = oneshot::channel();
+    let t0 = Instant::now();
+    app.handle_peer_send_user_turn(pane_id, &ipc::PaneRef::Id(pane_id), "/loop".into(), tx);
+    assert_eq!(app.user_turn_writes, vec![(pane_id, b"/loop".to_vec())]);
+
+    // Before the settle window elapses nothing moves.
+    app.flush_pending_user_turns_at(t0);
+    assert_eq!(app.pending_user_turns.len(), 1);
+
+    // The draft appears; settle elapsed -> AwaitConfirm.
+    seed_claude_draft_pane(&mut app, "/loop");
+    assert_ne!(composer_now(&app, pane_id), empty, "draft is on screen");
+    app.flush_pending_user_turns_at(t0 + USER_TURN_SETTLE_DELAY * 2);
+    assert_eq!(app.pending_user_turns.len(), 1);
+    assert!(rx.try_recv().is_err(), "still deferred");
+
+    // Stable across the confirm window -> Enter, as a separate write.
+    app.flush_pending_user_turns_at(t0 + USER_TURN_SETTLE_DELAY * 2 + USER_TURN_CONFIRM_DELAY * 2);
+    assert_eq!(
+        app.user_turn_writes,
+        vec![(pane_id, b"/loop".to_vec()), (pane_id, b"\r".to_vec())],
+        "the body and Enter must be two writes, in that order"
+    );
+
+    // The agent consumes the draft -> submitted.
+    seed_claude_idle_pane(&mut app, b"");
+    app.flush_pending_user_turns_at(t0 + USER_TURN_SETTLE_DELAY * 2 + USER_TURN_CONFIRM_DELAY * 2);
+    let out = rx.try_recv().expect("answered").expect("submitted");
+    assert_eq!(
+        out.get("status").and_then(|v| v.as_str()),
+        Some("submitted")
+    );
+    assert!(
+        app.pending_user_turns.is_empty(),
+        "a resolved delivery must not leak a pending entry"
+    );
+    app.shutdown();
+}
+
+/// The blocker this feature exists to avoid. Readiness passes, the body
+/// is written, and *then* a permission dialog replaces the composer.
+/// A reader that only looked for "the bottom-most prompt glyph" would
+/// adopt the dialog's `❯ 1. Yes` row as the draft, watch it hold still,
+/// and press Enter on it — auto-approving the prompt.
+#[test]
+fn a_dialog_appearing_after_the_write_never_receives_enter() {
+    let (mut app, pane_id) = app_with_ready_claude_pane();
+    let (tx, rx) = oneshot::channel();
+    let t0 = Instant::now();
+    app.handle_peer_send_user_turn(pane_id, &ipc::PaneRef::Id(pane_id), "/loop".into(), tx);
+    assert_eq!(app.user_turn_writes.len(), 1);
+
+    seed_claude_dialog_pane(&mut app);
+    // Drive it well past the deadline: the machine must never find
+    // anything on this screen it is willing to submit into.
+    for step in 1..=12 {
+        app.flush_pending_user_turns_at(t0 + USER_TURN_SETTLE_DELAY * step);
+    }
+
+    assert_eq!(
+        app.user_turn_writes.len(),
+        1,
+        "Enter reached a dialog: {:?}",
+        app.user_turn_writes
+    );
+    let err = rx
+        .try_recv()
+        .expect("answered")
+        .expect_err("must not claim success");
+    assert_eq!(err.code, Some(ipc::err_code::USER_TURN_STALLED));
+    assert!(app.pending_user_turns.is_empty());
+    app.shutdown();
+}
+
+/// The human presses Enter while our body sits in the composer. The
+/// draft is gone and we never submitted it — pressing Enter now would
+/// land a bare submit on whatever they just started.
+#[test]
+fn a_draft_that_leaves_the_composer_before_submit_never_gets_enter() {
+    let (mut app, pane_id) = app_with_ready_claude_pane();
+    let (tx, rx) = oneshot::channel();
+    let t0 = Instant::now();
+    app.handle_peer_send_user_turn(pane_id, &ipc::PaneRef::Id(pane_id), "/loop".into(), tx);
+
+    seed_claude_draft_pane(&mut app, "/loop");
+    app.flush_pending_user_turns_at(t0 + USER_TURN_SETTLE_DELAY * 2);
+    // The human submits it themselves; the composer is empty again.
+    seed_claude_idle_pane(&mut app, b"");
+    app.flush_pending_user_turns_at(t0 + USER_TURN_SETTLE_DELAY * 2 + USER_TURN_CONFIRM_DELAY * 2);
+
+    assert_eq!(app.user_turn_writes.len(), 1, "no stray Enter");
+    let err = rx
+        .try_recv()
+        .expect("answered")
+        .expect_err("outcome is uncertain");
+    assert_eq!(err.code, Some(ipc::err_code::USER_TURN_STALLED));
+    app.shutdown();
+}
+
+/// A delivery whose target never shows the draft must still answer —
+/// an unanswered reply channel would block the IPC server for the full
+/// `APP_REPLY_TIMEOUT` and be reported as `app_timeout`, blaming renga
+/// for a target that simply never echoed.
+#[test]
+fn a_delivery_that_never_progresses_stalls_at_the_deadline() {
+    let (mut app, pane_id) = app_with_ready_claude_pane();
+    let (tx, rx) = oneshot::channel();
+    let t0 = Instant::now();
+    app.handle_peer_send_user_turn(pane_id, &ipc::PaneRef::Id(pane_id), "/loop".into(), tx);
+
+    // The screen never changes.
+    app.flush_pending_user_turns_at(t0 + USER_TURN_SETTLE_DELAY * 2);
+    assert_eq!(app.pending_user_turns.len(), 1);
+    app.flush_pending_user_turns_at(t0 + USER_TURN_DEADLINE * 2);
+
+    let err = rx.try_recv().expect("answered").expect_err("stalled");
+    assert_eq!(err.code, Some(ipc::err_code::USER_TURN_STALLED));
+    assert!(app.pending_user_turns.is_empty());
+    assert_eq!(app.user_turn_writes.len(), 1, "no Enter was ever written");
+    app.shutdown();
+}
+
+/// The budget must not be spent on a write nobody watches: submitting
+/// with no time left to observe it reports `app_timeout` for a turn
+/// that did land.
+#[test]
+fn confirm_refuses_to_submit_once_the_budget_is_gone() {
+    let now = Instant::now();
+    let stage = UserTurnStage::AwaitConfirm {
+        ready_at: now,
+        empty: EMPTY.to_string(),
+        draft: "\u{276F} /loop\n".to_string(),
+        restarts: 0,
+    };
+    assert!(matches!(
+        step_user_turn(&stage, Some("\u{276F} /loop\n"), now, now),
+        UserTurnStep::Stalled(_)
+    ));
+}
+
+/// The dedupe window must not slide forward on every retry, or a caller
+/// politely re-sending a stalled turn can never get through.
+#[test]
+fn the_dedupe_window_does_not_extend_on_repeated_retries() {
+    let (mut app, pane_id) = app_with_ready_claude_pane();
+    let (tx, _rx) = oneshot::channel();
+    app.handle_peer_send_user_turn(pane_id, &ipc::PaneRef::Id(pane_id), "/loop".into(), tx);
+    app.pending_user_turns.clear();
+    let first = *app
+        .recent_user_turn_sends
+        .values()
+        .next()
+        .expect("ledger entry");
+
+    for _ in 0..3 {
+        let out = user_turn_result(&mut app, pane_id, ipc::PaneRef::Id(pane_id), "/loop")
+            .expect("suppressed");
+        assert_eq!(
+            out.get("status").and_then(|v| v.as_str()),
+            Some("duplicate_suppressed")
+        );
+    }
+    let after = *app
+        .recent_user_turn_sends
+        .values()
+        .next()
+        .expect("ledger entry");
+    assert_eq!(
+        first, after,
+        "a suppressed retry must not push the expiry back"
+    );
+    app.shutdown();
+}
+
+// ── body handling ─────────────────────────────────────────────
+
+/// Tab is a bound key in both agents (completion / queue-message), not
+/// composer text — renga's own send_keys vocabulary lowers `Tab` to
+/// this byte.
+#[test]
+fn a_tab_in_a_single_line_body_is_refused() {
+    let (mut app, pane_id) = app_with_ready_claude_pane();
+    let err = user_turn_result(
+        &mut app,
+        pane_id,
+        ipc::PaneRef::Id(pane_id),
+        "rerun\tcargo test",
+    )
+    .expect_err("tab refused");
+    assert_eq!(err.code, Some(ipc::err_code::USER_TURN_INVALID_BODY));
+    assert!(app.user_turn_writes.is_empty());
+    app.shutdown();
+}
+
+/// A trailing newline is what a heredoc or a generated string carries
+/// incidentally. Treating it as "multi-line" refused `/clear\n` with a
+/// reason that was false for it.
+#[test]
+fn a_trailing_newline_does_not_make_a_body_multi_line() {
+    assert_eq!(
+        normalize_user_turn_body("/clear\n").expect("normalizes"),
+        "/clear"
+    );
+    let (mut app, pane_id) = app_with_ready_claude_pane();
+    let (tx, _rx) = oneshot::channel();
+    app.handle_peer_send_user_turn(pane_id, &ipc::PaneRef::Id(pane_id), "/clear\n".into(), tx);
+    assert_eq!(
+        app.user_turn_writes,
+        vec![(pane_id, b"/clear".to_vec())],
+        "a slash command must reach the composer verbatim"
+    );
+    app.shutdown();
+}
+
+/// U+2028 / U+2029 are line separators `char::is_control()` does not
+/// catch, so without folding they would ride the single-line path and
+/// skip the bracketed-paste precondition entirely.
+#[test]
+fn unicode_line_separators_are_folded_into_newlines() {
+    assert_eq!(
+        normalize_user_turn_body("stop\u{2028}/clear").expect("normalizes"),
+        "stop\n/clear"
+    );
+    assert_eq!(
+        normalize_user_turn_body("a\u{2029}b").expect("normalizes"),
+        "a\nb"
+    );
+}
+
+// ── predicate scope regressions ───────────────────────────────
+
+/// The busy scan is bounded to the status rows for a reason: widening
+/// it to the whole screen means a pane whose transcript quotes the
+/// phrase is refused forever, since an idle pane never scrolls it off.
+#[test]
+fn a_busy_marker_in_the_transcript_does_not_make_claude_busy() {
+    let rule = "─".repeat(40);
+    let screen = format!(
+        "\x1b[2J\x1b[H\x1b[?25hwe discussed esc to interrupt earlier\r\n{rule}\r\n\u{276F}\r\n{rule}\r\n\u{23F5}\u{23F5} auto mode on\x1b[3;3H"
+    );
+    assert_eq!(
+        claude_readiness_of(screen.as_bytes(), 8, 40),
+        TurnReadiness::Ready
+    );
+}
+
+/// A menu row highlighted with inverse video, sitting between two
+/// separator rules, must not prove as an empty focused composer: the
+/// emptiness scan covers the whole row, not just what is right of the
+/// glyph, and the T-junctions those separators use are not frame
+/// glyphs.
+#[test]
+fn a_highlighted_menu_row_between_separators_is_not_a_composer() {
+    let bar = "\u{251C}".to_string() + &"\u{2500}".repeat(38) + "\u{2524}";
+    let screen = format!(
+        "\x1b[2J\x1b[H\x1b[?25lChoose:\r\n{bar}\r\n\x1b[7m\u{276F}\x1b[0m\r\n{bar}\r\n  2. no"
+    );
+    assert_eq!(
+        claude_readiness_of(screen.as_bytes(), 8, 40),
+        TurnReadiness::NotReady
+    );
+}
+
+/// Codex's composer emptiness is checked against the text, not only
+/// against the caret column: a human who moves the caret home mid-draft
+/// leaves their words in place.
+#[test]
+fn a_codex_draft_with_the_caret_at_home_is_not_ready() {
+    assert_eq!(
+        codex_readiness_of(
+            "\x1b[2J\x1b[H\x1b[?25hdone\r\n\u{203A} please review the P\x1b[2;3H".as_bytes(),
+            8,
+            40
+        ),
+        TurnReadiness::NotReady
+    );
+}
+
+/// The whole reason `user_turn_stalled` exists instead of `app_timeout`
+/// is that the delivery budget finishes first. The two constants live
+/// in different modules with nothing linking them.
+#[test]
+fn the_delivery_budget_fits_inside_the_ipc_reply_budget() {
+    assert!(
+        USER_TURN_DEADLINE < crate::ipc::APP_REPLY_TIMEOUT,
+        "a delivery that outlives the IPC budget is reported as app_timeout, \
+         which blames renga for a slow target"
+    );
+    assert!(USER_TURN_SETTLE_DELAY + USER_TURN_CONFIRM_DELAY < USER_TURN_DEADLINE);
 }

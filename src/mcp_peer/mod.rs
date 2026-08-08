@@ -1005,10 +1005,7 @@ fn handle_send_message(id: &Value, args: &Value, ctx: &PeerCtx) -> Value {
     // unknown `deliver` field entirely and performs a *channel* send,
     // which would report success for a `/loop` that never armed. Both
     // fail closed and name the remedy instead.
-    let required_cap = match deliver {
-        ipc::PeerDelivery::Channel => crate::ipc::CAP_CROSS_TAB_PEERS,
-        ipc::PeerDelivery::UserTurn => crate::ipc::CAP_PEER_USER_TURN,
-    };
+    let required_cap = required_cap_for(deliver);
     match client::send_request_requiring(
         endpoint,
         &Request::PeerSend {
@@ -1027,6 +1024,18 @@ fn handle_send_message(id: &Value, args: &Value, ctx: &PeerCtx) -> Value {
         ),
         Ok(other) => err_response(id, -32603, &format!("unexpected renga response: {other:?}")),
         Err(e) => err_response(id, -32603, &format!("renga call failed: {e}")),
+    }
+}
+
+/// Capability token a `send_message` delivery must see advertised
+/// before it is sent. Kept as its own function so the choice is
+/// assertable: collapsing it to a constant is exactly the regression
+/// that would let a `/loop` be silently downgraded to a channel tag by
+/// an older server.
+pub(crate) fn required_cap_for(deliver: ipc::PeerDelivery) -> &'static str {
+    match deliver {
+        ipc::PeerDelivery::Channel => crate::ipc::CAP_CROSS_TAB_PEERS,
+        ipc::PeerDelivery::UserTurn => crate::ipc::CAP_PEER_USER_TURN,
     }
 }
 
@@ -5231,6 +5240,26 @@ Commands:
             .expect("text block");
         assert!(text.contains("Not re-sent"), "{text:?}");
         assert!(text.contains("nothing new was typed"), "{text:?}");
+    }
+
+    /// A pre-#323 server ignores the unknown `deliver` field and does a
+    /// channel send while answering `Ok`. Only the capability gate
+    /// stands between that and a caller being told its `/loop` armed.
+    #[test]
+    fn user_turn_requires_its_own_capability_token() {
+        assert_eq!(
+            required_cap_for(ipc::PeerDelivery::UserTurn),
+            crate::ipc::CAP_PEER_USER_TURN
+        );
+        assert_eq!(
+            required_cap_for(ipc::PeerDelivery::Channel),
+            crate::ipc::CAP_CROSS_TAB_PEERS,
+            "channel delivery must keep its own, older gate"
+        );
+        assert_ne!(
+            required_cap_for(ipc::PeerDelivery::Channel),
+            required_cap_for(ipc::PeerDelivery::UserTurn)
+        );
     }
 
     #[test]

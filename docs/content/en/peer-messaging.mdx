@@ -108,9 +108,9 @@ it. The refusals:
 | Code | Meaning | Bytes written? |
 |---|---|---|
 | `user_turn_busy` | The agent is mid-turn. Refused rather than queued — its own queue-while-busy affordance would turn "this submitted a turn" into "this may become one later". | No — retry when idle |
-| `user_turn_not_ready` | No empty composer could be proven: a modal, a draft, or a screen renga cannot read. | No — clear the blocker and retry |
-| `user_turn_unsupported_target` | The pane is not running Claude or Codex at all. | No |
-| `user_turn_invalid_body` | Empty body, control characters, or multi-line without bracketed paste on the target. | No |
+| `user_turn_not_ready` | No empty composer could be proven: a modal, a draft, a screen renga cannot read, a pane the human has **scrolled back** (renga would be reading history, not the live screen), or another delivery already in flight to that composer. | No — clear the blocker and retry |
+| `user_turn_unsupported_target` | The pane is not running Claude or Codex at all, or its process has exited. | No |
+| `user_turn_invalid_body` | Empty body, control characters, a tab in a single-line body (the recipient reads it as a Tab keypress, not text), or multi-line without bracketed paste on the target. | No |
 | `user_turn_stalled` | The body **was** typed but submission was never observed. | Yes — inspect the pane before retrying |
 
 Success reports `status: "submitted"` only after the draft is observed

@@ -346,6 +346,17 @@ pub struct App {
     /// passed and bytes are about to be written, so a refusal leaves no
     /// trace and an identical retry gets through.
     pub(crate) recent_user_turn_sends: HashMap<(usize, usize, String), Instant>,
+    /// Every byte string the user-turn path has written to a PTY, in
+    /// order, as `(pane_id, bytes)`.
+    ///
+    /// Test-only, and it earns its place: "a refusal writes nothing" is
+    /// the guarantee that makes every refusal safe to retry, and it is
+    /// unobservable from outside — a real pane's PTY swallows the bytes
+    /// with no way to read them back. Without this, a refactor that
+    /// wrote the body before the readiness check would leave the whole
+    /// suite green.
+    #[cfg(test)]
+    pub(crate) user_turn_writes: Vec<(usize, Vec<u8>)>,
     // Reusable clipboard handle (lazy-initialized)
     pub(crate) clipboard: Option<arboard::Clipboard>,
     // Pane lifecycle event bus shared with IPC subscribers.

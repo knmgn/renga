@@ -83,6 +83,8 @@ impl App {
             recent_peer_sends: HashMap::new(),
             pending_user_turns: Vec::new(),
             recent_user_turn_sends: HashMap::new(),
+            #[cfg(test)]
+            user_turn_writes: Vec::new(),
             clipboard: None,
             event_bus,
             ime_mode: crate::config::ImeMode::default(),
