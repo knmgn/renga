@@ -12,7 +12,7 @@
 
 use super::super::user_turn::{
     claude_turn_readiness, codex_turn_readiness, normalize_user_turn_body, step_user_turn,
-    TurnAgent, TurnReadiness, UserTurnStage, UserTurnStep, USER_TURN_CONFIRM_DELAY,
+    ComposerRead, TurnAgent, TurnReadiness, UserTurnStage, UserTurnStep, USER_TURN_CONFIRM_DELAY,
     USER_TURN_DEADLINE, USER_TURN_SETTLE_DELAY,
 };
 use super::super::*;
@@ -343,12 +343,17 @@ fn settle_stage_waits_for_the_composer_to_differ_from_the_pre_write_snapshot() {
 
     // Composer still reads exactly as it did before the write.
     assert_eq!(
-        step_user_turn(&stage, Some(EMPTY), now, deadline),
+        step_user_turn(&stage, &ComposerRead::text(EMPTY), now, deadline),
         UserTurnStep::Wait
     );
 
     // Draft visible → move to confirmation.
-    match step_user_turn(&stage, Some("\u{276F} /loop\n"), now, deadline) {
+    match step_user_turn(
+        &stage,
+        &ComposerRead::text("\u{276F} /loop\n"),
+        now,
+        deadline,
+    ) {
         UserTurnStep::Advance(UserTurnStage::AwaitConfirm {
             draft, restarts, ..
         }) => {
@@ -367,7 +372,12 @@ fn settle_stage_holds_until_the_settle_delay_elapses() {
         empty: EMPTY.to_string(),
     };
     assert_eq!(
-        step_user_turn(&stage, Some("\u{276F} hi\n"), now, now + USER_TURN_DEADLINE),
+        step_user_turn(
+            &stage,
+            &ComposerRead::text("\u{276F} hi\n"),
+            now,
+            now + USER_TURN_DEADLINE
+        ),
         UserTurnStep::Wait
     );
 }
@@ -383,7 +393,7 @@ fn a_stable_draft_is_submitted() {
     };
     match step_user_turn(
         &stage,
-        Some("\u{276F} /loop\n"),
+        &ComposerRead::text("\u{276F} /loop\n"),
         now,
         now + USER_TURN_DEADLINE,
     ) {
@@ -407,7 +417,7 @@ fn a_changing_draft_restarts_the_stability_window() {
     };
     match step_user_turn(
         &stage,
-        Some("\u{276F} /loop\n"),
+        &ComposerRead::text("\u{276F} /loop\n"),
         now,
         now + USER_TURN_DEADLINE,
     ) {
@@ -437,7 +447,12 @@ fn an_endlessly_changing_draft_stalls_instead_of_submitting() {
         restarts: 3,
     };
     assert!(matches!(
-        step_user_turn(&stage, Some("\u{276F} ab\n"), now, now + USER_TURN_DEADLINE),
+        step_user_turn(
+            &stage,
+            &ComposerRead::text("\u{276F} ab\n"),
+            now,
+            now + USER_TURN_DEADLINE
+        ),
         UserTurnStep::Stalled(_)
     ));
 }
@@ -450,13 +465,18 @@ fn a_consumed_draft_counts_as_submitted() {
     };
     // Composer back to empty — the ordinary case.
     assert_eq!(
-        step_user_turn(&stage, Some("\u{276F}\n"), now, now + USER_TURN_DEADLINE),
+        step_user_turn(
+            &stage,
+            &ComposerRead::text("\u{276F}\n"),
+            now,
+            now + USER_TURN_DEADLINE
+        ),
         UserTurnStep::Submitted
     );
     // `/clear` repaints the screen out from under us; the composer may
     // not be findable at all. The draft is still gone.
     assert_eq!(
-        step_user_turn(&stage, None, now, now + USER_TURN_DEADLINE),
+        step_user_turn(&stage, &ComposerRead::gone(), now, now + USER_TURN_DEADLINE),
         UserTurnStep::Submitted
     );
 }
@@ -473,14 +493,14 @@ fn an_unconsumed_draft_waits_then_stalls() {
     assert_eq!(
         step_user_turn(
             &stage,
-            Some("\u{276F} /loop\n"),
+            &ComposerRead::text("\u{276F} /loop\n"),
             now,
             now + USER_TURN_DEADLINE
         ),
         UserTurnStep::Wait
     );
     assert!(matches!(
-        step_user_turn(&stage, Some("\u{276F} /loop\n"), now, now),
+        step_user_turn(&stage, &ComposerRead::text("\u{276F} /loop\n"), now, now),
         UserTurnStep::Stalled(_)
     ));
 }
@@ -1077,7 +1097,7 @@ fn confirm_refuses_to_submit_once_the_budget_is_gone() {
         restarts: 0,
     };
     assert!(matches!(
-        step_user_turn(&stage, Some("\u{276F} /loop\n"), now, now),
+        step_user_turn(&stage, &ComposerRead::text("\u{276F} /loop\n"), now, now),
         UserTurnStep::Stalled(_)
     ));
 }
@@ -1417,5 +1437,61 @@ fn normalization_strips_only_the_trailing_newline() {
     let err = user_turn_result(&mut app, pane_id, ipc::PaneRef::Id(pane_id), "foo\t")
         .expect_err("trailing tab refused");
     assert_eq!(err.code, Some(ipc::err_code::USER_TURN_INVALID_BODY));
+    app.shutdown();
+}
+
+/// A pane that becomes unreadable after Enter — it exited, the human
+/// scrolled it back, its parser is poisoned — proves nothing about
+/// whether the turn landed. Only a *readable* screen whose composer
+/// structurally vanished counts as a consumed draft.
+#[test]
+fn an_unreadable_pane_is_never_scored_as_submitted() {
+    let now = Instant::now();
+    let stage = UserTurnStage::AwaitSubmit {
+        draft: "\u{276F} /loop\n".to_string(),
+    };
+    assert!(
+        matches!(
+            step_user_turn(
+                &stage,
+                &ComposerRead::Unreadable,
+                now,
+                now + USER_TURN_DEADLINE
+            ),
+            UserTurnStep::Stalled(_)
+        ),
+        "an unobservable pane must not be reported as submitted"
+    );
+    // A readable screen with no composer on it is the `/clear` case,
+    // and that one really is a consumed draft.
+    assert_eq!(
+        step_user_turn(&stage, &ComposerRead::gone(), now, now + USER_TURN_DEADLINE),
+        UserTurnStep::Submitted
+    );
+}
+
+/// The window between "readiness passed" and "the body is written" is
+/// the PTY reader thread's to paint into. If a modal lands there, the
+/// pre-write proof must refuse with nothing written rather than
+/// treating an unreadable composer as an empty one.
+#[test]
+fn a_modal_between_readiness_and_the_write_refuses_with_nothing_written() {
+    let (mut app, pane_id) = app_with_ready_claude_pane();
+    assert_eq!(app.user_turn_readiness(0, pane_id), TurnReadiness::Ready);
+    // Stand in for the reader thread painting after the check.
+    seed_claude_dialog_pane(&mut app);
+
+    let err = user_turn_result(&mut app, pane_id, ipc::PaneRef::Id(pane_id), "/loop")
+        .expect_err("refused");
+    assert_eq!(err.code, Some(ipc::err_code::USER_TURN_NOT_READY));
+    assert!(
+        app.user_turn_writes.is_empty(),
+        "wrote into a dialog: {:?}",
+        app.user_turn_writes
+    );
+    assert!(
+        app.recent_user_turn_sends.is_empty(),
+        "a refusal must stay freely retryable"
+    );
     app.shutdown();
 }

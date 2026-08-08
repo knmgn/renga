@@ -204,17 +204,57 @@ pub(crate) enum UserTurnStep {
     Stalled(&'static str),
 }
 
-/// One step of the delivery state machine.
+/// What one look at the target's screen produced.
 ///
-/// `composer` is the target's input block as it reads *right now*, or
-/// `None` when no composer could be found at all.
+/// The distinction is load-bearing at the submit stage: a composer that
+/// structurally vanished from a screen we *can* read means our draft
+/// was consumed (`/clear` repaints the whole screen), while a pane we
+/// cannot read at all means we observed nothing — and reporting that as
+/// a submission would be a claim about a turn nobody watched land.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ComposerRead {
+    /// The screen was read. `None` means no composer is on it.
+    Readable(Option<String>),
+    /// The pane could not be read: it exited, the human scrolled it
+    /// back, its agent identity is gone, or its parser is poisoned.
+    Unreadable,
+}
+
+impl ComposerRead {
+    #[cfg(test)]
+    pub(crate) fn text(s: &str) -> Self {
+        ComposerRead::Readable(Some(s.to_string()))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn gone() -> Self {
+        ComposerRead::Readable(None)
+    }
+
+    fn as_text(&self) -> Option<&str> {
+        match self {
+            ComposerRead::Readable(v) => v.as_deref(),
+            ComposerRead::Unreadable => None,
+        }
+    }
+}
+
+/// One step of the delivery state machine.
 pub(crate) fn step_user_turn(
     stage: &UserTurnStage,
-    composer: Option<&str>,
+    composer: &ComposerRead,
     now: Instant,
     deadline: Instant,
 ) -> UserTurnStep {
     let expired = now >= deadline;
+    // Everything below runs after the body was written, so a screen we
+    // cannot read is an uncertain outcome, never a success.
+    if matches!(composer, ComposerRead::Unreadable) {
+        return UserTurnStep::Stalled(
+            "the target became unreadable mid-delivery, so nothing could be observed",
+        );
+    }
+    let composer = composer.as_text();
     match stage {
         UserTurnStage::AwaitDraft { ready_at, empty } => {
             // Expiry wins over progress here. Advancing at the deadline
@@ -293,7 +333,8 @@ pub(crate) fn step_user_turn(
         UserTurnStage::AwaitSubmit { draft } => {
             // Submission is "our draft is gone", not "the screen
             // changed": a spinner repaint is not a submit, and a slash
-            // command that repaints the whole screen is.
+            // command that repaints the whole screen is. Reached only
+            // for a readable screen — an unreadable one stalled above.
             let consumed = composer.is_none_or(|current| current != draft);
             if consumed {
                 UserTurnStep::Submitted
@@ -810,9 +851,74 @@ impl App {
         }
     }
 
-    /// The single place the user-turn path touches a PTY. Every byte it
-    /// writes is recorded for tests (see [`App::user_turn_writes`]), so
-    /// "this path wrote nothing" is an assertion and not a claim.
+    /// Re-prove the composer and write the body **in one critical
+    /// section**, returning the pre-write snapshot the settle stage
+    /// compares against.
+    ///
+    /// Readiness ran a few statements earlier, and the PTY reader
+    /// thread can paint between then and now — a modal appearing in
+    /// that window would otherwise be typed into. Holding the parser
+    /// lock across the write closes the gap: the reader cannot paint
+    /// while we hold it, so the screen we proved is the screen the
+    /// bytes land on. A composer that cannot be proven here refuses
+    /// with nothing written, exactly like the readiness check itself.
+    fn snapshot_and_write_user_turn(
+        &mut self,
+        ws_index: usize,
+        pane_id: usize,
+        agent: TurnAgent,
+        bytes: &[u8],
+    ) -> std::result::Result<String, ipc::CodedError> {
+        let pane = self
+            .workspaces
+            .get_mut(ws_index)
+            .and_then(|w| w.panes.get_mut(&pane_id))
+            .ok_or_else(|| {
+                ipc::CodedError::new(
+                    ipc::err_code::PANE_VANISHED,
+                    format!("pane {pane_id} vanished before delivery"),
+                )
+            })?;
+        if pane.exited {
+            return Err(ipc::CodedError::new(
+                ipc::err_code::USER_TURN_UNSUPPORTED_TARGET,
+                format!("pane {pane_id}'s process has exited; nothing was written"),
+            ));
+        }
+        // Cloning the handle rather than borrowing `pane.parser` is what
+        // lets the guard outlive the immutable borrow and coexist with
+        // the `&mut pane` the write needs.
+        let parser = std::sync::Arc::clone(&pane.parser);
+        let guard = parser.lock().map_err(|_| {
+            TurnReadiness::NotReady
+                .into_error(pane_id)
+                .expect("NotReady always carries an error")
+        })?;
+        let Some(empty) = composer_block_text(guard.screen(), agent) else {
+            return Err(TurnReadiness::NotReady
+                .into_error(pane_id)
+                .expect("NotReady always carries an error"));
+        };
+        write_input_to_pane(pane, bytes, false)?;
+        if pane.exited {
+            return Err(ipc::CodedError::new(
+                ipc::err_code::USER_TURN_UNSUPPORTED_TARGET,
+                format!(
+                    "pane {pane_id}'s process exited while renga was writing to it; the write \
+                     did not land"
+                ),
+            ));
+        }
+        drop(guard);
+        #[cfg(test)]
+        self.user_turn_writes.push((pane_id, bytes.to_vec()));
+        Ok(empty)
+    }
+
+    /// The single place the user-turn path touches a PTY for the
+    /// *submit* key. Every byte it writes is recorded for tests (see
+    /// [`App::user_turn_writes`]), so "this path wrote nothing" is an
+    /// assertion and not a claim.
     fn write_user_turn_bytes(
         &mut self,
         ws_index: usize,
@@ -1012,43 +1118,25 @@ impl App {
                 .expect("Unsupported always carries an error")));
             return;
         };
-        let Some(pane) = self
-            .workspaces
-            .get(target_ws)
-            .and_then(|w| w.panes.get(&target_id))
-        else {
-            answer(Err(ipc::CodedError::new(
-                ipc::err_code::PANE_VANISHED,
-                format!("pane {target_id} vanished before delivery"),
-            )));
-            return;
-        };
-
-        // Snapshot the *empty* composer before writing. This is the
-        // reference the settle stage compares against to decide the
-        // draft actually landed — see `UserTurnStage::AwaitDraft`.
-        let empty = pane
-            .parser
-            .lock()
-            .ok()
-            .and_then(|p| composer_block_text(p.screen(), agent))
-            .unwrap_or_default();
 
         // Past this line bytes may be on the wire, so the dedupe entry
         // has to exist before the write — not after it, and not before
         // the refusals above, which must stay freely retryable.
         self.record_user_turn(target_id, from_pane, &normalized);
 
-        if let Err(e) = self.write_user_turn_bytes(target_ws, target_id, &payload) {
-            // The write is known not to have landed, so the ledger entry
-            // recorded a moment ago would suppress a legitimate retry
-            // for nothing. Take it back — the entry exists to cover
-            // *uncertain* writes, not failed ones.
-            self.recent_user_turn_sends
-                .remove(&(target_id, from_pane, normalized.clone()));
-            answer(Err(e));
-            return;
-        }
+        let empty = match self.snapshot_and_write_user_turn(target_ws, target_id, agent, &payload) {
+            Ok(v) => v,
+            Err(e) => {
+                // Nothing was written, so the ledger entry recorded a
+                // moment ago would suppress a legitimate retry for
+                // nothing. Take it back — the entry exists to cover
+                // *uncertain* writes, not refused or failed ones.
+                self.recent_user_turn_sends
+                    .remove(&(target_id, from_pane, normalized.clone()));
+                answer(Err(e));
+                return;
+            }
+        };
 
         let now = Instant::now();
         self.pending_user_turns.push(PendingUserTurn {
@@ -1061,6 +1149,31 @@ impl App {
             deadline: now + USER_TURN_DEADLINE,
         });
         self.dirty = true;
+    }
+
+    /// Read the target's composer, distinguishing "no composer on a
+    /// screen we can read" from "we cannot read this pane".
+    fn read_composer(&self, ws_index: usize, pane_id: usize) -> ComposerRead {
+        let Some(agent) = self.user_turn_agent(ws_index, pane_id) else {
+            return ComposerRead::Unreadable;
+        };
+        let Some(pane) = self
+            .workspaces
+            .get(ws_index)
+            .and_then(|w| w.panes.get(&pane_id))
+        else {
+            return ComposerRead::Unreadable;
+        };
+        // A scrolled-back pane shows history, and an exited one shows a
+        // frozen final frame; neither says anything about what the live
+        // screen is doing now.
+        if pane.exited || pane.is_scrolled_back() {
+            return ComposerRead::Unreadable;
+        }
+        match pane.parser.lock() {
+            Ok(parser) => ComposerRead::Readable(composer_block_text(parser.screen(), agent)),
+            Err(_) => ComposerRead::Unreadable,
+        }
     }
 
     /// Panes with a user-turn delivery in flight.
@@ -1126,21 +1239,9 @@ impl App {
                 ),
             )));
         };
-        let agent = self.user_turn_agent(ws_index, target_id);
-        let composer = self
-            .workspaces
-            .get(ws_index)
-            .and_then(|w| w.panes.get(&target_id))
-            .filter(|pane| !pane.exited && !pane.is_scrolled_back())
-            .zip(agent)
-            .and_then(|(pane, agent)| {
-                pane.parser
-                    .lock()
-                    .ok()
-                    .and_then(|p| composer_block_text(p.screen(), agent))
-            });
+        let composer = self.read_composer(ws_index, target_id);
 
-        match step_user_turn(&pending.stage, composer.as_deref(), now, pending.deadline) {
+        match step_user_turn(&pending.stage, &composer, now, pending.deadline) {
             UserTurnStep::Wait => None,
             UserTurnStep::Advance(stage) => {
                 pending.stage = stage;
