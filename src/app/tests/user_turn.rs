@@ -1602,3 +1602,165 @@ fn an_over_long_codex_body_is_refused_before_writing() {
     assert_eq!(app.user_turn_writes, vec![(pane_id, b"/loop".to_vec())]);
     app.shutdown();
 }
+
+/// Walk **every** refusal the handler can produce and assert each one
+/// wrote nothing.
+///
+/// The individual tests above each cover one path; this covers the set,
+/// so a new refusal added later without a byte-freedom assertion shows
+/// up here rather than silently widening the hole. "Refused with zero
+/// bytes written" is what makes a refusal safe to retry — a partial
+/// guarantee is not one.
+#[test]
+fn no_refusal_path_anywhere_writes_a_byte() {
+    let long = "x".repeat(9000);
+    // (label, body, how to make the pane refuse, expected code)
+    #[allow(clippy::type_complexity)]
+    let cases: Vec<(&str, &str, Box<dyn Fn(&mut App, usize)>, &'static str)> = vec![
+        (
+            "empty body",
+            "   ",
+            Box::new(|_, _| {}),
+            ipc::err_code::USER_TURN_INVALID_BODY,
+        ),
+        (
+            "control character",
+            "hi\x1b[31m",
+            Box::new(|_, _| {}),
+            ipc::err_code::USER_TURN_INVALID_BODY,
+        ),
+        (
+            "oversized body",
+            &long,
+            Box::new(|_, _| {}),
+            ipc::err_code::USER_TURN_INVALID_BODY,
+        ),
+        (
+            "tab in a single-line body",
+            "a\tb",
+            Box::new(|_, _| {}),
+            ipc::err_code::USER_TURN_INVALID_BODY,
+        ),
+        (
+            "multi-line without bracketed paste",
+            "one\ntwo",
+            Box::new(|_, _| {}),
+            ipc::err_code::USER_TURN_INVALID_BODY,
+        ),
+        (
+            "agent mid-turn",
+            "/loop",
+            Box::new(|app, pane_id| {
+                let rows = {
+                    let pane = app.ws().panes.get(&pane_id).expect("pane");
+                    let parser = pane.parser.lock().unwrap_or_else(|e| e.into_inner());
+                    parser.screen().size().0
+                };
+                seed_focused_pane_screen(
+                    app,
+                    format!(
+                        "\x1b[{rows};1Hauto mode on \u{00B7} esc to interrupt\x1b[{};3H",
+                        rows - 2
+                    )
+                    .as_bytes(),
+                );
+            }),
+            ipc::err_code::USER_TURN_BUSY,
+        ),
+        (
+            "permission dialog",
+            "/loop",
+            Box::new(seed_claude_dialog_pane_for),
+            ipc::err_code::USER_TURN_NOT_READY,
+        ),
+        (
+            "human draft in the composer",
+            "/loop",
+            Box::new(|app, _| seed_claude_draft_pane(app, "half-typed")),
+            ipc::err_code::USER_TURN_NOT_READY,
+        ),
+        (
+            "pane scrolled back",
+            "/loop",
+            Box::new(|app, pane_id| {
+                seed_focused_pane_screen(app, "line\r\n".repeat(80).as_bytes());
+                seed_claude_idle_pane(app, b"");
+                app.ws().panes.get(&pane_id).expect("pane").scroll_up(3);
+            }),
+            ipc::err_code::USER_TURN_NOT_READY,
+        ),
+        (
+            "delivery already in flight",
+            "/loop",
+            Box::new(|app, pane_id| {
+                let (tx, _rx) = oneshot::channel();
+                app.handle_peer_send_user_turn(
+                    pane_id,
+                    &ipc::PaneRef::Id(pane_id),
+                    "other".into(),
+                    tx,
+                );
+                app.user_turn_writes.clear();
+            }),
+            ipc::err_code::USER_TURN_NOT_READY,
+        ),
+        (
+            "codex nudge queued for the same composer",
+            "/loop",
+            Box::new(|app, pane_id| {
+                app.pending_codex_peer_messages
+                    .entry(pane_id)
+                    .or_default()
+                    .push_back(PendingCodexPeerDelivery::Draft(PendingCodexPeerMessage {
+                        from_pane: 99,
+                        from_name: None,
+                        from_kind: None,
+                    }));
+            }),
+            ipc::err_code::USER_TURN_NOT_READY,
+        ),
+        (
+            "agent exited",
+            "/loop",
+            Box::new(|app, pane_id| {
+                app.ws_mut().panes.get_mut(&pane_id).expect("pane").exited = true;
+            }),
+            ipc::err_code::USER_TURN_UNSUPPORTED_TARGET,
+        ),
+        (
+            "not an agent pane",
+            "/loop",
+            Box::new(|app, pane_id| {
+                app.peer_client_kinds.remove(&pane_id);
+                seed_focused_pane_screen(app, b"\x1b[2J\x1b[H$ ");
+            }),
+            ipc::err_code::USER_TURN_UNSUPPORTED_TARGET,
+        ),
+    ];
+
+    for (label, body, arrange, expected) in cases {
+        let (mut app, pane_id) = app_with_ready_claude_pane();
+        arrange(&mut app, pane_id);
+        let err =
+            user_turn_result(&mut app, pane_id, ipc::PaneRef::Id(pane_id), body).expect_err(label);
+        assert_eq!(err.code, Some(expected), "{label}: {err:?}");
+        assert!(
+            app.user_turn_writes.is_empty(),
+            "{label} wrote to the PTY: {:?}",
+            app.user_turn_writes
+        );
+        app.shutdown();
+    }
+
+    // An unresolvable target never reaches a pane at all.
+    let (mut app, pane_id) = app_with_ready_claude_pane();
+    let err = user_turn_result(&mut app, pane_id, ipc::PaneRef::Id(9999), "/loop")
+        .expect_err("unknown target");
+    assert_eq!(err.code, Some(ipc::err_code::PANE_NOT_FOUND));
+    assert!(app.user_turn_writes.is_empty());
+    app.shutdown();
+}
+
+fn seed_claude_dialog_pane_for(app: &mut App, _pane_id: usize) {
+    seed_claude_dialog_pane(app);
+}

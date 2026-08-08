@@ -72,6 +72,21 @@ pub(crate) const USER_TURN_DEADLINE: Duration = Duration::from_millis(3000);
 /// other.
 pub(crate) const USER_TURN_DEDUPE_TTL: Duration = Duration::from_secs(5);
 
+/// Largest body renga will type as a user turn.
+///
+/// The body write happens while the parser lock is held (see
+/// [`App::snapshot_and_write_user_turn`]), which parks the pane's PTY
+/// reader thread for the duration. That is safe only because the write
+/// cannot block: a full PTY input buffer would stall it, the reader
+/// could not drain the child's output, and a child blocked writing
+/// stdout would stop reading stdin — a cycle. Reaching it needs the
+/// child to fill its whole output buffer inside a sub-millisecond
+/// critical section, which an agent readiness just proved idle will
+/// not do; this cap removes the other half of the cycle by keeping the
+/// write far below any platform's buffer. A user turn is a prompt, not
+/// a file transfer, so the limit is generous in practice.
+const USER_TURN_MAX_BODY_BYTES: usize = 4096;
+
 /// Minimum non-blank cells a row needs before it can count as one of
 /// the composer's frame rows. Keeps a dialog's `│ … │` side borders —
 /// two non-blank cells on an otherwise empty line — from passing as a
@@ -724,6 +739,17 @@ pub(crate) fn normalize_user_turn_body(body: &str) -> std::result::Result<String
         return Err(ipc::CodedError::new(
             ipc::err_code::USER_TURN_INVALID_BODY,
             "deliver=\"user_turn\" needs a non-empty message".to_string(),
+        ));
+    }
+    if normalized.len() > USER_TURN_MAX_BODY_BYTES {
+        return Err(ipc::CodedError::new(
+            ipc::err_code::USER_TURN_INVALID_BODY,
+            format!(
+                "message is {} bytes; deliver=\"user_turn\" types at most \
+                 {USER_TURN_MAX_BODY_BYTES} into another agent's composer. Send a shorter body, \
+                 or use deliver=\"channel\", which has no such limit.",
+                normalized.len()
+            ),
         ));
     }
     if let Some(bad) = normalized
