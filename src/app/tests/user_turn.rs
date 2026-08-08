@@ -653,44 +653,56 @@ fn seed_claude_dialog_pane(app: &mut App) {
     seed_focused_pane_screen(app, bytes.as_bytes());
 }
 
+/// Wait for the pane's real login shell to stop painting.
+///
+/// `App::new` spawns `$SHELL --login` on a genuine PTY whose reader
+/// thread writes into the same parser these tests seed — and for
+/// bash/zsh renga also injects a setup line ending in `clear`. A seed
+/// laid down while that is still arriving gets overwritten between the
+/// seed and the assertion, which is a flake with a ~1-in-4 rate under
+/// a parallel `cargo test`. Waiting for two identical screen reads
+/// costs a few tens of milliseconds once per test and removes the race
+/// rather than narrowing it.
+fn wait_for_pane_quiet(app: &App, pane_id: usize) {
+    let read = || {
+        let pane = app.ws().panes.get(&pane_id).expect("pane");
+        let parser = pane.parser.lock().unwrap_or_else(|e| e.into_inner());
+        let screen = parser.screen();
+        let (rows, cols) = screen.size();
+        let mut out = String::with_capacity((rows as usize) * (cols as usize));
+        for row in 0..rows {
+            for col in 0..cols {
+                out.push_str(
+                    &screen
+                        .cell(row, col)
+                        .map(|c| c.contents().to_string())
+                        .unwrap_or_default(),
+                );
+            }
+        }
+        out
+    };
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut previous = read();
+    while Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(40));
+        let current = read();
+        if current == previous {
+            return;
+        }
+        previous = current;
+    }
+}
+
 /// Stand up a pane that the predicate will accept: registered as
 /// Claude, painting an idle composer.
 fn app_with_ready_claude_pane() -> (App, usize) {
     let mut app = App::new(40, 120).expect("App::new");
+    wait_for_pane_quiet(&app, app.ws().focused_pane_id);
     let pane_id = seed_claude_idle_pane(&mut app, b"");
     app.peer_client_kinds
         .insert(pane_id, PeerClientKind::Claude);
     (app, pane_id)
-}
-
-/// The composer the pane paints when idle, as the machine reads it.
-fn composer_now(app: &App, pane_id: usize) -> String {
-    let pane = app.ws().panes.get(&pane_id).expect("pane");
-    let parser = pane.parser.lock().unwrap_or_else(|e| e.into_inner());
-    let screen = parser.screen();
-    let rows = screen.size().0;
-    (0..rows)
-        .rev()
-        .find(|&r| {
-            (0..screen.size().1).any(|c| {
-                screen
-                    .cell(r, c)
-                    .is_some_and(|cell| cell.contents() == "\u{276F}")
-            })
-        })
-        .map(|r| {
-            let mut line = String::new();
-            for c in 0..screen.size().1 {
-                line.push_str(
-                    &screen
-                        .cell(r, c)
-                        .map(|x| x.contents().to_string())
-                        .unwrap_or_default(),
-                );
-            }
-            format!("{}\n", line.trim_end())
-        })
-        .unwrap_or_default()
 }
 
 /// The happy path defers: the handler writes the body and parks the
@@ -958,10 +970,13 @@ fn a_pending_codex_nudge_blocks_a_user_turn_to_that_pane() {
 
 /// The full accepted path: body written, settle, confirm, Enter as its
 /// own write, then success only once the draft is observed gone.
+///
+/// Each flush is preceded by a fresh paint of the screen it is meant to
+/// read. The pane's real login shell shares this parser, so the last
+/// write before the read has to be the test's, not the shell's.
 #[test]
 fn the_full_delivery_writes_body_then_enter_and_reports_submitted() {
     let (mut app, pane_id) = app_with_ready_claude_pane();
-    let empty = composer_now(&app, pane_id);
     let (tx, rx) = oneshot::channel();
     let t0 = Instant::now();
     app.handle_peer_send_user_turn(pane_id, &ipc::PaneRef::Id(pane_id), "/loop".into(), tx);
@@ -970,29 +985,43 @@ fn the_full_delivery_writes_body_then_enter_and_reports_submitted() {
     // Before the settle window elapses nothing moves.
     app.flush_pending_user_turns_at(t0);
     assert_eq!(app.pending_user_turns.len(), 1);
+    assert_eq!(app.user_turn_writes.len(), 1);
 
-    // The draft appears; settle elapsed -> AwaitConfirm.
-    seed_claude_draft_pane(&mut app, "/loop");
-    assert_ne!(composer_now(&app, pane_id), empty, "draft is on screen");
-    app.flush_pending_user_turns_at(t0 + USER_TURN_SETTLE_DELAY * 2);
-    assert_eq!(app.pending_user_turns.len(), 1);
-    assert!(rx.try_recv().is_err(), "still deferred");
-
-    // Stable across the confirm window -> Enter, as a separate write.
-    app.flush_pending_user_turns_at(t0 + USER_TURN_SETTLE_DELAY * 2 + USER_TURN_CONFIRM_DELAY * 2);
+    // Draft on screen and stable -> settle, confirm, Enter.
+    for step in 1..=6 {
+        seed_claude_draft_pane(&mut app, "/loop");
+        app.flush_pending_user_turns_at(t0 + USER_TURN_SETTLE_DELAY * step);
+        if app.user_turn_writes.len() > 1 {
+            break;
+        }
+    }
     assert_eq!(
         app.user_turn_writes,
         vec![(pane_id, b"/loop".to_vec()), (pane_id, b"\r".to_vec())],
         "the body and Enter must be two writes, in that order"
     );
+    assert!(
+        rx.try_recv().is_err(),
+        "still deferred until a submit is seen"
+    );
 
     // The agent consumes the draft -> submitted.
-    seed_claude_idle_pane(&mut app, b"");
-    app.flush_pending_user_turns_at(t0 + USER_TURN_SETTLE_DELAY * 2 + USER_TURN_CONFIRM_DELAY * 2);
+    for step in 7..=12 {
+        seed_claude_idle_pane(&mut app, b"");
+        app.flush_pending_user_turns_at(t0 + USER_TURN_SETTLE_DELAY * step);
+        if app.pending_user_turns.is_empty() {
+            break;
+        }
+    }
     let out = rx.try_recv().expect("answered").expect("submitted");
     assert_eq!(
         out.get("status").and_then(|v| v.as_str()),
         Some("submitted")
+    );
+    assert_eq!(
+        app.user_turn_writes.len(),
+        2,
+        "no extra keystrokes after the submit"
     );
     assert!(
         app.pending_user_turns.is_empty(),
@@ -1046,11 +1075,30 @@ fn a_draft_that_leaves_the_composer_before_submit_never_gets_enter() {
     let t0 = Instant::now();
     app.handle_peer_send_user_turn(pane_id, &ipc::PaneRef::Id(pane_id), "/loop".into(), tx);
 
-    seed_claude_draft_pane(&mut app, "/loop");
-    app.flush_pending_user_turns_at(t0 + USER_TURN_SETTLE_DELAY * 2);
-    // The human submits it themselves; the composer is empty again.
-    seed_claude_idle_pane(&mut app, b"");
-    app.flush_pending_user_turns_at(t0 + USER_TURN_SETTLE_DELAY * 2 + USER_TURN_CONFIRM_DELAY * 2);
+    // The draft is seen...
+    for step in 1..=6 {
+        seed_claude_draft_pane(&mut app, "/loop");
+        app.flush_pending_user_turns_at(t0 + USER_TURN_SETTLE_DELAY * step);
+        if !matches!(rx.try_recv(), Err(oneshot::TryRecvError::Empty)) {
+            panic!("must not resolve while the draft is on screen");
+        }
+        if app.user_turn_writes.len() > 1 {
+            panic!("Enter must not fire before the confirm window closes");
+        }
+        // Stop once the machine has taken the draft into confirmation.
+        if step >= 2 {
+            break;
+        }
+    }
+
+    // ...then the human submits it themselves and the composer empties.
+    for step in 3..=9 {
+        seed_claude_idle_pane(&mut app, b"");
+        app.flush_pending_user_turns_at(t0 + USER_TURN_SETTLE_DELAY * step);
+        if app.pending_user_turns.is_empty() {
+            break;
+        }
+    }
 
     assert_eq!(app.user_turn_writes.len(), 1, "no stray Enter");
     let err = rx
@@ -1309,12 +1357,16 @@ fn a_pane_that_dies_mid_delivery_is_never_reported_as_submitted() {
     app.handle_peer_send_user_turn(pane_id, &ipc::PaneRef::Id(pane_id), "/loop".into(), tx);
     assert_eq!(app.user_turn_writes.len(), 1);
 
+    // One flush takes the draft into confirmation; Enter cannot fire in
+    // the same call, because confirmation needs a second read a
+    // stability window later.
     seed_claude_draft_pane(&mut app, "/loop");
-    app.flush_pending_user_turns_at(t0 + USER_TURN_SETTLE_DELAY * 2);
+    app.flush_pending_user_turns_at(t0 + USER_TURN_SETTLE_DELAY * 4);
+    assert_eq!(app.user_turn_writes.len(), 1, "Enter has not fired yet");
 
     // The agent dies before the Enter goes out.
     app.ws_mut().panes.get_mut(&pane_id).expect("pane").exited = true;
-    app.flush_pending_user_turns_at(t0 + USER_TURN_SETTLE_DELAY * 2 + USER_TURN_CONFIRM_DELAY * 2);
+    app.flush_pending_user_turns_at(t0 + USER_TURN_SETTLE_DELAY * 5);
 
     let err = rx
         .try_recv()
