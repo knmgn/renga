@@ -1232,3 +1232,107 @@ fn the_delivery_budget_fits_inside_the_ipc_reply_budget() {
     );
     assert!(USER_TURN_SETTLE_DELAY + USER_TURN_CONFIRM_DELAY < USER_TURN_DEADLINE);
 }
+
+/// Codex gets the same post-write revalidation Claude does. Its `›`
+/// composer glyph is not exclusive to the composer: an unboxed option
+/// list wears it too, and without a caret check the machine would adopt
+/// a menu row as the draft and press Enter on it.
+#[test]
+fn a_codex_menu_row_is_not_adopted_as_a_draft() {
+    let mut app = App::new(40, 120).expect("App::new");
+    let pane_id = app.ws().focused_pane_id;
+    app.peer_client_kinds.insert(pane_id, PeerClientKind::Codex);
+
+    // A real Codex draft: caret parked in the composer's edit region.
+    seed_focused_pane_screen(
+        &mut app,
+        "\x1b[2J\x1b[H\x1b[?25hwork\r\n\u{203A} /loop 5m\x1b[2;11H".as_bytes(),
+    );
+    let has_draft = {
+        let pane = app.ws().panes.get(&pane_id).expect("pane");
+        let parser = pane.parser.lock().unwrap_or_else(|e| e.into_inner());
+        super::super::user_turn::composer_block_text(parser.screen(), TurnAgent::Codex)
+    };
+    assert!(
+        has_draft.is_some(),
+        "a genuine Codex draft must be readable"
+    );
+
+    // A menu whose selected row also starts with the composer glyph,
+    // with the caret nowhere near an edit position.
+    seed_focused_pane_screen(
+        &mut app,
+        "\x1b[2J\x1b[H\x1b[?25hApprove?\r\n\u{203A} 1. Yes\r\n  2. No\x1b[1;1H".as_bytes(),
+    );
+    let menu = {
+        let pane = app.ws().panes.get(&pane_id).expect("pane");
+        let parser = pane.parser.lock().unwrap_or_else(|e| e.into_inner());
+        super::super::user_turn::composer_block_text(parser.screen(), TurnAgent::Codex)
+    };
+    assert!(
+        menu.is_none(),
+        "a menu row must not read as a composer: {menu:?}"
+    );
+    app.shutdown();
+}
+
+/// `Pane::write_input` answers `Ok(())` whether it wrote or gave up,
+/// flipping `exited` on failure. Trusting its return value made a
+/// failed Enter look successful — and an exited pane's composer then
+/// reads as gone, which the submit stage scores as "consumed". That is
+/// a false success about a turn nobody received.
+#[test]
+fn a_pane_that_dies_mid_delivery_is_never_reported_as_submitted() {
+    let (mut app, pane_id) = app_with_ready_claude_pane();
+    let (tx, rx) = oneshot::channel();
+    let t0 = Instant::now();
+    app.handle_peer_send_user_turn(pane_id, &ipc::PaneRef::Id(pane_id), "/loop".into(), tx);
+    assert_eq!(app.user_turn_writes.len(), 1);
+
+    seed_claude_draft_pane(&mut app, "/loop");
+    app.flush_pending_user_turns_at(t0 + USER_TURN_SETTLE_DELAY * 2);
+
+    // The agent dies before the Enter goes out.
+    app.ws_mut().panes.get_mut(&pane_id).expect("pane").exited = true;
+    app.flush_pending_user_turns_at(t0 + USER_TURN_SETTLE_DELAY * 2 + USER_TURN_CONFIRM_DELAY * 2);
+
+    let err = rx
+        .try_recv()
+        .expect("answered")
+        .expect_err("must not claim the turn was submitted");
+    // `stalled` is the honest answer here and the one that matters:
+    // the body genuinely was written before the pane died, so the
+    // outcome is uncertain — but it is never reported as `submitted`,
+    // which is what an exited pane's vanished composer would otherwise
+    // score as "the draft was consumed".
+    assert_eq!(err.code, Some(ipc::err_code::USER_TURN_STALLED), "{err:?}");
+    assert_eq!(app.user_turn_writes.len(), 1, "the Enter never landed");
+    assert!(app.pending_user_turns.is_empty());
+    app.shutdown();
+}
+
+/// A body write that demonstrably never landed must not leave a dedupe
+/// entry behind — the window exists to cover *uncertain* writes.
+#[test]
+fn a_failed_body_write_leaves_no_dedupe_trace() {
+    let (mut app, pane_id) = app_with_ready_claude_pane();
+    // Readiness is evaluated against the screen; kill the PTY after it
+    // passes by flipping the flag the writer checks.
+    let readiness = app.user_turn_readiness(0, pane_id);
+    assert_eq!(readiness, TurnReadiness::Ready);
+    app.ws_mut()
+        .panes
+        .get_mut(&pane_id)
+        .expect("pane")
+        .writer_fail_for_test();
+
+    let err = user_turn_result(&mut app, pane_id, ipc::PaneRef::Id(pane_id), "/loop")
+        .expect_err("write failed");
+    assert_eq!(err.code, Some(ipc::err_code::USER_TURN_UNSUPPORTED_TARGET));
+    assert!(
+        app.recent_user_turn_sends.is_empty(),
+        "a write that never landed must stay retryable"
+    );
+    assert!(app.pending_user_turns.is_empty());
+    app.shutdown();
+}

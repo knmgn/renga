@@ -490,7 +490,7 @@ fn busy_near_composer(screen: &vt100::Screen, prompt_row: u16, rows_above: u16) 
 ///
 /// Unlike [`composer_is_empty`] it makes no demand of the *content* — a
 /// draft is exactly what it expects to find.
-fn composer_block_text(screen: &vt100::Screen, agent: TurnAgent) -> Option<String> {
+pub(crate) fn composer_block_text(screen: &vt100::Screen, agent: TurnAgent) -> Option<String> {
     if screen.alternate_screen() {
         return None;
     }
@@ -518,6 +518,18 @@ fn composer_block_text(screen: &vt100::Screen, agent: TurnAgent) -> Option<Strin
         }
         TurnAgent::Codex => {
             let prompt_row = codex_prompt_row(screen)?;
+            // Same reasoning as the Claude branch. `codex_prompt_row`
+            // only rejects a *boxed* dialog (its rows start with `│`);
+            // an unboxed `› 1. Yes` option list would pass. Requiring
+            // the caret to sit in the composer's edit region is what
+            // separates a draft renga typed from a menu selection.
+            if screen.hide_cursor() {
+                return None;
+            }
+            let (cursor_row, cursor_col) = screen.cursor_position();
+            if cursor_row != prompt_row || cursor_col < CODEX_EDIT_COL {
+                return None;
+            }
             Some(format!("{}\n", row_text(screen, prompt_row)))
         }
     }
@@ -598,6 +610,11 @@ pub(crate) fn codex_turn_readiness(screen: &vt100::Screen) -> TurnReadiness {
         _ => TurnReadiness::NotReady,
     }
 }
+
+/// First editable column of Codex's composer — the glyph plus its
+/// separating space. Mirrors the column
+/// [`codex_prompt_allows_peer_nudge_on_screen`] treats as "empty".
+const CODEX_EDIT_COL: u16 = 2;
 
 /// Bottom-most row carrying Codex's `›` composer glyph, searched the
 /// same way [`codex_prompt_allows_peer_nudge_on_screen`] searches.
@@ -788,8 +805,6 @@ impl App {
         pane_id: usize,
         bytes: &[u8],
     ) -> std::result::Result<(), ipc::CodedError> {
-        #[cfg(test)]
-        self.user_turn_writes.push((pane_id, bytes.to_vec()));
         let pane = self
             .workspaces
             .get_mut(ws_index)
@@ -800,7 +815,32 @@ impl App {
                     format!("pane {pane_id} vanished before delivery"),
                 )
             })?;
-        write_input_to_pane(pane, bytes, false)
+        // `Pane::write_input` answers `Ok(())` whether it wrote the
+        // bytes or found the pane already gone, and flips `exited` when
+        // the write itself fails. Without reading that flag back, a
+        // failed Enter looks like a successful one — and the exited
+        // pane's composer then reads as `None`, which the submit stage
+        // scores as "the draft was consumed". That is a false success
+        // about a turn nobody received.
+        if pane.exited {
+            return Err(ipc::CodedError::new(
+                ipc::err_code::USER_TURN_UNSUPPORTED_TARGET,
+                format!("pane {pane_id}'s process has exited; nothing was written"),
+            ));
+        }
+        write_input_to_pane(pane, bytes, false)?;
+        if pane.exited {
+            return Err(ipc::CodedError::new(
+                ipc::err_code::USER_TURN_UNSUPPORTED_TARGET,
+                format!(
+                    "pane {pane_id}'s process exited while renga was writing to it; the write \
+                     did not land"
+                ),
+            ));
+        }
+        #[cfg(test)]
+        self.user_turn_writes.push((pane_id, bytes.to_vec()));
+        Ok(())
     }
 
     /// Return true when an identical user turn was accepted within
@@ -986,6 +1026,12 @@ impl App {
         self.record_user_turn(target_id, from_pane, &normalized);
 
         if let Err(e) = self.write_user_turn_bytes(target_ws, target_id, &payload) {
+            // The write is known not to have landed, so the ledger entry
+            // recorded a moment ago would suppress a legitimate retry
+            // for nothing. Take it back — the entry exists to cover
+            // *uncertain* writes, not failed ones.
+            self.recent_user_turn_sends
+                .remove(&(target_id, from_pane, normalized.clone()));
             answer(Err(e));
             return;
         }
