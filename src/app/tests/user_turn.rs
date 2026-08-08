@@ -1336,3 +1336,86 @@ fn a_failed_body_write_leaves_no_dedupe_trace() {
     assert!(app.pending_user_turns.is_empty());
     app.shutdown();
 }
+
+/// An empty Codex composer can stay painted while a dialog owns input.
+/// The caret is what says which, so the nudge gate's "cursor anywhere
+/// at or above the prompt" is not enough to authorize a write.
+#[test]
+fn a_codex_prompt_without_the_caret_is_not_ready() {
+    // Caret parked up in the transcript.
+    assert_eq!(
+        codex_readiness_of(
+            "\x1b[2J\x1b[H\x1b[?25hApprove this command?\r\n\u{203A} \x1b[1;1H".as_bytes(),
+            8,
+            40
+        ),
+        TurnReadiness::NotReady
+    );
+    // Caret in the composer's edit cell: ready.
+    assert_eq!(
+        codex_readiness_of(
+            "\x1b[2J\x1b[H\x1b[?25hdone\r\n\u{203A} \x1b[2;3H".as_bytes(),
+            8,
+            40
+        ),
+        TurnReadiness::Ready
+    );
+}
+
+/// The handler's pre-flight check catches a nudge queued *before* the
+/// turn. This is the other order: a channel message arriving while the
+/// body settles. The nudge flush runs first in the frame, so without a
+/// guard it would type into a composer already holding our body and the
+/// confirm stage would submit the concatenation.
+#[test]
+fn a_nudge_queued_mid_delivery_is_not_typed_into_the_composer() {
+    let (mut app, pane_id) = app_with_ready_claude_pane();
+    let (tx, _rx) = oneshot::channel();
+    app.handle_peer_send_user_turn(pane_id, &ipc::PaneRef::Id(pane_id), "/loop".into(), tx);
+    assert_eq!(app.pending_user_turns.len(), 1);
+
+    // A channel message lands for the same pane, mid-delivery.
+    app.pending_codex_peer_messages
+        .entry(pane_id)
+        .or_default()
+        .push_back(PendingCodexPeerDelivery::Draft(PendingCodexPeerMessage {
+            from_pane: 99,
+            from_name: None,
+            from_kind: None,
+        }));
+    app.flush_pending_codex_peer_messages();
+
+    assert!(
+        app.panes_with_user_turn_in_flight().contains(&pane_id),
+        "the delivery is still in flight"
+    );
+    assert!(
+        app.pending_codex_peer_messages.contains_key(&pane_id),
+        "the nudge must stay queued, not be typed into our composer"
+    );
+    app.shutdown();
+}
+
+/// Normalization removes the incidental trailing newline and nothing
+/// else: trimming whitespace generally would silently reshape the
+/// delivered message, and would strip a trailing tab past the rule
+/// that exists to refuse it.
+#[test]
+fn normalization_strips_only_the_trailing_newline() {
+    assert_eq!(
+        normalize_user_turn_body("/clear\n\n").expect("normalizes"),
+        "/clear"
+    );
+    assert_eq!(
+        normalize_user_turn_body("keep me  ").expect("normalizes"),
+        "keep me  ",
+        "intentional trailing spaces are part of the message"
+    );
+    // A trailing tab must still reach the rule that refuses it rather
+    // than being quietly trimmed away.
+    let (mut app, pane_id) = app_with_ready_claude_pane();
+    let err = user_turn_result(&mut app, pane_id, ipc::PaneRef::Id(pane_id), "foo\t")
+        .expect_err("trailing tab refused");
+    assert_eq!(err.code, Some(ipc::err_code::USER_TURN_INVALID_BODY));
+    app.shutdown();
+}

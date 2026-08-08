@@ -461,10 +461,18 @@ impl App {
         self.materialize_unfocused_codex_peer_notification();
         let now = Instant::now();
         let active_tab = self.active_tab;
+        // A user-turn delivery owns that composer until it finishes.
+        // This flush runs first in the frame, so typing a nudge into a
+        // composer that already holds a body would make the submitted
+        // turn the concatenation of the two (Issue #323).
+        let user_turn_panes = self.panes_with_user_turn_in_flight();
         let mut empty_panes = Vec::new();
         for (ws_idx, ws) in self.workspaces.iter_mut().enumerate() {
             let pane_ids: Vec<usize> = ws.panes.keys().copied().collect();
             for pane_id in pane_ids {
+                if user_turn_panes.contains(&pane_id) {
+                    continue;
+                }
                 // Only the pane the human is actually looking at is
                 // exempt from PTY nudges (the focused-pane overlay
                 // covers it). A background tab's `focused_pane_id` is

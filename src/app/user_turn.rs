@@ -605,6 +605,17 @@ pub(crate) fn codex_turn_readiness(screen: &vt100::Screen) -> TurnReadiness {
     if !codex_composer_is_empty(screen, prompt_row) {
         return TurnReadiness::NotReady;
     }
+    // The nudge gate accepts a cursor on any row at or above the
+    // prompt, which is fine for a nudge but not for authorizing a
+    // write: an empty composer can stay painted while a dialog or
+    // another widget owns input, and the caret is what says which.
+    if screen.hide_cursor() {
+        return TurnReadiness::NotReady;
+    }
+    let (cursor_row, cursor_col) = screen.cursor_position();
+    if cursor_row != prompt_row || cursor_col > CODEX_EDIT_COL {
+        return TurnReadiness::NotReady;
+    }
     match codex_prompt_allows_peer_nudge_on_screen(screen) {
         Some(true) => TurnReadiness::Ready,
         _ => TurnReadiness::NotReady,
@@ -656,7 +667,10 @@ pub(crate) fn normalize_user_turn_body(body: &str) -> std::result::Result<String
     // A trailing newline is what a heredoc, `$(cat file)` or a generated
     // string carries incidentally. Keeping it would make `/clear\n`
     // "multi-line" and refuse it with a reason that is false for it.
-    let normalized = normalized.trim_end().to_string();
+    // Only newlines: trimming whitespace generally would silently
+    // reshape the delivered message, and would strip a trailing tab
+    // past the rule below that exists to refuse it.
+    let normalized = normalized.trim_end_matches('\n').to_string();
     if normalized.trim().is_empty() {
         return Err(ipc::CodedError::new(
             ipc::err_code::USER_TURN_INVALID_BODY,
@@ -1047,6 +1061,21 @@ impl App {
             deadline: now + USER_TURN_DEADLINE,
         });
         self.dirty = true;
+    }
+
+    /// Panes with a user-turn delivery in flight.
+    ///
+    /// `flush_pending_codex_peer_messages` consults this before typing
+    /// a nudge: it runs earlier in the same frame, so without it a
+    /// channel message that arrives *during* the settle window would
+    /// type its nudge into a composer already holding our body, and the
+    /// confirm stage would then submit the concatenation. The handler's
+    /// own pre-flight check covers the opposite order.
+    pub(crate) fn panes_with_user_turn_in_flight(&self) -> HashSet<usize> {
+        self.pending_user_turns
+            .iter()
+            .map(|p| p.target_pane)
+            .collect()
     }
 
     /// Advance every in-flight user turn by one frame. Called from the
