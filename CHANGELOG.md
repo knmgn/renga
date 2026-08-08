@@ -44,7 +44,11 @@ rules in [`docs/semver-policy-2.0.md`](./docs/semver-policy-2.0.md).
   instead of claiming success. Multi-line bodies go out as a bracketed
   paste, and are refused (`user_turn_invalid_body`) when the target has
   not enabled bracketed paste, since typing raw newlines would submit
-  the first line and drive the UI with the rest. An identical user turn
+  the first line and drive the UI with the rest. A body too long for a
+  **Codex** composer's single row is refused too — renga can follow a
+  wrapped Claude composer across its continuation rows but has no
+  verified model of Codex's, and typing a body in that it then cannot
+  observe or submit is worse than declining it. An identical user turn
   to the same pane within 5s is suppressed and reports
   `status: "duplicate_suppressed"` — a separate ledger from the channel
   dedupe window, so neither mode can swallow the other.
