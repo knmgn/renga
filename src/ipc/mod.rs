@@ -117,6 +117,21 @@ pub const CAP_SPAWN_TAB: &str = "spawn_tab";
 /// fail closed when it is absent.
 pub const CAP_CALLER_SCOPE_CLOSE_IDENTITY: &str = "caller_scope_close_identity";
 
+/// Capability token advertised by servers that understand the
+/// `deliver` field on [`Request::PeerSend`] — specifically
+/// [`PeerDelivery::UserTurn`], which types the body into the target
+/// agent's composer and submits it as a real user turn (Issue #323).
+///
+/// Deliberately distinct from [`CAP_CROSS_TAB_PEERS`]: `Request` does
+/// not use `deny_unknown_fields`, so a #289-era server drops an unknown
+/// `deliver` field and performs a **channel** send instead — then
+/// answers `Ok`. The caller would be told a `/loop` was submitted as a
+/// user turn when in fact it only arrived as a `<channel>` tag that
+/// arms nothing. Clients sending [`PeerDelivery::UserTurn`] must gate
+/// on *this* token via [`client::send_request_requiring`] and fail
+/// closed when it is absent.
+pub const CAP_PEER_USER_TURN: &str = "peer_user_turn";
+
 /// Every capability token this build's server advertises. Additive by
 /// construction — clients match on tokens they know and ignore the
 /// rest.
@@ -125,6 +140,7 @@ pub const SERVER_CAPABILITIES: &[&str] = &[
     CAP_CROSS_TAB_PEERS,
     CAP_SPAWN_TAB,
     CAP_CALLER_SCOPE_CLOSE_IDENTITY,
+    CAP_PEER_USER_TURN,
 ];
 
 /// One IPC call from a client to the running renga instance.
@@ -384,10 +400,21 @@ pub enum Request {
     /// `Event::PeerInbox` on the event bus so any MCP peer subprocess
     /// subscribed on behalf of the target can push it out as a
     /// `notifications/claude/channel` frame.
+    ///
+    /// `deliver` (Issue #323) selects between that channel delivery and
+    /// [`PeerDelivery::UserTurn`]. It is a **new optional input with a
+    /// prior-behavior-preserving default** (`docs/semver-policy.md` §3):
+    /// omitted on the wire whenever it is `Channel`, so a legacy request
+    /// and a `deliver: "channel"` request serialize to identical bytes.
+    /// Send `UserTurn` only through [`client::send_request_requiring`]
+    /// with [`CAP_PEER_USER_TURN`] — an older server ignores the field
+    /// and silently downgrades to a channel send.
     PeerSend {
         from_pane: usize,
         target: PaneRef,
         body: String,
+        #[serde(default, skip_serializing_if = "PeerDelivery::is_channel")]
+        deliver: PeerDelivery,
     },
     /// Publish the MCP client kind currently attached to a pane.
     /// Sent by `renga mcp-peer` after startup so pane/peer listings can
@@ -582,6 +609,37 @@ pub enum TabSelector {
 pub enum Direction {
     Vertical,
     Horizontal,
+}
+
+/// How a [`Request::PeerSend`] body reaches the recipient (Issue #323).
+///
+/// The two modes are semantically different deliveries, not two
+/// encodings of one: a channel message is *shown* to the recipient
+/// without taking its turn, while a user turn *is* a turn and therefore
+/// arms slash commands (`/loop`, `/clear`) that a channel tag never
+/// arms. Naming the difference in the request keeps it visible in the
+/// API instead of hiding it behind "just send keys".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PeerDelivery {
+    /// Emit `Event::PeerInbox`; the recipient's MCP peer subprocess
+    /// pushes it as a `notifications/claude/channel` frame (Claude) or
+    /// queues it behind a pane-local nudge (Codex). The default, and
+    /// the only behavior that existed before #323.
+    #[default]
+    Channel,
+    /// Type the body into the recipient's composer and submit it, so it
+    /// lands as a real user turn. Gated on [`CAP_PEER_USER_TURN`].
+    UserTurn,
+}
+
+impl PeerDelivery {
+    /// `true` for the default mode. Used as serde's
+    /// `skip_serializing_if` so a `Channel` request is byte-identical
+    /// on the wire to a pre-#323 one.
+    pub fn is_channel(&self) -> bool {
+        matches!(self, PeerDelivery::Channel)
+    }
 }
 
 /// Peer client type published by a pane's attached MCP subprocess.
@@ -823,6 +881,57 @@ pub mod err_code {
     /// Deliberately distinct from `SPLIT_REFUSED`, which is about pane
     /// capacity *inside* one tab.
     pub const TAB_LIMIT_REACHED: &str = "tab_limit_reached";
+
+    // ── user-turn delivery (Issue #323) ───────────────────────
+    //
+    // The five codes below all describe one `PeerSend` whose
+    // `deliver` was `user_turn`. They split along one axis the
+    // caller genuinely needs: whether any bytes reached the target's
+    // PTY. `USER_TURN_NOT_READY` / `USER_TURN_BUSY` /
+    // `USER_TURN_UNSUPPORTED_TARGET` / `USER_TURN_INVALID_BODY`
+    // guarantee **nothing was written**, so an identical retry is
+    // safe. `USER_TURN_STALLED` does not.
+
+    /// The target pane is not in a state that accepts a turn: no
+    /// agent composer could be positively identified on screen, the
+    /// composer already holds a draft, or a modal / blocking prompt
+    /// is up. Detection is deliberately *positive* — anything the
+    /// screen reader cannot prove is an empty, focused composer is
+    /// refused — so an unrecognized Claude/Codex UI revision fails
+    /// closed here rather than typing a turn into a dialog.
+    ///
+    /// Retryable: nothing was written to the PTY. Callers should
+    /// resolve the blocker (usually with `send_keys`) and retry.
+    pub const USER_TURN_NOT_READY: &str = "user_turn_not_ready";
+    /// The target agent is mid-turn (its "interrupt" affordance is on
+    /// screen). Refused rather than queued: the recipient's own
+    /// queue-while-busy affordance would turn "this call submitted a
+    /// turn" into "this may become a turn later", and a permission
+    /// dialog can appear between the draft and the Enter.
+    ///
+    /// Retryable: nothing was written to the PTY.
+    pub const USER_TURN_BUSY: &str = "user_turn_busy";
+    /// The target pane is not running an agent that takes turns (a
+    /// plain shell, a full-screen TUI, or a pane whose startup
+    /// command has not run yet). Deliberately distinct from
+    /// `USER_TURN_NOT_READY`: retrying will not help until something
+    /// else changes what the pane is running.
+    pub const USER_TURN_UNSUPPORTED_TARGET: &str = "user_turn_unsupported_target";
+    /// The body cannot be typed as a turn: it is empty/whitespace, it
+    /// carries control characters, or it is multi-line and the target
+    /// has not enabled bracketed paste (raw newlines would submit the
+    /// first line and drive the UI with the rest).
+    ///
+    /// Retryable only with a different body; nothing was written.
+    pub const USER_TURN_INVALID_BODY: &str = "user_turn_invalid_body";
+    /// Body bytes reached the target's composer but submission was
+    /// never observed — the draft changed under us before Enter, or
+    /// Enter did not consume it within the deadline. **The outcome is
+    /// uncertain and bytes were written**: the caller must inspect
+    /// the pane before retrying. An immediate identical retry is
+    /// suppressed by the user-turn dedupe window rather than firing a
+    /// second `/clear`.
+    pub const USER_TURN_STALLED: &str = "user_turn_stalled";
 }
 
 /// App-side error carrying a free-form message plus an optional
@@ -1866,8 +1975,62 @@ mod tests {
             from_pane: 1,
             target: PaneRef::Name("worker".into()),
             body: "hi".into(),
+            deliver: PeerDelivery::Channel,
         };
         assert_eq!(roundtrip(&r), r);
+
+        let user_turn = Request::PeerSend {
+            from_pane: 1,
+            target: PaneRef::Name("worker".into()),
+            body: "/loop".into(),
+            deliver: PeerDelivery::UserTurn,
+        };
+        assert_eq!(roundtrip(&user_turn), user_turn);
+    }
+
+    /// #323's `deliver` is a new optional input with a
+    /// prior-behavior-preserving default, so a channel send must
+    /// serialize to the same bytes a pre-#323 client emitted — no
+    /// `deliver` key at all. If this ever regresses, every old renga
+    /// server starts seeing a field it will ignore, and the capability
+    /// gate stops being the only thing standing between a caller and a
+    /// silently downgraded user turn.
+    #[test]
+    fn peer_send_channel_omits_deliver_on_the_wire() {
+        let r = Request::PeerSend {
+            from_pane: 1,
+            target: PaneRef::Id(4),
+            body: "hi".into(),
+            deliver: PeerDelivery::Channel,
+        };
+        let v = serde_json::to_value(&r).expect("serialize");
+        assert!(
+            v.get("deliver").is_none(),
+            "channel send must not carry `deliver`: {v}"
+        );
+
+        let user_turn = Request::PeerSend {
+            from_pane: 1,
+            target: PaneRef::Id(4),
+            body: "hi".into(),
+            deliver: PeerDelivery::UserTurn,
+        };
+        let v = serde_json::to_value(&user_turn).expect("serialize");
+        assert_eq!(v.get("deliver").and_then(|d| d.as_str()), Some("user_turn"));
+    }
+
+    /// A request emitted by a pre-#323 client has no `deliver` field.
+    /// It must land as a channel send, never as a user turn.
+    #[test]
+    fn legacy_peer_send_json_deserializes_as_channel() {
+        let json = r#"{"cmd":"peer_send","from_pane":1,"target":{"id":4},"body":"hi"}"#;
+        match serde_json::from_str::<Request>(json).expect("deserialize legacy peer_send") {
+            Request::PeerSend { deliver, body, .. } => {
+                assert_eq!(deliver, PeerDelivery::Channel);
+                assert_eq!(body, "hi");
+            }
+            other => panic!("expected PeerSend, got {other:?}"),
+        }
     }
 
     fn peer_info_with_ids_only(id: usize) -> PeerInfo {

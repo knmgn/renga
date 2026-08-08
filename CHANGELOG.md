@@ -7,6 +7,54 @@ and from v1.0 onward this project adheres to
 [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html) under the
 rules in [`docs/semver-policy-2.0.md`](./docs/semver-policy-2.0.md).
 
+## [Unreleased]
+
+### Added
+
+- **`send_message` can deliver as a real user turn.** (#323)
+  `send_message(to_id, message, deliver="channel" | "user_turn")`.
+  `deliver="channel"` is the default and is unchanged byte-for-byte —
+  it is omitted on the wire, so a channel request serializes exactly as
+  a pre-#323 one did. `deliver="user_turn"` instead types the body into
+  the recipient agent's composer and submits it, so instructions that
+  only arm on a genuine user turn (`/loop`, `/clear`, slash commands
+  generally) actually take effect. Previously this was reachable only
+  by driving `send_keys` by hand — write the text, verify it landed,
+  send Enter as a *separate* call — a discipline enforced by prose, and
+  therefore one that kept breaking.
+
+  renga now owns that sequence. It refuses rather than guesses: the
+  target must present a positively identified, empty agent composer
+  with the caret in it, so a permission prompt, a folder-trust dialog,
+  a half-typed human draft, or any screen renga cannot read is
+  **refused with zero bytes written** (`user_turn_not_ready`), and a
+  mid-turn agent is refused too (`user_turn_busy`) rather than queued.
+  Body bytes and Enter are separate PTY writes with a settle and a
+  stability check between them, and success is reported only once the
+  draft is observed to be consumed; a delivery that wrote bytes without
+  an observed submit reports `user_turn_stalled` and says so plainly
+  instead of claiming success. Multi-line bodies go out as a bracketed
+  paste, and are refused (`user_turn_invalid_body`) when the target has
+  not enabled bracketed paste, since typing raw newlines would submit
+  the first line and drive the UI with the rest. An identical user turn
+  to the same pane within 5s is suppressed and reports
+  `status: "duplicate_suppressed"` — a separate ledger from the channel
+  dedupe window, so neither mode can swallow the other.
+
+  On the wire: an additive `deliver` field on `peer_send`, gated on a
+  new `peer_user_turn` capability token. Version skew fails closed —
+  an older server would ignore the field and perform a channel send
+  while answering `Ok`, so the client refuses instead of reporting a
+  `/loop` that never armed.
+
+  **`send_keys` is unchanged.** Dialog control (folder-trust Enter,
+  permission `y`/`n`, `Shift+Tab`, `Ctrl+C`) is exactly the state where
+  "did the text land in the input box?" has no meaning, and a readiness
+  check there would either refuse the keystroke or delay it past the
+  moment it was meant for. The split is by intent: `send_keys` for raw
+  key input, `send_message(deliver="user_turn")` for "make this agent
+  take this as a turn".
+
 ## [2.0.0] — 2026-08-07
 
 ### Added

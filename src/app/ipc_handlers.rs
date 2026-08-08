@@ -108,6 +108,17 @@ impl App {
                 let result = self.handle_peer_send(from_pane, &target, body);
                 let _ = reply.send(result);
             }
+            AppCommand::PeerSendUserTurn {
+                from_pane,
+                target,
+                body,
+                reply,
+            } => {
+                // Owns its own `reply`: a delivery that gets as far as
+                // writing bytes is answered later, from
+                // `flush_pending_user_turns`.
+                self.handle_peer_send_user_turn(from_pane, &target, body, reply);
+            }
             AppCommand::PeerRegisterClient {
                 pane_id,
                 kind,

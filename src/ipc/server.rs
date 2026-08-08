@@ -29,7 +29,7 @@ use interprocess::local_socket::{prelude::*, ListenerOptions, Stream};
 
 use super::endpoint::{EndpointKind, EndpointName};
 use super::events::EventBus;
-use super::{err_code, Event, Request, Response, APP_REPLY_TIMEOUT};
+use super::{err_code, Event, PeerDelivery, Request, Response, APP_REPLY_TIMEOUT};
 use crate::app::AppCommand;
 
 /// Upper bound for waiting on the accept thread during shutdown.
@@ -592,16 +592,53 @@ fn dispatch_request(req: Request, command_tx: &Sender<AppCommand>) -> Response {
                 }
             }
         }
+        // Channel delivery keeps the pre-#323 path verbatim: the same
+        // `forward_unit` shape, the same `AppCommand::PeerSend`, the
+        // same `Response::ok_unit()`. User-turn delivery needs a data
+        // payload (it reports whether submission was observed) and
+        // answers from the App's per-frame flush rather than inline,
+        // so it gets its own command with a value-carrying reply.
         Request::PeerSend {
             from_pane,
             target,
             body,
+            deliver: PeerDelivery::Channel,
         } => forward_unit(command_tx, |reply| AppCommand::PeerSend {
             from_pane,
             target,
             body,
             reply,
         }),
+        Request::PeerSend {
+            from_pane,
+            target,
+            body,
+            deliver: PeerDelivery::UserTurn,
+        } => {
+            let (reply_tx, reply_rx) = oneshot::channel();
+            if command_tx
+                .send(AppCommand::PeerSendUserTurn {
+                    from_pane,
+                    target,
+                    body,
+                    reply: reply_tx,
+                })
+                .is_err()
+            {
+                return Response::err_coded(err_code::SHUTTING_DOWN, "app shutting down");
+            }
+            // The App answers this one asynchronously — it must not
+            // block its render loop on a settle delay — but bounds
+            // itself well inside `APP_REPLY_TIMEOUT`, so the ordinary
+            // timeout still means "the App is wedged".
+            match reply_rx.recv_timeout(APP_REPLY_TIMEOUT) {
+                Ok(Ok(payload)) => Response::ok_value(payload),
+                Ok(Err(err)) => err.into_response(),
+                Err(e) => {
+                    Response::err_coded(err_code::APP_TIMEOUT, format!("app did not respond: {e}"))
+                }
+            }
+        }
         Request::PeerRegisterClient { pane_id, kind } => {
             forward_unit(command_tx, |reply| AppCommand::PeerRegisterClient {
                 pane_id,

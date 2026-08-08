@@ -7,4 +7,5 @@ mod org_sidebar;
 mod overlay;
 mod pointer_input;
 mod tab_placement;
+mod user_turn;
 mod workspace_ops;

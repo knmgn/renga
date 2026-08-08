@@ -114,6 +114,23 @@ pub enum AppCommand {
         body: String,
         reply: oneshot::Sender<std::result::Result<(), ipc::CodedError>>,
     },
+    /// Deliver `body` to `target` as a real **user turn** (Issue #323):
+    /// type it into the recipient agent's composer and submit it, so
+    /// slash commands actually arm. Target resolution is identical to
+    /// [`AppCommand::PeerSend`]; everything after it differs.
+    ///
+    /// The reply is deferred: the App parks this `reply` in
+    /// [`App::pending_user_turns`] and answers from
+    /// `flush_pending_user_turns` once the settle → Enter → observe
+    /// sequence reaches a terminal state. Never emits
+    /// `Event::PeerInbox` — a user turn must not also arrive as a
+    /// channel tag.
+    PeerSendUserTurn {
+        from_pane: usize,
+        target: PaneRef,
+        body: String,
+        reply: oneshot::Sender<std::result::Result<serde_json::Value, ipc::CodedError>>,
+    },
     /// Publish the MCP client kind currently attached to a pane so
     /// peer/pane listings can surface push-vs-pull receive behavior.
     PeerRegisterClient {
@@ -315,6 +332,20 @@ pub struct App {
     /// dispatcher / worker can't paper the receiver's transcript with
     /// phantom user-turns. See renga#221 acceptance criterion #2.
     pub(crate) recent_peer_sends: HashMap<(usize, usize, String), Instant>,
+    /// In-flight `deliver="user_turn"` deliveries (Issue #323), each
+    /// holding the IPC reply channel it will answer once its
+    /// settle → Enter → observe sequence finishes. Driven once per
+    /// frame by [`App::flush_pending_user_turns`]; the App never
+    /// sleeps on one.
+    pub(crate) pending_user_turns: Vec<PendingUserTurn>,
+    /// Dedupe ledger for user-turn deliveries, keyed like
+    /// [`Self::recent_peer_sends`] but deliberately **separate** from
+    /// it: a channel message and a user turn are different intentional
+    /// operations, so an earlier `<channel>` report must not swallow a
+    /// later `/loop`. An entry is recorded only once readiness has
+    /// passed and bytes are about to be written, so a refusal leaves no
+    /// trace and an identical retry gets through.
+    pub(crate) recent_user_turn_sends: HashMap<(usize, usize, String), Instant>,
     // Reusable clipboard handle (lazy-initialized)
     pub(crate) clipboard: Option<arboard::Clipboard>,
     // Pane lifecycle event bus shared with IPC subscribers.

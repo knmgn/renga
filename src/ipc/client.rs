@@ -465,6 +465,12 @@ mod tests {
     /// primary use case, since an old server cannot advertise a new
     /// token and old servers are exactly what the probe must answer
     /// for. Pinned so a future change has to be deliberate.
+    ///
+    /// The list is pinned whole, so every addition lands here on
+    /// purpose. `peer_user_turn` is #323's, and earns a token for the
+    /// reason #304 does not: it changes what a request *does*, and an
+    /// older server would ignore the new `deliver` field and perform a
+    /// channel send while answering `Ok`.
     #[test]
     fn capability_exposure_mints_no_new_token() {
         assert_eq!(
@@ -474,6 +480,7 @@ mod tests {
                 super::super::CAP_CROSS_TAB_PEERS,
                 super::super::CAP_SPAWN_TAB,
                 super::super::CAP_CALLER_SCOPE_CLOSE_IDENTITY,
+                super::super::CAP_PEER_USER_TURN,
             ],
             "#304 is introspection only and adds no capability token"
         );
