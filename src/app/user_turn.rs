@@ -576,6 +576,14 @@ pub(crate) fn composer_block_text(screen: &vt100::Screen, agent: TurnAgent) -> O
     }
 }
 
+/// Dispatch the agent-specific readiness predicate for one screen.
+pub(crate) fn turn_readiness_on_screen(agent: TurnAgent, screen: &vt100::Screen) -> TurnReadiness {
+    match agent {
+        TurnAgent::Claude => claude_turn_readiness(screen),
+        TurnAgent::Codex => codex_turn_readiness(screen),
+    }
+}
+
 /// Readiness for a Claude pane.
 ///
 /// The composer is proven *positively*: a prompt glyph row sandwiched
@@ -742,11 +750,41 @@ pub(crate) fn normalize_user_turn_body(body: &str) -> std::result::Result<String
 /// which is renga's existing signal for "this app treats a paste as
 /// composer content" (see `App::paste_to_pane`). Single-line bodies are
 /// written verbatim so a leading `/` still reads as a slash command.
+/// Whether `body` fits on one row of a Codex composer.
+///
+/// renga can fingerprint a wrapped Claude input block (`ui.rs` already
+/// walks its continuation rows for caret rendering) but has no verified
+/// model of how Codex lays a wrapped composer out — and guessing one
+/// here would mean guessing which rows a bare Enter is about to submit.
+/// So an over-long Codex body is refused before anything is written
+/// rather than typed in and abandoned.
+fn codex_body_fits_on_one_row(body: &str, pane: &Pane) -> bool {
+    let cols = {
+        let Ok(parser) = pane.parser.lock() else {
+            return false;
+        };
+        parser.screen().size().1
+    };
+    let available = cols.saturating_sub(CODEX_EDIT_COL + 1) as usize;
+    unicode_width::UnicodeWidthStr::width(body) <= available
+}
+
 fn user_turn_payload(
     body: &str,
     pane: &Pane,
     pane_id: usize,
+    agent: TurnAgent,
 ) -> std::result::Result<Vec<u8>, ipc::CodedError> {
+    if agent == TurnAgent::Codex && !codex_body_fits_on_one_row(body, pane) {
+        return Err(ipc::CodedError::new(
+            ipc::err_code::USER_TURN_INVALID_BODY,
+            format!(
+                "message is too long for pane {pane_id}'s Codex composer, which renga can only \
+                 read one row of; it would be typed in and never submitted. Send a shorter body, \
+                 or use deliver=\"channel\"."
+            ),
+        ));
+    }
     if !body.contains('\n') {
         // Raw bytes are keystrokes, and Tab is a bound key in both
         // agents (completion / queue-message), not composer text —
@@ -894,6 +932,16 @@ impl App {
                 .into_error(pane_id)
                 .expect("NotReady always carries an error")
         })?;
+        // The *full* predicate, not merely "a composer is readable":
+        // `composer_block_text` accepts a draft and ignores busy chrome
+        // on purpose, because after the write a draft is exactly what
+        // it expects. Before the write, a draft or a busy footer that
+        // appeared since the outer check must still refuse — otherwise
+        // the body is appended to somebody's half-typed sentence and
+        // the confirm stage submits the pair.
+        if let Some(e) = turn_readiness_on_screen(agent, guard.screen()).into_error(pane_id) {
+            return Err(e);
+        }
         let Some(empty) = composer_block_text(guard.screen(), agent) else {
             return Err(TurnReadiness::NotReady
                 .into_error(pane_id)
@@ -1091,6 +1139,15 @@ impl App {
             return;
         }
 
+        // Readiness already proved this resolves; unwrapping to Claude
+        // would silently mis-read a Codex composer, so carry the real
+        // answer forward.
+        let Some(agent) = self.user_turn_agent(target_ws, target_id) else {
+            answer(Err(TurnReadiness::Unsupported
+                .into_error(target_id)
+                .expect("Unsupported always carries an error")));
+            return;
+        };
         let Some(pane) = self
             .workspaces
             .get_mut(target_ws)
@@ -1102,21 +1159,12 @@ impl App {
             )));
             return;
         };
-        let payload = match user_turn_payload(&normalized, pane, target_id) {
+        let payload = match user_turn_payload(&normalized, pane, target_id, agent) {
             Ok(v) => v,
             Err(e) => {
                 answer(Err(e));
                 return;
             }
-        };
-        // Readiness already proved this resolves; unwrapping to Claude
-        // would silently mis-read a Codex composer, so carry the real
-        // answer forward.
-        let Some(agent) = self.user_turn_agent(target_ws, target_id) else {
-            answer(Err(TurnReadiness::Unsupported
-                .into_error(target_id)
-                .expect("Unsupported always carries an error")));
-            return;
         };
 
         // Past this line bytes may be on the wire, so the dedupe entry

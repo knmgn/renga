@@ -1495,3 +1495,58 @@ fn a_modal_between_readiness_and_the_write_refuses_with_nothing_written() {
     );
     app.shutdown();
 }
+
+/// The pre-write recheck runs the *full* predicate, not merely "is a
+/// composer readable". `composer_block_text` accepts a draft and
+/// ignores busy chrome on purpose — after the write, a draft is what it
+/// expects — so relying on it alone would append the body to a human's
+/// half-typed sentence that appeared during the readiness race.
+#[test]
+fn a_draft_appearing_between_readiness_and_the_write_refuses() {
+    let (mut app, pane_id) = app_with_ready_claude_pane();
+    assert_eq!(app.user_turn_readiness(0, pane_id), TurnReadiness::Ready);
+    seed_claude_draft_pane(&mut app, "half-typed thought");
+
+    let err = user_turn_result(&mut app, pane_id, ipc::PaneRef::Id(pane_id), "/loop")
+        .expect_err("refused");
+    assert_eq!(err.code, Some(ipc::err_code::USER_TURN_NOT_READY));
+    assert!(
+        app.user_turn_writes.is_empty(),
+        "appended to somebody's draft: {:?}",
+        app.user_turn_writes
+    );
+    app.shutdown();
+}
+
+/// A Codex body long enough to wrap moves the caret off the composer
+/// row, and renga has no verified model of how Codex lays a wrapped
+/// composer out. Typing it in and never submitting it is the worst
+/// outcome, so it is refused before anything is written.
+#[test]
+fn an_over_long_codex_body_is_refused_before_writing() {
+    let mut app = App::new(40, 120).expect("App::new");
+    let pane_id = app.ws().focused_pane_id;
+    app.peer_client_kinds.insert(pane_id, PeerClientKind::Codex);
+    let cols = {
+        let pane = app.ws().panes.get(&pane_id).expect("pane");
+        let parser = pane.parser.lock().unwrap_or_else(|e| e.into_inner());
+        parser.screen().size().1
+    };
+    seed_focused_pane_screen(
+        &mut app,
+        "\x1b[2J\x1b[H\x1b[?25hdone\r\n\u{203A} \x1b[2;3H".as_bytes(),
+    );
+    assert_eq!(app.user_turn_readiness(0, pane_id), TurnReadiness::Ready);
+
+    let long = "x".repeat(cols as usize + 10);
+    let err = user_turn_result(&mut app, pane_id, ipc::PaneRef::Id(pane_id), &long)
+        .expect_err("too long for one row");
+    assert_eq!(err.code, Some(ipc::err_code::USER_TURN_INVALID_BODY));
+    assert!(app.user_turn_writes.is_empty());
+
+    // A body that does fit is still accepted.
+    let (tx, _rx) = oneshot::channel();
+    app.handle_peer_send_user_turn(pane_id, &ipc::PaneRef::Id(pane_id), "/loop".into(), tx);
+    assert_eq!(app.user_turn_writes, vec![(pane_id, b"/loop".to_vec())]);
+    app.shutdown();
+}
