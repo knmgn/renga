@@ -801,13 +801,17 @@ fn user_turn_payload(
     pane_id: usize,
     agent: TurnAgent,
 ) -> std::result::Result<Vec<u8>, ipc::CodedError> {
-    if agent == TurnAgent::Codex && !codex_body_fits_on_one_row(body, pane) {
+    // Codex composers are read one row at a time (see
+    // `codex_body_fits_on_one_row`), and a hard newline makes a second
+    // row just as surely as an over-long line wraps into one.
+    if agent == TurnAgent::Codex && (body.contains('\n') || !codex_body_fits_on_one_row(body, pane))
+    {
         return Err(ipc::CodedError::new(
             ipc::err_code::USER_TURN_INVALID_BODY,
             format!(
-                "message is too long for pane {pane_id}'s Codex composer, which renga can only \
-                 read one row of; it would be typed in and never submitted. Send a shorter body, \
-                 or use deliver=\"channel\"."
+                "message needs more than one row of pane {pane_id}'s Codex composer, which is \
+                 all renga can read back; it would be typed in and never submitted. Send a \
+                 shorter single-line body, or use deliver=\"channel\"."
             ),
         ));
     }
@@ -989,51 +993,57 @@ impl App {
         Ok(empty)
     }
 
-    /// The single place the user-turn path touches a PTY for the
-    /// *submit* key. Every byte it writes is recorded for tests (see
-    /// [`App::user_turn_writes`]), so "this path wrote nothing" is an
-    /// assertion and not a claim.
-    fn write_user_turn_bytes(
+    /// Re-prove the draft and write Enter **in one critical section**.
+    ///
+    /// The mirror of [`Self::snapshot_and_write_user_turn`], and needed
+    /// for the same reason with more at stake: the composer read that
+    /// decided to submit happened a few statements earlier, and the PTY
+    /// reader thread can replace the composer with a permission menu in
+    /// between. A bare `\r` arriving there answers the menu. Holding the
+    /// parser lock across the check and the write means the draft
+    /// proved is the draft Enter lands on; anything else refuses and
+    /// leaves the body sitting in the composer for a human to look at.
+    pub(crate) fn submit_user_turn_enter(
         &mut self,
         ws_index: usize,
         pane_id: usize,
-        bytes: &[u8],
+        agent: TurnAgent,
+        expected: &str,
     ) -> std::result::Result<(), ipc::CodedError> {
         let pane = self
             .workspaces
             .get_mut(ws_index)
             .and_then(|w| w.panes.get_mut(&pane_id))
-            .ok_or_else(|| {
-                ipc::CodedError::new(
-                    ipc::err_code::PANE_VANISHED,
-                    format!("pane {pane_id} vanished before delivery"),
-                )
-            })?;
-        // `Pane::write_input` answers `Ok(())` whether it wrote the
-        // bytes or found the pane already gone, and flips `exited` when
-        // the write itself fails. Without reading that flag back, a
-        // failed Enter looks like a successful one — and the exited
-        // pane's composer then reads as `None`, which the submit stage
-        // scores as "the draft was consumed". That is a false success
-        // about a turn nobody received.
+            .ok_or_else(|| stalled_error(pane_id, "the pane vanished before submit"))?;
         if pane.exited {
-            return Err(ipc::CodedError::new(
-                ipc::err_code::USER_TURN_UNSUPPORTED_TARGET,
-                format!("pane {pane_id}'s process has exited; nothing was written"),
+            return Err(stalled_error(
+                pane_id,
+                "the pane's process exited before submit",
             ));
         }
-        write_input_to_pane(pane, bytes, false)?;
+        let parser = std::sync::Arc::clone(&pane.parser);
+        let guard = parser
+            .lock()
+            .map_err(|_| stalled_error(pane_id, "the pane's screen became unreadable"))?;
+        match composer_block_text(guard.screen(), agent) {
+            Some(current) if current == expected => {}
+            _ => {
+                return Err(stalled_error(
+                    pane_id,
+                    "the composer stopped holding the confirmed draft, so Enter was withheld",
+                ))
+            }
+        }
+        write_input_to_pane(pane, b"\r", false)?;
         if pane.exited {
-            return Err(ipc::CodedError::new(
-                ipc::err_code::USER_TURN_UNSUPPORTED_TARGET,
-                format!(
-                    "pane {pane_id}'s process exited while renga was writing to it; the write \
-                     did not land"
-                ),
+            return Err(stalled_error(
+                pane_id,
+                "the pane's process exited while renga was submitting",
             ));
         }
+        drop(guard);
         #[cfg(test)]
-        self.user_turn_writes.push((pane_id, bytes.to_vec()));
+        self.user_turn_writes.push((pane_id, b"\r".to_vec()));
         Ok(())
     }
 
@@ -1326,7 +1336,17 @@ impl App {
                 // agent has to have taken the body as input before the
                 // submit key arrives, which is exactly what a combined
                 // write does not guarantee.
-                if let Err(e) = self.write_user_turn_bytes(ws_index, target_id, b"\r") {
+                let UserTurnStage::AwaitSubmit { draft } = &stage else {
+                    return Some(Err(stalled_error(target_id, "internal: bad submit stage")));
+                };
+                let Some(agent) = self.user_turn_agent(ws_index, target_id) else {
+                    return Some(Err(stalled_error(
+                        target_id,
+                        "the pane stopped being an agent pane before submit",
+                    )));
+                };
+                let draft = draft.clone();
+                if let Err(e) = self.submit_user_turn_enter(ws_index, target_id, agent, &draft) {
                     return Some(Err(e));
                 }
                 pending.stage = stage;

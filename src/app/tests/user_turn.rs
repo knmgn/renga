@@ -1764,3 +1764,60 @@ fn no_refusal_path_anywhere_writes_a_byte() {
 fn seed_claude_dialog_pane_for(app: &mut App, _pane_id: usize) {
     seed_claude_dialog_pane(app);
 }
+
+/// The Enter write gets the same atomic prove-and-write the body does.
+/// A modal replacing the composer between the decision to submit and
+/// the keystroke would otherwise have the bare `\r` answer it — the
+/// worst outcome this feature has, arriving through the half of the
+/// path that was not covered by the lock.
+#[test]
+fn enter_is_withheld_when_the_draft_stops_matching() {
+    let (mut app, pane_id) = app_with_ready_claude_pane();
+    let empty = {
+        let pane = app.ws().panes.get(&pane_id).expect("pane");
+        let parser = pane.parser.lock().unwrap_or_else(|e| e.into_inner());
+        super::super::user_turn::composer_block_text(parser.screen(), TurnAgent::Claude)
+            .expect("idle composer")
+    };
+    let agent = TurnAgent::Claude;
+
+    // Confirmed draft is one thing; the screen now shows another.
+    seed_claude_dialog_pane(&mut app);
+    let err = app
+        .submit_user_turn_enter(0, pane_id, agent, "\u{276F} /loop\n")
+        .expect_err("Enter must be withheld");
+    assert_eq!(err.code, Some(ipc::err_code::USER_TURN_STALLED));
+    assert!(
+        app.user_turn_writes.is_empty(),
+        "Enter reached a dialog: {:?}",
+        app.user_turn_writes
+    );
+
+    // With the screen still holding the confirmed draft, it goes out.
+    seed_claude_idle_pane(&mut app, b"");
+    app.submit_user_turn_enter(0, pane_id, agent, &empty)
+        .expect("matching draft submits");
+    assert_eq!(app.user_turn_writes, vec![(pane_id, b"\r".to_vec())]);
+    app.shutdown();
+}
+
+/// A hard newline makes a second Codex composer row just as surely as
+/// an over-long line wraps into one, and the width check never saw it.
+#[test]
+fn a_multiline_codex_body_is_refused() {
+    let mut app = App::new(40, 120).expect("App::new");
+    let pane_id = app.ws().focused_pane_id;
+    app.peer_client_kinds.insert(pane_id, PeerClientKind::Codex);
+    seed_focused_pane_screen(
+        &mut app,
+        "\x1b[?2004h\x1b[2J\x1b[H\x1b[?25hdone\r\n\u{203A} \x1b[2;3H".as_bytes(),
+    );
+    assert_eq!(app.user_turn_readiness(0, pane_id), TurnReadiness::Ready);
+
+    // Short enough by width, but two rows once rendered.
+    let err = user_turn_result(&mut app, pane_id, ipc::PaneRef::Id(pane_id), "a\nb")
+        .expect_err("multi-line Codex body refused");
+    assert_eq!(err.code, Some(ipc::err_code::USER_TURN_INVALID_BODY));
+    assert!(app.user_turn_writes.is_empty());
+    app.shutdown();
+}
