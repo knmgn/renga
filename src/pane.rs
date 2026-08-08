@@ -343,6 +343,15 @@ impl Pane {
         parser.screen_mut().set_scrollback(0);
     }
 
+    /// Simulate the PTY writer failing, which is what `write_input`
+    /// detects by flipping `exited`. Tests need this to cover the
+    /// "the pane died between readiness and the write" path, which is
+    /// otherwise only reachable by racing a real child process.
+    #[cfg(test)]
+    pub(crate) fn writer_fail_for_test(&mut self) {
+        self.exited = true;
+    }
+
     /// Check if the terminal is scrolled back.
     pub fn is_scrolled_back(&self) -> bool {
         let parser = self.parser.lock().unwrap_or_else(|e| e.into_inner());

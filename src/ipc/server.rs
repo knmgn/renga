@@ -29,7 +29,7 @@ use interprocess::local_socket::{prelude::*, ListenerOptions, Stream};
 
 use super::endpoint::{EndpointKind, EndpointName};
 use super::events::EventBus;
-use super::{err_code, Event, Request, Response, APP_REPLY_TIMEOUT};
+use super::{err_code, Event, PeerDelivery, Request, Response, APP_REPLY_TIMEOUT};
 use crate::app::AppCommand;
 
 /// Upper bound for waiting on the accept thread during shutdown.
@@ -592,16 +592,53 @@ fn dispatch_request(req: Request, command_tx: &Sender<AppCommand>) -> Response {
                 }
             }
         }
+        // Channel delivery keeps the pre-#323 path verbatim: the same
+        // `forward_unit` shape, the same `AppCommand::PeerSend`, the
+        // same `Response::ok_unit()`. User-turn delivery needs a data
+        // payload (it reports whether submission was observed) and
+        // answers from the App's per-frame flush rather than inline,
+        // so it gets its own command with a value-carrying reply.
         Request::PeerSend {
             from_pane,
             target,
             body,
+            deliver: PeerDelivery::Channel,
         } => forward_unit(command_tx, |reply| AppCommand::PeerSend {
             from_pane,
             target,
             body,
             reply,
         }),
+        Request::PeerSend {
+            from_pane,
+            target,
+            body,
+            deliver: PeerDelivery::UserTurn,
+        } => {
+            let (reply_tx, reply_rx) = oneshot::channel();
+            if command_tx
+                .send(AppCommand::PeerSendUserTurn {
+                    from_pane,
+                    target,
+                    body,
+                    reply: reply_tx,
+                })
+                .is_err()
+            {
+                return Response::err_coded(err_code::SHUTTING_DOWN, "app shutting down");
+            }
+            // The App answers this one asynchronously — it must not
+            // block its render loop on a settle delay — but bounds
+            // itself well inside `APP_REPLY_TIMEOUT`, so the ordinary
+            // timeout still means "the App is wedged".
+            match reply_rx.recv_timeout(APP_REPLY_TIMEOUT) {
+                Ok(Ok(payload)) => Response::ok_value(payload),
+                Ok(Err(err)) => err.into_response(),
+                Err(e) => {
+                    Response::err_coded(err_code::APP_TIMEOUT, format!("app did not respond: {e}"))
+                }
+            }
+        }
         Request::PeerRegisterClient { pane_id, kind } => {
             forward_unit(command_tx, |reply| AppCommand::PeerRegisterClient {
                 pane_id,
@@ -693,7 +730,7 @@ fn forward_unit(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ipc::{Direction, PaneRef, Request};
+    use crate::ipc::{Direction, PaneRef, PeerDelivery, Request};
     use std::sync::mpsc;
 
     #[test]
@@ -880,6 +917,67 @@ mod tests {
                 assert_eq!(data.get("id").and_then(|v| v.as_u64()), Some(11));
             }
             other => panic!("expected Ok, got {other:?}"),
+        }
+    }
+
+    /// The two `deliver` arms route to different App commands, and
+    /// which one a request lands on decides whether a body is *shown*
+    /// to the recipient or *typed into its composer and submitted*.
+    /// Swapping them would type every routine status report into a
+    /// recipient's prompt — so pin both directions.
+    #[test]
+    fn peer_send_routes_channel_and_user_turn_to_different_commands() {
+        let (tx, rx) = mpsc::channel::<AppCommand>();
+        let handle = thread::spawn(move || {
+            // Reply to each before waiting for the next: the caller
+            // blocks on the first reply, so draining both up front
+            // deadlocks.
+            let first = rx.recv().expect("channel send arrives");
+            match first {
+                AppCommand::PeerSend { body, reply, .. } => {
+                    assert_eq!(body, "status report");
+                    reply.send(Ok(())).unwrap();
+                }
+                other => panic!("channel delivery must not take the user-turn path: {other:?}"),
+            }
+            let second = rx.recv().expect("user turn arrives");
+            match second {
+                AppCommand::PeerSendUserTurn { body, reply, .. } => {
+                    assert_eq!(body, "/loop");
+                    reply
+                        .send(Ok(serde_json::json!({ "status": "submitted" })))
+                        .unwrap();
+                }
+                other => panic!("user-turn delivery must not take the channel path: {other:?}"),
+            }
+        });
+
+        // A pre-#323 caller sends no `deliver` at all; that deserializes
+        // to Channel, which is the case this must never mis-route.
+        let legacy: Request = serde_json::from_str(
+            r#"{"cmd":"peer_send","from_pane":1,"target":{"id":4},"body":"status report"}"#,
+        )
+        .expect("legacy peer_send");
+        let channel_resp = dispatch_request(legacy, &tx);
+        let user_turn_resp = dispatch_request(
+            Request::PeerSend {
+                from_pane: 1,
+                target: PaneRef::Id(4),
+                body: "/loop".into(),
+                deliver: PeerDelivery::UserTurn,
+            },
+            &tx,
+        );
+        handle.join().unwrap();
+
+        // Channel keeps the pre-#323 unit reply verbatim.
+        assert_eq!(channel_resp, Response::ok_unit());
+        match user_turn_resp {
+            Response::Ok { data } => assert_eq!(
+                data.get("status").and_then(|v| v.as_str()),
+                Some("submitted")
+            ),
+            other => panic!("expected Ok with a payload, got {other:?}"),
         }
     }
 

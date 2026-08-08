@@ -480,12 +480,17 @@ fn tools_spec() -> Value {
         },
         {
             "name": "send_message",
-            "description": "Send a message to another pane in any renga tab. Claude recipients see it as a <channel source=\"renga-peers\"> tag; Codex panes receive a pane-local nudge from renga and then read the actual queued message via `check_messages`. A numeric to_id reaches every tab; a name resolves ONLY within your own tab — pane names are unique per tab, not globally, so a pane in another tab cannot be addressed by an unqualified name even if the name is unique right now. Use the numeric id from list_peers for cross-tab sends.",
+            "description": "Send a message to another pane in any renga tab. A numeric to_id reaches every tab; a name resolves ONLY within your own tab — pane names are unique per tab, not globally, so a pane in another tab cannot be addressed by an unqualified name even if the name is unique right now. Use the numeric id from list_peers for cross-tab sends. `deliver` picks between two semantically different deliveries: the default channel tag, which does NOT take the recipient's turn and does NOT arm slash commands, and `user_turn`, which types the message into the recipient's composer and submits it as a real user turn (so `/loop`, `/clear` and friends actually run). Neither one is send_keys: send_keys writes raw bytes for dialogs and key chords, with no input-box precondition.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "to_id":   { "type": "string", "description": "Recipient pane id (from list_peers; works across tabs) or stable name (own tab only)." },
-                    "message": { "type": "string", "description": "Text to deliver." }
+                    "message": { "type": "string", "description": "Text to deliver." },
+                    "deliver": {
+                        "type": "string",
+                        "enum": ["channel", "user_turn"],
+                        "description": "How the body reaches the recipient. `channel` (default, unchanged behavior) delivers it as a <channel source=\"renga-peers\"> tag to Claude recipients, or as a pane-local nudge to Codex panes that then read it via `check_messages` — good for reports and acks, because it does not hijack the recipient's turn. `user_turn` instead types the body into the recipient agent's composer and submits it, so it arrives as a genuine user turn: use it for `/loop`, `/clear` and any instruction that only takes effect when a turn is actually taken. renga owns the mechanics (readiness check, settle, separate Enter, submission check) — do NOT hand-roll it with send_keys. `user_turn` refuses rather than guessing: [user_turn_busy] the agent is mid-turn, [user_turn_not_ready] a permission prompt / modal / existing draft is in the way or the screen is unreadable, [user_turn_unsupported_target] the pane is not running Claude or Codex. Those three guarantee nothing was written, so retry is safe once you clear the blocker (answering a dialog is still send_keys' job). [user_turn_stalled] is different: the body WAS typed but the submit was not observed, so inspect the pane before retrying. An identical user_turn to the same pane within 5s is suppressed and reports status=\"duplicate_suppressed\"."
+                    }
                 },
                 "required": ["to_id", "message"]
             }
@@ -946,12 +951,37 @@ fn receive_mode_label(mode: ipc::PeerReceiveMode) -> &'static str {
     }
 }
 
+/// Parse the optional `deliver` argument. Absent is
+/// [`ipc::PeerDelivery::Channel`] — the pre-#323 behavior — and an
+/// unrecognized value is an invalid-params error rather than a silent
+/// downgrade to channel, which would look like success while arming
+/// nothing.
+pub(crate) fn parse_deliver_arg(args: &Value) -> std::result::Result<ipc::PeerDelivery, String> {
+    match args.get("deliver") {
+        None | Some(Value::Null) => Ok(ipc::PeerDelivery::Channel),
+        Some(Value::String(s)) => match s.as_str() {
+            "channel" => Ok(ipc::PeerDelivery::Channel),
+            "user_turn" => Ok(ipc::PeerDelivery::UserTurn),
+            other => Err(format!(
+                "send_message.deliver must be \"channel\" or \"user_turn\"; got {other:?}"
+            )),
+        },
+        Some(other) => Err(format!(
+            "send_message.deliver must be a string (\"channel\" or \"user_turn\"); got {other}"
+        )),
+    }
+}
+
 fn handle_send_message(id: &Value, args: &Value, ctx: &PeerCtx) -> Value {
     let to_id = args.get("to_id").and_then(|v| v.as_str()).unwrap_or("");
     let message = args.get("message").and_then(|v| v.as_str()).unwrap_or("");
     if to_id.is_empty() {
         return err_response(id, -32602, "send_message requires a non-empty to_id");
     }
+    let deliver = match parse_deliver_arg(args) {
+        Ok(d) => d,
+        Err(e) => return err_response(id, -32602, &e),
+    };
     let (pane_id, endpoint) = match &ctx.mode {
         Mode::Connected { pane_id, endpoint } => (*pane_id, endpoint),
         Mode::Detached { reason } => {
@@ -967,22 +997,26 @@ fn handle_send_message(id: &Value, args: &Value, ctx: &PeerCtx) -> Value {
         Ok(n) => PaneRef::Id(n),
         Err(_) => PaneRef::Name(to_id.to_string()),
     };
-    // Requires `cross_tab_peers`: a #288-era server (which also
-    // advertises `caller_scope`) still silently drops cross-tab
-    // targets, so reporting "Delivered" against one would be a lie.
-    // Fail closed and name the remedy instead.
+    // Channel delivery requires `cross_tab_peers`: a #288-era server
+    // (which also advertises `caller_scope`) still silently drops
+    // cross-tab targets, so reporting "Delivered" against one would be
+    // a lie. User-turn delivery requires `peer_user_turn` for the same
+    // class of reason, one step worse: a pre-#323 server ignores the
+    // unknown `deliver` field entirely and performs a *channel* send,
+    // which would report success for a `/loop` that never armed. Both
+    // fail closed and name the remedy instead.
+    let required_cap = required_cap_for(deliver);
     match client::send_request_requiring(
         endpoint,
         &Request::PeerSend {
             from_pane: pane_id,
             target,
             body: message.to_string(),
+            deliver,
         },
-        crate::ipc::CAP_CROSS_TAB_PEERS,
+        required_cap,
     ) {
-        Ok(Response::Ok { .. }) => {
-            ok_response(id, tool_text_result(&format!("Delivered to {to_id}.")))
-        }
+        Ok(Response::Ok { data }) => ok_response(id, send_message_ok_result(to_id, deliver, &data)),
         Ok(Response::Err { message, code }) => err_response(
             id,
             -32603,
@@ -991,6 +1025,48 @@ fn handle_send_message(id: &Value, args: &Value, ctx: &PeerCtx) -> Value {
         Ok(other) => err_response(id, -32603, &format!("unexpected renga response: {other:?}")),
         Err(e) => err_response(id, -32603, &format!("renga call failed: {e}")),
     }
+}
+
+/// Capability token a `send_message` delivery must see advertised
+/// before it is sent. Kept as its own function so the choice is
+/// assertable: collapsing it to a constant is exactly the regression
+/// that would let a `/loop` be silently downgraded to a channel tag by
+/// an older server.
+pub(crate) fn required_cap_for(deliver: ipc::PeerDelivery) -> &'static str {
+    match deliver {
+        ipc::PeerDelivery::Channel => crate::ipc::CAP_CROSS_TAB_PEERS,
+        ipc::PeerDelivery::UserTurn => crate::ipc::CAP_PEER_USER_TURN,
+    }
+}
+
+/// Build the success body for `send_message`.
+///
+/// The channel wording is unchanged and carries no structured content —
+/// existing callers match on that text. User-turn delivery reports what
+/// renga actually observed, and passes the server's payload through as
+/// `structuredContent` so a caller can branch on `status` without
+/// parsing prose.
+pub(crate) fn send_message_ok_result(
+    to_id: &str,
+    deliver: ipc::PeerDelivery,
+    data: &Value,
+) -> Value {
+    if deliver.is_channel() {
+        return tool_text_result(&format!("Delivered to {to_id}."));
+    }
+    let status = data.get("status").and_then(|v| v.as_str());
+    let text = match status {
+        Some("duplicate_suppressed") => format!(
+            "Not re-sent to {to_id}: an identical user turn was accepted within the last 5s, so \
+             nothing new was typed. Inspect the pane if you are unsure the first one landed."
+        ),
+        _ => format!("Submitted to {to_id} as a user turn (submission observed)."),
+    };
+    json!({
+        "content": [{ "type": "text", "text": text }],
+        "structuredContent": data.clone(),
+        "isError": false,
+    })
 }
 
 fn format_queued_messages(messages: &[QueuedPeerMessage]) -> String {
@@ -5033,6 +5109,156 @@ Commands:
         assert!(
             text.contains("renga not reachable"),
             "expected friendly detached text, got {text:?}"
+        );
+    }
+
+    // ── send_message deliver mode (#323) ──────────────────────
+
+    /// `deliver` is an addition, not a new requirement: every existing
+    /// caller passes `to_id` + `message` and must keep working.
+    #[test]
+    fn send_message_schema_offers_deliver_without_requiring_it() {
+        let spec = tools_spec();
+        let entry = spec
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t.get("name").and_then(|v| v.as_str()) == Some("send_message"))
+            .expect("send_message entry");
+        let schema = entry.get("inputSchema").expect("inputSchema");
+        let required: Vec<&str> = schema
+            .get("required")
+            .and_then(|r| r.as_array())
+            .expect("required array")
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert_eq!(required, vec!["to_id", "message"]);
+
+        let deliver = schema
+            .get("properties")
+            .and_then(|p| p.get("deliver"))
+            .expect("deliver property");
+        let values: Vec<&str> = deliver
+            .get("enum")
+            .and_then(|e| e.as_array())
+            .expect("deliver enum")
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert_eq!(values, vec!["channel", "user_turn"]);
+    }
+
+    #[test]
+    fn parse_deliver_arg_defaults_to_channel() {
+        assert_eq!(
+            parse_deliver_arg(&json!({})).unwrap(),
+            ipc::PeerDelivery::Channel
+        );
+        assert_eq!(
+            parse_deliver_arg(&json!({ "deliver": null })).unwrap(),
+            ipc::PeerDelivery::Channel
+        );
+        assert_eq!(
+            parse_deliver_arg(&json!({ "deliver": "channel" })).unwrap(),
+            ipc::PeerDelivery::Channel
+        );
+        assert_eq!(
+            parse_deliver_arg(&json!({ "deliver": "user_turn" })).unwrap(),
+            ipc::PeerDelivery::UserTurn
+        );
+    }
+
+    /// A typo must not quietly become a channel send: the caller would
+    /// be told their `/loop` was delivered when it only arrived as a
+    /// tag that arms nothing.
+    #[test]
+    fn parse_deliver_arg_rejects_unknown_values() {
+        assert!(parse_deliver_arg(&json!({ "deliver": "userturn" })).is_err());
+        assert!(parse_deliver_arg(&json!({ "deliver": "keys" })).is_err());
+        assert!(parse_deliver_arg(&json!({ "deliver": true })).is_err());
+    }
+
+    #[test]
+    fn handle_send_message_rejects_unknown_deliver_before_ipc() {
+        let ctx = detached_ctx("no renga");
+        let id = json!(1);
+        let resp = handle_send_message(
+            &id,
+            &json!({ "to_id": "2", "message": "hi", "deliver": "nonsense" }),
+            &ctx,
+        );
+        let code = resp
+            .get("error")
+            .and_then(|e| e.get("code"))
+            .and_then(|c| c.as_i64());
+        assert_eq!(code, Some(-32602));
+    }
+
+    /// The channel wording is what existing callers read. #323 must not
+    /// touch it, and must not start attaching structured content to it.
+    #[test]
+    fn channel_success_wording_is_unchanged() {
+        let out = send_message_ok_result("secretary", ipc::PeerDelivery::Channel, &Value::Null);
+        assert_eq!(
+            out.get("content")
+                .and_then(|c| c.get(0))
+                .and_then(|c| c.get("text"))
+                .and_then(|t| t.as_str()),
+            Some("Delivered to secretary.")
+        );
+        assert!(out.get("structuredContent").is_none());
+    }
+
+    #[test]
+    fn user_turn_success_reports_observed_submission() {
+        let data = json!({ "delivery": "user_turn", "status": "submitted", "target_id": 4 });
+        let out = send_message_ok_result("4", ipc::PeerDelivery::UserTurn, &data);
+        let text = out
+            .get("content")
+            .and_then(|c| c.get(0))
+            .and_then(|c| c.get("text"))
+            .and_then(|t| t.as_str())
+            .expect("text block");
+        assert!(text.contains("as a user turn"), "{text:?}");
+        assert_eq!(out.get("structuredContent"), Some(&data));
+    }
+
+    /// A suppressed retry reports success but must say plainly that
+    /// nothing new was typed — otherwise a caller recovering from
+    /// `user_turn_stalled` reads it as a fresh delivery.
+    #[test]
+    fn user_turn_duplicate_is_reported_as_suppressed() {
+        let data =
+            json!({ "delivery": "user_turn", "status": "duplicate_suppressed", "target_id": 4 });
+        let out = send_message_ok_result("4", ipc::PeerDelivery::UserTurn, &data);
+        let text = out
+            .get("content")
+            .and_then(|c| c.get(0))
+            .and_then(|c| c.get("text"))
+            .and_then(|t| t.as_str())
+            .expect("text block");
+        assert!(text.contains("Not re-sent"), "{text:?}");
+        assert!(text.contains("nothing new was typed"), "{text:?}");
+    }
+
+    /// A pre-#323 server ignores the unknown `deliver` field and does a
+    /// channel send while answering `Ok`. Only the capability gate
+    /// stands between that and a caller being told its `/loop` armed.
+    #[test]
+    fn user_turn_requires_its_own_capability_token() {
+        assert_eq!(
+            required_cap_for(ipc::PeerDelivery::UserTurn),
+            crate::ipc::CAP_PEER_USER_TURN
+        );
+        assert_eq!(
+            required_cap_for(ipc::PeerDelivery::Channel),
+            crate::ipc::CAP_CROSS_TAB_PEERS,
+            "channel delivery must keep its own, older gate"
+        );
+        assert_ne!(
+            required_cap_for(ipc::PeerDelivery::Channel),
+            required_cap_for(ipc::PeerDelivery::UserTurn)
         );
     }
 

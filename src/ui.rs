@@ -1352,7 +1352,7 @@ fn clamp_caret_col(col: u16, width: u16) -> Option<u16> {
 }
 
 /// Prompt glyphs Claude Code renders at the left edge of its input box.
-const CLAUDE_PROMPT_GLYPHS: &[&str] = &[
+pub(crate) const CLAUDE_PROMPT_GLYPHS: &[&str] = &[
     ">", "\u{276F}", // ❯
     "\u{203A}", // ›
     "\u{27E9}", // ⟩
@@ -1362,7 +1362,7 @@ const CLAUDE_PROMPT_GLYPHS: &[&str] = &[
 ];
 
 /// Columns scanned at the left of a row when looking for a prompt glyph.
-const CLAUDE_PROMPT_SCAN_COLS: u16 = 8;
+pub(crate) const CLAUDE_PROMPT_SCAN_COLS: u16 = 8;
 
 /// Maximum rows to walk downward from `prompt_row` while probing for
 /// a wrapped continuation of Claude's input box. Each continuation row
@@ -1418,7 +1418,7 @@ fn row_has_non_blank(screen: &vt100::Screen, row: u16) -> bool {
 /// Find the bottom-most row that contains a Claude prompt glyph
 /// (`>`/`❯`/…) in its first few columns. Returns `None` if no prompt
 /// row is visible (e.g. Claude is fully occluded by streaming).
-fn find_prompt_row(screen: &vt100::Screen) -> Option<u16> {
+pub(crate) fn find_prompt_row(screen: &vt100::Screen) -> Option<u16> {
     let screen_rows = screen.size().0;
     (0..screen_rows)
         .rev()
@@ -1434,7 +1434,7 @@ fn find_prompt_row(screen: &vt100::Screen) -> Option<u16> {
 /// Returns the last row that qualified as a wrapped continuation.
 /// Defaults to `prompt_row` when nothing below it looks like wrapped
 /// content.
-fn resolve_input_row_last(screen: &vt100::Screen, prompt_row: u16) -> u16 {
+pub(crate) fn resolve_input_row_last(screen: &vt100::Screen, prompt_row: u16) -> u16 {
     let screen_rows = screen.size().0;
     let mut last = prompt_row;
     let mut blank_streak = 0u16;

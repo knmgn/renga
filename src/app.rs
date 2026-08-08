@@ -22,6 +22,7 @@ mod pointer_input;
 mod runtime;
 mod selection;
 mod sidebar_input;
+mod user_turn;
 mod workspace_state;
 
 pub(crate) use self::app_state::CloseConfirm;
@@ -45,6 +46,7 @@ use self::pointer_input::{
     pane_local_coords_clamped, split_intent_for_edge, EdgeSide,
 };
 pub use self::selection::{SelectionTarget, TextSelection};
+use self::user_turn::PendingUserTurn;
 #[cfg(test)]
 use self::workspace_state::resolve_pane_ref_impl;
 pub use self::workspace_state::{DragTarget, FocusTarget, Workspace};
