@@ -1867,6 +1867,14 @@ mod tests {
     /// starts is the sharpest in-process test of "changes on restart"
     /// available; the wire half is covered by
     /// `wire_hello_reports_the_process_session_id`.
+    ///
+    /// This is also the pid-independence proof, and a stronger one
+    /// than inspecting the output for pid digits would be (a short
+    /// container pid like `7` appears inside 33 hex characters by
+    /// coincidence almost every run). Every mint below happens in one
+    /// process, so they all share a pid — any scheme deriving identity
+    /// from the pid, the way the endpoint already does, would collide
+    /// on the second iteration.
     #[test]
     fn minting_twice_never_yields_the_same_session_id() {
         let mut seen = std::collections::HashSet::new();
@@ -1875,22 +1883,6 @@ mod tests {
                 seen.insert(mint_session_id()),
                 "two simulated restarts produced the same session id; a client would \
                  reuse pane ids across a restart and address the wrong pane"
-            );
-        }
-    }
-
-    /// The whole reason for a new field: pid-derived identity is what
-    /// already failed. `server_pid` and the endpoint (which embeds the
-    /// pid) are one fact, and the OS recycles it.
-    #[test]
-    fn session_id_is_not_derived_from_the_pid() {
-        let pid = std::process::id();
-        let id = session_id();
-        for rendered in [format!("{pid}"), format!("{pid:x}")] {
-            assert!(
-                !id.contains(&rendered),
-                "session id {id} embeds the pid ({rendered}); pid re-use would then \
-                 make two different renga instances indistinguishable again"
             );
         }
     }
