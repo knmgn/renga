@@ -150,7 +150,7 @@ user-turn 配送を `send_keys` で自作しないでください。
 
 | ツール | 役割 |
 |---|---|
-| `server_info` | **実際に動いているサーバ**の capability トークン集合を、gate されたリクエストを一切試さずに返します (#304)。事前確認用です — `tab` セレクタを送る前に `spawn_tab` を確認できるので、送ってから `[server_too_old]` エラー文字列を読んで判断する必要がなくなります。まず `status` を見てください: `connected` なら `server.capabilities` が実サーバの申告そのもので、**そこが空配列なら本当に古いサーバ**という意味です。`detached` (renga から起動されていない) と `unreachable` (ソケットが無い) では `null` になり、これは「不明」であって「無い」ではありません — この 2 つから「トークンが無い」と結論しないでください。判定には `effective_capabilities` (サーバが申告し、かつこの mcp-peer ビルドが扱えるトークンの積集合) を使います。JSON-RPC エラーは決して返しません。ツール一覧にこのツール自体が無い場合、その renga は capability 公開より前のバージョンで、その不在自体が答えになります。 |
+| `server_info` | **実際に動いているサーバ**の capability トークン集合を、gate されたリクエストを一切試さずに返します (#304)。事前確認用です — `tab` セレクタを送る前に `spawn_tab` を確認できるので、送ってから `[server_too_old]` エラー文字列を読んで判断する必要がなくなります。まず `status` を見てください: `connected` なら `server.capabilities` が実サーバの申告そのもので、**そこが空配列なら本当に古いサーバ**という意味です。`detached` (renga から起動されていない) と `unreachable` (ソケットが無い) では `null` になり、これは「不明」であって「無い」ではありません — この 2 つから「トークンが無い」と結論しないでください。判定には `effective_capabilities` (サーバが申告し、かつこの mcp-peer ビルドが扱えるトークンの積集合) を使います。JSON-RPC エラーは決して返しません。ツール一覧にこのツール自体が無い場合、その renga は capability 公開より前のバージョンで、その不在自体が答えになります。<br /><br />あわせて `server.session_id` (#326) も返します。これは動作中の renga **プロセスインスタンス**の識別子で、再起動のたびに必ず変わります。pane id も再起動ごとに counter が初期化されるため、保存した pane id が再起動後に*別の生きている* pane へ黙って解決してしまいます — `(session_id, pane_id)` の組で保存し、読み直した session_id が違っていたら pane id を捨ててください。`server.pid` や `server.endpoint` で代用しないこと: endpoint は pid を埋め込んだ派生値なので実質 1 つの事実しかなく、pid は OS に再利用されます。`null` (report できない古い `connected` サーバを含む) は「不明」であって「変わっていない」ではありません — その場合は id の再利用をやめて名前で pane を解決し直してください。 |
 
 ### イベント監視
 

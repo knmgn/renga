@@ -11,6 +11,27 @@ rules in [`docs/semver-policy-2.0.md`](./docs/semver-policy-2.0.md).
 
 ### Added
 
+- **`server_info` reports a restart-unique `server.session_id`.** (#326)
+  Pane ids come from a counter that restarts at zero with the daemon, so
+  a pane id an orchestrator persisted keeps resolving after a restart —
+  cleanly, with no error, to a *different, live* pane. The two identity
+  fields already on the response could not rule that out: the endpoint
+  embeds the pid, making `server.pid` and `server.endpoint` one fact
+  rather than two, and the OS recycles pids. renga now mints an
+  identifier once per process — deliberately not derived from the pid —
+  and returns it as `server.session_id`, so a client can store
+  `(session_id, pane_id)` and discard the pane id when the session it
+  reads back differs.
+
+  Additive in both directions: the field is omitted on the wire when
+  unknown, so this server still looks byte-identical to a pre-#326 one
+  to a client that never asks for it, and no capability token gates it.
+  It is `null` on `detached` / `unreachable`, and also on a `connected`
+  server too old to report it — in every case that means **unknown**,
+  never "same session as before". The `session_token` from the
+  handshake remains off this surface: it is what a client checks
+  against `RENGA_TOKEN`, and publishing it was never the point.
+
 - **`send_message` can deliver as a real user turn.** (#323)
   `send_message(to_id, message, deliver="channel" | "user_turn")`.
   `deliver="channel"` is the default and is unchanged byte-for-byte —

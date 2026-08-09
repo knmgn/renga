@@ -531,7 +531,7 @@ fn tools_spec() -> Value {
         },
         {
             "name": "server_info",
-            "description": "Report the renga server this pane is attached to — its negotiated capability token set, its pid, and this client build's own version — WITHOUT attempting any capability-gated request. Use this to pre-flight before calling something that needs a capability (e.g. the `tab` selector on the spawn tools needs `spawn_tab`) instead of sending the call and reading a `[server_too_old]` error out of the failure. The result body (both `structuredContent` and the text block) has this shape: `{status, reason, server: {pid, endpoint, capabilities}, client: {name, version, pane_id, capabilities}, effective_capabilities}`. Check `status` FIRST, it is the discriminant: \"connected\" means `server.capabilities` is the live server's real advertisement, and an EMPTY list there means a genuinely old server that supports nothing; \"detached\" means this pane was not launched by renga; \"unreachable\" means renga's socket is gone or belongs to a different instance. In the latter two, `server.capabilities` and `effective_capabilities` are null, NOT empty — they are unknown, so never conclude a token is missing from those. Gate on `effective_capabilities` rather than `server.capabilities`: it is the subset that is both advertised by the running server and understood by this client build, which can differ because upgrading the renga binary on disk leaves the old server process running. `client.version` is this mcp-peer binary's version and is NOT the running server's version — do not gate on any version comparison. If you get a -32601 unknown-tool error, the renga binary that spawned this mcp-peer predates capability exposure — that absence is itself the answer.",
+            "description": "Report the renga server this pane is attached to — its negotiated capability token set, its pid, and this client build's own version — WITHOUT attempting any capability-gated request. Use this to pre-flight before calling something that needs a capability (e.g. the `tab` selector on the spawn tools needs `spawn_tab`) instead of sending the call and reading a `[server_too_old]` error out of the failure. The result body (both `structuredContent` and the text block) has this shape: `{status, reason, server: {pid, endpoint, capabilities, session_id}, client: {name, version, pane_id, capabilities}, effective_capabilities}`. Check `status` FIRST, it is the discriminant: \"connected\" means `server.capabilities` is the live server's real advertisement, and an EMPTY list there means a genuinely old server that supports nothing; \"detached\" means this pane was not launched by renga; \"unreachable\" means renga's socket is gone or belongs to a different instance. In the latter two, `server.capabilities` and `effective_capabilities` are null, NOT empty — they are unknown, so never conclude a token is missing from those. Gate on `effective_capabilities` rather than `server.capabilities`: it is the subset that is both advertised by the running server and understood by this client build, which can differ because upgrading the renga binary on disk leaves the old server process running. `client.version` is this mcp-peer binary's version and is NOT the running server's version — do not gate on any version comparison. `server.session_id` identifies the running renga PROCESS INSTANCE and changes on every restart, so pane ids — which restart from a fresh counter — are only safe to persist alongside it: store `(session_id, pane_id)` together and discard the pane id when the session_id you read back differs, otherwise a stale id can silently resolve to a different live pane. Do NOT substitute `server.pid` or `server.endpoint` for it (the endpoint embeds the pid, and pids get recycled). It is null whenever `server.capabilities` is, plus on a `connected` server too old to report it — in every one of those cases it is UNKNOWN, never \"same session\". If you get a -32601 unknown-tool error, the renga binary that spawned this mcp-peer predates capability exposure — that absence is itself the answer.",
             "inputSchema": { "type": "object", "properties": {} }
         },
         {
@@ -1238,6 +1238,11 @@ fn server_info_payload(probe: &ServerProbe) -> Value {
                 "pid": handshake.server_pid,
                 "endpoint": endpoint,
                 "capabilities": handshake.capabilities,
+                // Null here does NOT mean "no session" — it means the
+                // running server predates #326 and cannot say. Same
+                // rule as `capabilities` above: absence of a fact is
+                // not a fact.
+                "session_id": handshake.session_id,
             }),
             Some(*pane_id),
             Value::Null,
@@ -1248,13 +1253,23 @@ fn server_info_payload(probe: &ServerProbe) -> Value {
             reason,
         } => (
             "unreachable",
-            json!({ "pid": null, "endpoint": endpoint, "capabilities": null }),
+            json!({
+                "pid": null,
+                "endpoint": endpoint,
+                "capabilities": null,
+                "session_id": null,
+            }),
             Some(*pane_id),
             Value::String(reason.clone()),
         ),
         ServerProbe::Detached { reason } => (
             "detached",
-            json!({ "pid": null, "endpoint": null, "capabilities": null }),
+            json!({
+                "pid": null,
+                "endpoint": null,
+                "capabilities": null,
+                "session_id": null,
+            }),
             None,
             Value::String(reason.clone()),
         ),
@@ -1329,6 +1344,16 @@ fn format_server_info(probe: &ServerProbe) -> String {
                         .join(", ")
                 ));
             }
+            out.push_str(&match &handshake.session_id {
+                Some(sid) => format!(
+                    "session: {sid} (changes on every renga restart — pane ids stored \
+                     under a different session must not be reused)\n"
+                ),
+                None => "session: (UNKNOWN — this server predates session ids; a stored \
+                         pane id cannot be checked against it, so re-resolve panes by \
+                         name instead of reusing the id)\n"
+                    .to_string(),
+            });
             out.push_str(&format!(
                 "this client: {SERVER_NAME} v{SERVER_VERSION} (pane {pane_id})\n"
             ));
@@ -5737,10 +5762,15 @@ Commands:
 
     const TEST_ENDPOINT: &str = "/run/user/1000/renga/renga-4711.sock";
 
+    /// Shaped like a real one (`<nanos>-<entropy>`, both 16 hex) so a
+    /// test reading the payload sees what a caller would.
+    const TEST_SESSION_ID: &str = "17a3f9c2b4d10000-9f1c0d3ea7554b26";
+
     fn handshake_with(pid: u32, caps: &[&str]) -> client::ServerHandshake {
         client::ServerHandshake {
             server_pid: pid,
             capabilities: caps.iter().map(|s| (*s).to_string()).collect(),
+            session_id: Some(TEST_SESSION_ID.to_string()),
         }
     }
 
@@ -5923,6 +5953,53 @@ Commands:
             !serialized.contains("session_token") && !serialized.contains("token"),
             "must not surface the session token: {serialized}"
         );
+    }
+
+    /// Issue #326: the field a client pairs with a persisted pane id
+    /// has to actually reach it, under the documented path.
+    #[test]
+    fn server_info_publishes_the_server_session_id() {
+        let payload = server_info_payload(&connected_probe(&[crate::ipc::CAP_SPAWN_TAB]));
+        assert_eq!(payload["server"]["session_id"], json!(TEST_SESSION_ID));
+        assert!(
+            format_server_info(&connected_probe(&[])).contains(TEST_SESSION_ID),
+            "the text block must carry it too — an LLM caller reads that, not the \
+             structured payload"
+        );
+    }
+
+    /// The same trap as `capabilities`, on a newer boundary: a
+    /// connected server can still be too old to have a session id. A
+    /// caller that read `null` as "unchanged" would reuse pane ids
+    /// across a restart, which is the exact bug #326 exists to stop.
+    #[test]
+    fn server_info_session_id_is_null_whenever_it_is_unknown() {
+        let old_server = ServerProbe::Connected {
+            pane_id: 7,
+            endpoint: TEST_ENDPOINT.to_string(),
+            handshake: client::ServerHandshake {
+                server_pid: 4711,
+                capabilities: Vec::new(),
+                session_id: None,
+            },
+        };
+        assert_eq!(server_info_payload(&old_server)["status"], "connected");
+        assert!(
+            server_info_payload(&old_server)["server"]["session_id"].is_null(),
+            "a pre-#326 server reports an unknown session, not a fabricated one"
+        );
+        assert!(
+            format_server_info(&old_server).contains("UNKNOWN"),
+            "the text must not let a reader mistake a missing session id for a stable one"
+        );
+
+        for probe in not_connected_probes() {
+            let payload = server_info_payload(&probe);
+            assert!(
+                payload["server"]["session_id"].is_null(),
+                "never invent a session id for a server we never reached: {payload}"
+            );
+        }
     }
 
     /// `unreachable` still knows which socket it failed against — that

@@ -337,6 +337,7 @@ Result: text + `structuredContent`:
 | `server.capabilities` | string[] \| **null** | What the running server advertised, verbatim (unknown/future tokens passed through). **`[]` means the server was asked and supports nothing; `null` means it was never asked.** Never conflate the two. |
 | `server.pid` | int \| null | PID of the **server** process, not this client's. |
 | `server.endpoint` | string \| null | Socket/pipe queried — disambiguates concurrent renga instances. Retained on `unreachable` (we know what we failed to reach); `null` only when `detached`. |
+| `server.session_id` | string \| **null** | Identity of the running renga **process instance** (#326), minted once at start and changed by every restart. Pair it with any pane id you persist — see below. `null` whenever `server.capabilities` is, **and also on a `connected` pre-#326 server**, which is why it is not covered by the biconditional those two share. `null` always means unknown, never "unchanged". |
 | `client.name` | string | `"renga-peers"`. |
 | `client.version` | string | `CARGO_PKG_VERSION` of the **mcp-peer binary**, which is *not* the server's version — see below. |
 | `client.pane_id` | int \| null | Caller's pane; `null` when detached. |
@@ -348,6 +349,16 @@ consumer gets `None` rather than a silently-plausible default. Two
 biconditionals are pinned by test: `server.capabilities != null` ⟺
 `status == "connected"`, and `effective_capabilities != null` ⟺
 `status == "connected"`.
+
+**Persist pane ids as `(session_id, pane_id)`, never bare (#326).** Pane ids
+come from a counter that restarts at zero with the daemon, so a stored id
+outlives the pane it named and — after a restart — resolves cleanly to a
+*different, live* pane. No error is raised; the caller simply addresses a
+stranger. Before reusing a stored pane id, read `server.session_id` and drop
+the id unless it matches the session the id was minted in. `server.pid` and
+`server.endpoint` cannot substitute: the endpoint embeds the pid, so they are
+one fact, and the OS recycles pids. A `null` session id means the check is
+unavailable — re-resolve panes by name instead of reusing the id.
 
 **Gate on `effective_capabilities`, not `server.capabilities`.** The token
 describes the last hop only; the real question is end-to-end. An older
@@ -554,7 +565,7 @@ stays addressable.
 | Variant | Fields | When |
 |---|---|---|
 | `ok` | `data: Value` (request-specific shape) | Most success paths. |
-| `hello` | `server_pid: u32`, `session_token: string`, `capabilities?: string[]` | Reply to `Hello` only. `capabilities` is `default` + `skip_serializing_if = "Vec::is_empty"`, so a pre-#288 server omits the key entirely and it decodes as `[]`. Exposed to peers by the `server_info` MCP tool (§1.16). |
+| `hello` | `server_pid: u32`, `session_token: string`, `capabilities?: string[]`, `session_id?: string` | Reply to `Hello` only. `capabilities` is `default` + `skip_serializing_if = "Vec::is_empty"`, so a pre-#288 server omits the key entirely and it decodes as `[]`. `session_id` (#326) is `default` + `skip_serializing_if = "Option::is_none"`, so a pre-#326 server omits it and it decodes as `None` = unknown. Both are exposed to peers by the `server_info` MCP tool (§1.16); `session_token` is **not** — it is the value clients check against `RENGA_TOKEN` and stays off introspection surfaces. |
 | `subscribed` | — | Ack of `Subscribe`; event lines follow on same connection. |
 | `err` | `message: string`, `code?: string` | Failure. `code` is `Option<String>` with `skip_serializing_if = "Option::is_none"`. |
 

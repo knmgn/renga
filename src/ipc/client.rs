@@ -118,6 +118,16 @@ pub struct ServerHandshake {
     /// it supports nothing", which is a *different* fact from "could
     /// not ask" — callers must not conflate the two.
     pub capabilities: Vec<String>,
+    /// Identity of the server *process instance* behind this endpoint
+    /// (see [`super::session_id`]), or `None` from any pre-#326 server
+    /// that does not send the field.
+    ///
+    /// This is the field that makes a persisted pane id safe to reuse:
+    /// pane ids restart from a fresh counter on every renga launch, so
+    /// a stored pane id only means anything paired with the session it
+    /// was minted in. `None` must be read as "cannot tell", never as
+    /// "same session as before".
+    pub session_id: Option<String>,
 }
 
 /// Complete the [`Request::Hello`] handshake and return what the
@@ -185,6 +195,7 @@ fn perform_handshake(reader: &mut BufReader<Stream>) -> Result<ServerHandshake> 
             server_pid,
             session_token,
             capabilities,
+            session_id,
         } => {
             // Verifying the token here is also what makes a cached
             // capability answer safe without any staleness key: a
@@ -198,6 +209,7 @@ fn perform_handshake(reader: &mut BufReader<Stream>) -> Result<ServerHandshake> 
             Ok(ServerHandshake {
                 server_pid,
                 capabilities,
+                session_id,
             })
         }
         Response::Err { message, code } => Err(anyhow!(

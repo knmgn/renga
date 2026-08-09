@@ -52,6 +52,61 @@ pub mod server;
 
 pub use events::{EventBus, EventScope};
 
+/// Identity of *this* renga process instance, minted once and stable
+/// for the rest of its life (Issue #326).
+///
+/// # Why the existing identity fields are not enough
+///
+/// Pane ids restart from a fresh counter on every renga launch, so a
+/// pane id persisted by an orchestrator can silently resolve to a
+/// *different, live* pane after a restart — no error, wrong pane. The
+/// two identity fields already on the wire cannot rule that out:
+/// `server_pid` and the endpoint are one fact, not two (the endpoint
+/// embeds the pid), and pids are recycled by the OS.
+///
+/// So the id here is deliberately **not** derived from the pid. A
+/// client that remembers `(session_id, pane_id)` can compare the
+/// session id it gets back today against the one it stored and
+/// discard the pane id when they differ, instead of addressing a
+/// stranger.
+///
+/// This is *not* [`Response::Hello::session_token`]. That token is the
+/// value the client checks against `RENGA_TOKEN` before trusting a
+/// connection; it is pid-derived and is never published by
+/// introspection surfaces. This one exists to be published.
+pub fn session_id() -> &'static str {
+    static SESSION_ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    SESSION_ID.get_or_init(mint_session_id)
+}
+
+/// Mint one fresh session identifier.
+///
+/// Two independent sources, because either alone has a failure mode
+/// that matters here:
+///
+/// - Start nanoseconds make ids from successive runs monotonically
+///   distinct, but a coarse clock (Windows' is not nanosecond-real)
+///   or a clock stepped backwards by NTP can repeat a value.
+/// - `RandomState` is seeded from OS entropy once per thread and
+///   bumped per instance, so it survives a repeated clock reading —
+///   but on its own it reads as an opaque number with no ordering.
+///
+/// Hashing the timestamp *through* the random state also means the
+/// second half cannot be predicted from the first. Kept dependency
+/// free on purpose: pulling in `rand` to name a process would be a
+/// large amount of supply chain for 16 bytes.
+fn mint_session_id() -> String {
+    use std::hash::{BuildHasher, Hasher};
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+    hasher.write_u64(nanos);
+    let entropy = hasher.finish();
+    format!("{nanos:016x}-{entropy:016x}")
+}
+
 /// Hard cap on the total number of lines an [`Request::Inspect`] call
 /// returns (visible screen + scrollback continuation). The vt100
 /// scrollback holds up to 10,000 lines per pane, but an uncapped read
@@ -845,6 +900,16 @@ pub enum Response {
         /// tokens must be ignored, never rejected.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         capabilities: Vec<String>,
+        /// This server process instance's identity — see
+        /// [`session_id`]. Absent from every pre-#326 server, which
+        /// is why it is `Option` rather than `String`: `None` means
+        /// "this server is too old to tell me", and a client that
+        /// needs restart-safe pane attribution must treat that as
+        /// unknown, not as a session that happens to match.
+        ///
+        /// Publishable, unlike `session_token` above.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
     },
     /// Ack that the connection has entered event-stream mode. The
     /// server follows this with newline-delimited [`Event`] records
@@ -1317,6 +1382,7 @@ mod tests {
             server_pid: 1,
             session_token: "t".into(),
             capabilities: SERVER_CAPABILITIES.iter().map(|s| s.to_string()).collect(),
+            session_id: None,
         })
         .unwrap();
         assert!(
@@ -1332,6 +1398,7 @@ mod tests {
             server_pid: 1,
             session_token: "t".into(),
             capabilities: Vec::new(),
+            session_id: None,
         })
         .unwrap();
         assert!(
@@ -1346,6 +1413,7 @@ mod tests {
             server_pid: 1,
             session_token: "t".into(),
             capabilities: SERVER_CAPABILITIES.iter().map(|s| s.to_string()).collect(),
+            session_id: None,
         })
         .unwrap();
         assert!(
@@ -1360,6 +1428,7 @@ mod tests {
             server_pid: 1,
             session_token: "t".into(),
             capabilities: SERVER_CAPABILITIES.iter().map(|s| s.to_string()).collect(),
+            session_id: None,
         })
         .unwrap();
         assert!(
@@ -1764,9 +1833,111 @@ mod tests {
             server_pid: 100,
             session_token: "abc".into(),
             capabilities: Vec::new(),
+            session_id: None,
         };
         let parsed: Response = serde_json::from_str(&serde_json::to_string(&r).unwrap()).unwrap();
         assert_eq!(parsed, r);
+    }
+
+    // ─── Issue #326: restart-unique session identity ──────
+
+    /// The core contract, half one: within one process the id is a
+    /// constant. A client comparing the id it stored against the id it
+    /// reads back must never see a spurious difference and throw away
+    /// pane ids that are still perfectly valid.
+    #[test]
+    fn session_id_is_stable_for_the_life_of_the_process() {
+        let first = session_id();
+        for _ in 0..100 {
+            assert_eq!(
+                session_id(),
+                first,
+                "session_id() must mint once per process, not per call"
+            );
+        }
+        // Same storage, not merely equal strings — proof it is the
+        // OnceLock value and not a re-mint that happened to collide.
+        assert!(std::ptr::eq(session_id(), first));
+    }
+
+    /// The core contract, half two. A restart is a new process, which
+    /// this cannot spawn — but a restart is *exactly* one more call to
+    /// the minting function, which is what the process would do on its
+    /// first `session_id()`. Repeated minting standing in for repeated
+    /// starts is the sharpest in-process test of "changes on restart"
+    /// available; the wire half is covered by
+    /// `wire_hello_reports_the_process_session_id`.
+    #[test]
+    fn minting_twice_never_yields_the_same_session_id() {
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..1000 {
+            assert!(
+                seen.insert(mint_session_id()),
+                "two simulated restarts produced the same session id; a client would \
+                 reuse pane ids across a restart and address the wrong pane"
+            );
+        }
+    }
+
+    /// The whole reason for a new field: pid-derived identity is what
+    /// already failed. `server_pid` and the endpoint (which embeds the
+    /// pid) are one fact, and the OS recycles it.
+    #[test]
+    fn session_id_is_not_derived_from_the_pid() {
+        let pid = std::process::id();
+        let id = session_id();
+        for rendered in [format!("{pid}"), format!("{pid:x}")] {
+            assert!(
+                !id.contains(&rendered),
+                "session id {id} embeds the pid ({rendered}); pid re-use would then \
+                 make two different renga instances indistinguishable again"
+            );
+        }
+    }
+
+    /// A pre-#326 server sends no such key. It must decode as "cannot
+    /// tell", not fail the handshake — the field is additive.
+    #[test]
+    fn hello_from_a_pre_326_server_decodes_with_an_unknown_session_id() {
+        let parsed: Response =
+            serde_json::from_str(r#"{"status":"hello","server_pid":9,"session_token":"t"}"#)
+                .unwrap();
+        match parsed {
+            Response::Hello { session_id, .. } => assert_eq!(session_id, None),
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    /// And when present it survives the round trip — while `None`
+    /// stays off the wire entirely, so this server keeps looking
+    /// byte-identical to a pre-#326 one when it has nothing to say.
+    #[test]
+    fn hello_session_id_round_trips_and_is_omitted_when_absent() {
+        let with = Response::Hello {
+            server_pid: 1,
+            session_token: "t".into(),
+            capabilities: Vec::new(),
+            session_id: Some("17a3f9c2b4d10000-9f1c0d3ea7554b26".into()),
+        };
+        let encoded = serde_json::to_string(&with).unwrap();
+        assert!(encoded.contains("session_id"), "{encoded}");
+        assert_eq!(
+            serde_json::from_str::<Response>(&encoded).unwrap(),
+            with,
+            "session id must survive the wire unchanged"
+        );
+
+        let without = serde_json::to_string(&Response::Hello {
+            server_pid: 1,
+            session_token: "t".into(),
+            capabilities: Vec::new(),
+            session_id: None,
+        })
+        .unwrap();
+        assert!(
+            !without.contains("session_id"),
+            "an unknown session id stays off the wire: {without}"
+        );
     }
 
     #[test]

@@ -245,6 +245,12 @@ fn handle_connection(
                     .iter()
                     .map(|s| s.to_string())
                     .collect(),
+                // Read, never stored on the connection: `session_id()`
+                // mints on first call and is a `OnceLock` afterwards,
+                // so every connection this process ever serves — and
+                // every thread serving one — reports the same value
+                // without any plumbing to keep in sync.
+                session_id: Some(super::session_id().to_string()),
             };
             write_response_line(reader.get_mut(), &hello)?;
         }
@@ -1671,6 +1677,32 @@ mod tests {
             got_unscoped,
             vec![wire_inbox(PANE_A, "for pane A"), wire_started(PANE_B)],
             "an unscoped subscriber must still receive every PeerInbox, as it did before #306"
+        );
+    }
+
+    /// Issue #326 end to end, through a real socket rather than a
+    /// hand-built `Response`: the server actually puts its session id
+    /// on the handshake, the client actually keeps it, and two
+    /// separate connections — served by two different worker threads —
+    /// agree. Disagreement here would be worse than absence: a client
+    /// would conclude renga had restarted between two calls and
+    /// discard live pane ids.
+    #[cfg(unix)]
+    #[test]
+    fn wire_hello_reports_the_process_session_id() {
+        let harness = WireHarness::start("session-id");
+
+        let first = client::probe_server(&harness.endpoint).expect("probe once");
+        let second = client::probe_server(&harness.endpoint).expect("probe twice");
+
+        assert_eq!(
+            first.session_id.as_deref(),
+            Some(crate::ipc::session_id()),
+            "the server must report the session id of the process it runs in"
+        );
+        assert_eq!(
+            first.session_id, second.session_id,
+            "two connections to one server must not disagree about the session"
         );
     }
 
