@@ -9,6 +9,8 @@ rules in [`docs/semver-policy-2.0.md`](./docs/semver-policy-2.0.md).
 
 ## [Unreleased]
 
+## [2.1.0] — 2026-08-09
+
 ### Added
 
 - **`server_info` reports a restart-unique `server.session_id`.** (#326)
