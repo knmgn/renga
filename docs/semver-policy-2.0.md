@@ -317,6 +317,16 @@ Two properties of that tool matter to this policy:
   `[]` when it was asked and advertises nothing. Callers gate on
   `effective_capabilities` — the intersection with what the client build
   understands — which is `null` under exactly the same condition.
+- **A field can be added to `server_info` without a capability token**, and
+  `server.session_id` (#326) is the worked example. The token mechanism
+  exists for behavior an old server would silently get *wrong*; a field an
+  old server simply omits is not that. The client reads the absence as
+  unknown and declines to act on it, which is the same conservative outcome
+  a token would have produced, with none of the surface. Note the resulting
+  asymmetry: `session_id` is `null` on a `connected` server too, when that
+  server predates the field — so it does not share the `capabilities`
+  biconditional with `status`, and callers must branch on the `null` itself
+  rather than infer it from `status`.
 
 ## 8. The 2.0.0 ledger
 
