@@ -232,6 +232,35 @@ pub const CAP_SUBSCRIBE_PANE_SCOPE: &str = "subscribe_pane_scope";
 /// back to #288.
 pub const CAP_CROSS_TAB_LIST: &str = "cross_tab_list";
 
+/// Capability token advertised by servers that report a refused split
+/// **by cause** (Issue #335): `target_too_small` for a target-local
+/// refusal, `pane_limit_reached` for the tab-global pane cap, with
+/// [`err_code::SPLIT_REFUSED`] left for refusals that are neither.
+///
+/// This is the capability path of `docs/semver-policy-2.0.md` §7: the
+/// behavior flips in a **major** release (3.0) and clients that need
+/// it gate on the token, so a new client meeting an old server fails
+/// closed with `server_too_old` instead of silently getting the old
+/// behavior. The bundled mcp-peer gates every `Split` it sends on it
+/// (`SpawnPlacement::required_cap`), because `spawn_pane`'s contract
+/// now tells callers that a refusal which is not `pane_limit_reached`
+/// is target-local — a promise a pre-3.0 server cannot keep, and one
+/// whose breach is silent and costly: the caller gives up on a tab
+/// that still has room.
+///
+/// The distinction also cannot be recovered from a single reply.
+/// `split_refused` means "one of the two causes, unspecified" on a
+/// pre-3.0 server and "neither of them" on a 3.0 one, and nothing in
+/// the reply says which server answered. A client that has not seen
+/// this token must therefore keep the conservative pre-3.0 reading.
+///
+/// Like every capability gate here it is **directional** (§7): it
+/// protects new client → old server. An old client talking to a 3.0
+/// server does not know the token exists and receives the new codes;
+/// that residual direction is what makes this a major-release change
+/// rather than a minor one.
+pub const CAP_SPLIT_REFUSAL_CAUSES: &str = "split_refusal_causes";
+
 /// Every capability token this build's server advertises. Additive by
 /// construction — clients match on tokens they know and ignore the
 /// rest.
@@ -243,6 +272,7 @@ pub const SERVER_CAPABILITIES: &[&str] = &[
     CAP_PEER_USER_TURN,
     CAP_SUBSCRIBE_PANE_SCOPE,
     CAP_CROSS_TAB_LIST,
+    CAP_SPLIT_REFUSAL_CAUSES,
 ];
 
 /// One IPC call from a client to the running renga instance.
@@ -1105,10 +1135,52 @@ pub mod err_code {
     /// A pane id resolved on lookup but disappeared before the App
     /// could act on it (close / exit race). Rare.
     pub const PANE_VANISHED: &str = "pane_vanished";
-    /// The workspace cannot accept another split — either the
-    /// MAX_PANES cap is reached or the target pane is already at
-    /// the minimum geometry.
+    /// The workspace cannot accept another split.
+    ///
+    /// **Narrowed in 3.0** (Issue #335). Through 2.x this code folded
+    /// two unrelated conditions — "the *target pane* is too small" and
+    /// "the *tab* is at its pane cap" — into one string, so a caller
+    /// could not tell a retry-with-another-target situation from a
+    /// genuine out-of-capacity one. Those two now have their own
+    /// codes, [`TARGET_TOO_SMALL`] and [`PANE_LIMIT_REACHED`].
+    ///
+    /// This is a breaking semantic change, which is why it lands in a
+    /// major release and is gated on [`CAP_SPLIT_REFUSAL_CAUSES`]
+    /// rather than shipped as an add-the-new / remove-the-old
+    /// deprecation (a single `code` field cannot carry both answers at
+    /// once, so there is no window in which a server emits the old and
+    /// the new value together).
+    ///
+    /// The constant itself is **not** deprecated: from 3.0 it is the
+    /// code for split refusals that are *neither* of the two causes
+    /// above — currently a terminal below the layout threshold (no
+    /// workspace has usable geometry, so no target can be judged) and
+    /// the "workspace vanished" race. Read from a 3.0 server it means
+    /// **neither cause**; read from a 2.x server it means **one of
+    /// them, unspecified**. A client that has not confirmed
+    /// [`CAP_SPLIT_REFUSAL_CAUSES`] must assume the older, weaker
+    /// reading: cause unknown, another target may or may not help.
     pub const SPLIT_REFUSED: &str = "split_refused";
+    /// The *target pane* is too small to split along the requested
+    /// axis: halving it would leave panes under `min_pane_width` /
+    /// `min_pane_height` (Issue #335, 3.0).
+    ///
+    /// This is a **target-local** condition. The tab is not out of
+    /// capacity — the message reports the tab's pane count against
+    /// its cap precisely so a caller can see that — and retrying
+    /// against a larger target, or along the other axis, can
+    /// succeed. The message also carries the observed numbers: the
+    /// target's geometry on the split axis, the size each half would
+    /// get, and the minimum required.
+    pub const TARGET_TOO_SMALL: &str = "target_too_small";
+    /// The *tab* already holds `MAX_PANES` panes, so it cannot accept
+    /// another one (Issue #335, 3.0).
+    ///
+    /// This is a **tab-global** condition: no target inside this tab
+    /// will split. The caller must close a pane or place the new one
+    /// in another tab (`tab: {new: …}`). Distinct from
+    /// [`TAB_LIMIT_REACHED`], which is about the number of *tabs*.
+    pub const PANE_LIMIT_REACHED: &str = "pane_limit_reached";
     /// PTY write / spawn / OS-level I/O failure surfaced to the
     /// client so it can distinguish "setup broken" from "request
     /// invalid".
@@ -1150,8 +1222,8 @@ pub mod err_code {
     pub const TARGET_TAB_MISMATCH: &str = "target_tab_mismatch";
     /// Creating another tab would exceed `MAX_TABS`. Emitted by
     /// `NewTab` / `SpawnTab` (and the `tab: {new: …}` selector).
-    /// Deliberately distinct from `SPLIT_REFUSED`, which is about pane
-    /// capacity *inside* one tab.
+    /// Deliberately distinct from [`PANE_LIMIT_REACHED`], which is
+    /// about pane capacity *inside* one tab.
     pub const TAB_LIMIT_REACHED: &str = "tab_limit_reached";
 
     // ── user-turn delivery (Issue #323) ───────────────────────
