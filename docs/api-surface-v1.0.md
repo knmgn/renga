@@ -73,8 +73,19 @@ of the wire ABI.
 |---|---|---|---|
 | `to_id` | string | yes | Recipient pane id (numeric string) or stable name. All-digit strings are interpreted as ids (see §6.1). |
 | `message` | string | yes | Body text. |
+| `deliver` | `"channel"` \| `"user_turn"` | no (default `"channel"`) | #323. Picks the delivery *semantics*, not an encoding. `channel` is the pre-#323 behavior, byte-identical on the wire (the field is omitted when absent). `user_turn` types the body into the recipient agent's composer and submits it, so it lands as a real user turn and arms slash commands. Any other string is rejected client-side. |
 
-Result on success: `"Delivered to <to_id>."`.
+Result on success (`deliver="channel"`): `"Delivered to <to_id>."` — unchanged
+text; existing callers match on it.
+
+Result on success (`deliver="user_turn"`, #323): `"Submitted to <to_id> as a
+user turn (submission observed)."`, or `"Not re-sent to <to_id>: an identical
+user turn was accepted within the last 5s, …"` when the 5s user-turn dedupe
+window suppressed it. Both carry `structuredContent`
+`{ delivery: "user_turn", status: "submitted" | "duplicate_suppressed",
+target_id }` so a caller branches on `status` rather than on prose. The
+user-turn dedupe ledger is separate from the channel one below — neither mode
+can swallow the other.
 
 **Detached fallback (frozen prefix)**: `"(message dropped — renga not
 reachable: <reason>)"`.
@@ -105,7 +116,13 @@ body is preserved verbatim after a blank line; pull-mode (Codex) deliveries
 are unaffected. See renga#221.
 
 Errors via `[code]`: `pane_not_found`, `pane_vanished`, `io_error`, plus the
-shared `app_timeout` / `shutting_down` / `internal` set.
+shared `app_timeout` / `shutting_down` / `internal` set. `deliver="user_turn"`
+adds `user_turn_not_ready`, `user_turn_busy`, `user_turn_unsupported_target`,
+`user_turn_invalid_body` and `user_turn_stalled` (§5.1) — the first four
+guarantee **nothing was written** to the PTY and are safe to retry once the
+blocker is cleared; `user_turn_stalled` does not, and the pane must be
+inspected first. Version skew fails closed on the `peer_user_turn` capability
+(§3.4).
 
 ### 1.3 `set_summary` — stable (Q1)
 
@@ -565,7 +582,7 @@ Server budgets: 5 s `APP_REPLY_TIMEOUT` (server → app event loop) +
 | `subscribe` | `from_pane?: usize` | Switches to event-stream mode after ack. `from_pane` (#306) scopes the subscription to a pane **inbox** — note this is not the caller-tab scoping the same-named field means on the requests above. Present → lifecycle events plus only the `peer_inbox` whose `target_pane` is that pane; **absent → unchanged pre-#306 behavior**: every event, including every `peer_inbox` whatever its `target_pane`. Optional and omitted on the wire when absent, so `{"cmd":"subscribe"}` is unchanged and so is what that request yields — a new optional input whose default preserves prior behavior, not a break (`docs/semver-policy-2.0.md` §3). Needs no capability gate (see `subscribe_pane_scope` in §3.4). |
 | `inspect` | `target: PaneRef`, `lines?`, `include_cursor: bool` (default false) | `lines` beyond the visible height reads scrollback since v1.4 (#278) — see §1.12. |
 | `peer_list` | `from_pane: usize` | |
-| `peer_send` | `from_pane: usize`, `target: PaneRef`, `body: string` | Cross-tab ids deliver since #289; names resolve in the sender's tab only; unresolvable targets fail `pane_not_found`. |
+| `peer_send` | `from_pane: usize`, `target: PaneRef`, `body: string`, `deliver?: channel\|user_turn` | Cross-tab ids deliver since #289; names resolve in the sender's tab only; unresolvable targets fail `pane_not_found`. `deliver` (#323) is `skip_serializing_if = "is_channel"`, so a channel send is byte-identical on the wire to a pre-#323 one; senders must gate `user_turn` on `peer_user_turn` (§3.4). |
 | `peer_register_client` | `pane_id: usize`, `kind: claude\|codex` | Posted by `renga mcp-peer` on startup. |
 | `set_pane_identity` | `target: PaneRef`, `name?`, `role?` (three-state: missing / null / value), `from_pane?: usize` | Uses serde `double_option`. `from_pane` (#296) behaves exactly as on `close`. |
 | `set_summary` | `from_pane: usize`, `summary: string` | Empty `summary` clears. >256 `chars` rejected with `summary_too_long`. |
@@ -650,6 +667,16 @@ on those two requests and requires this token, failing closed
 earlier tokens yet drops the unknown `from_pane` and closes a pane in the
 visible tab — irreversibly. A token of its own, for the same reason
 `cross_tab_peers` and `spawn_tab` are separate.
+
+Servers that can deliver a peer message **as a user turn** advertise
+`peer_user_turn` (#323). The bundled mcp-peer requires it for any
+`send_message(deliver="user_turn")` and fails closed (`server_too_old`) when it
+is absent; `deliver="channel"` keeps requiring only `cross_tab_peers`, so
+pre-#323 behavior is untouched. A token of its own because the skew here is the
+silent-wrong-answer kind: `Request` tolerates unknown fields, so a pre-#323
+server drops `deliver`, performs a **channel** send, and answers `Ok` — the
+caller reads a submitted turn where a channel tag was delivered, and the `/loop`
+or `/clear` it was arming never ran.
 
 Servers that honor `subscribe.from_pane` advertise `subscribe_pane_scope`
 (#306). Unlike every token above it is **advertise-only**: no client gates on
@@ -807,6 +834,11 @@ these as `[<code>] <human message>` in JSON-RPC error message strings.
 | `tab_ambiguous` | `split` with `tab`; `list` with `tab` (#329) | `{name}` matched several tabs. Labels are not unique; the server never first-matches — re-address via `{index}` or `{pane_id}`. |
 | `target_tab_mismatch` | `split` with `tab` | Numeric `target` lives in a different tab than the selector picked. The request contradicts itself; refused instead of following either half. |
 | `tab_limit_reached` | `new_tab`, `spawn_tab` | MAX_TABS = 16 tabs already open. Deliberately not `pane_limit_reached`, which is about pane capacity inside one tab. |
+| `user_turn_not_ready` | `peer_send` with `deliver: user_turn`, `send_message` (#323) | No empty, focused agent composer could be positively identified on the target's screen — a modal, a permission prompt, a folder-trust dialog, an existing draft, a scrolled-back pane, or a screen renga cannot read. Detection is *positive*, so an unrecognized Claude/Codex UI revision fails closed here. **Nothing was written**; clear the blocker (usually with `send_keys`) and retry. |
+| `user_turn_busy` | `peer_send` with `deliver: user_turn`, `send_message` (#323) | The target agent is mid-turn. Refused rather than queued, so "this call submitted a turn" never degrades into "this may become a turn later". **Nothing was written.** |
+| `user_turn_unsupported_target` | `peer_send` with `deliver: user_turn`, `send_message` (#323) | The target pane is not running an agent that takes turns (a plain shell, another full-screen TUI, or a pane whose startup command has not run yet). Distinct from `user_turn_not_ready`: retrying will not help until what the pane runs changes. **Nothing was written.** |
+| `user_turn_invalid_body` | `peer_send` with `deliver: user_turn`, `send_message` (#323) | The body cannot be typed as a turn: empty/whitespace, carries control characters, or is multi-line against a target that has not enabled bracketed paste (raw newlines would submit the first line and drive the UI with the rest). Retryable only with a different body; **nothing was written**. |
+| `user_turn_stalled` | `peer_send` with `deliver: user_turn`, `send_message` (#323) | Body bytes reached the composer but submission was never observed. **The outcome is uncertain and bytes were written** — the only user-turn code for which that is true. Inspect the pane before retrying; an immediate identical retry is suppressed by the 5s user-turn dedupe window rather than firing a second `/clear`. |
 | `codex_not_installed` | `spawn_codex_pane` | Codex's `~/.codex/config.toml` is missing the renga-peers entry, the file is unreadable, or the `RENGA_PEER_CLIENT_KIND=codex` env-var passthrough is absent. Surfaced from the MCP layer (not `renga::ipc::err_code`); branch on the `[code]` token same as the others. Run `renga mcp install --client codex` to remediate. |
 | `server_too_old` | any capability-gated call (§3.4) | The connected server did not advertise the capability the call needs, so the client refused to send it. Raised **client-side** by `require_capability` and surfaced from the MCP layer (not `renga::ipc::err_code`); branch on the `[code]` token same as the others. The message names the advertised set and the remedy: the running renga *process* predates the feature even when the binary on disk does not, so restart renga. |
 
@@ -931,6 +963,6 @@ minor release.
 | IPC `Request` variants (§3.3) | 15 |
 | IPC `Response` variants (§3.4) | 4 |
 | IPC `Event` variants (§3.5) | 5 |
-| Error codes (§5.1) | 20 |
+| Error codes (§5.1) | 27 |
 | Config schema sections (§4.1) | 2 |
 | Layout TOML node types (§4.2) | 2 |
