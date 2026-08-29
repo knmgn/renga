@@ -9,9 +9,17 @@ rules in [`docs/semver-policy-2.0.md`](./docs/semver-policy-2.0.md).
 
 ## [Unreleased]
 
-> **Targets 3.0.0.** The entries below are a breaking change to the IPC
-> error surface and must not ship in a 2.x minor — see *Changed* for the
-> release-gating rationale.
+## [3.0.0] — 2026-08-29
+
+> **Major release.** Governed by
+> [`docs/semver-policy-2.0.md`](./docs/semver-policy-2.0.md), which stays the
+> live policy for the 3.0 line: nothing here changes the policy's substance,
+> so it gains no successor doc (§10). The frozen surface as of this tag is
+> [`docs/api-surface-v1.0.md`](./docs/api-surface-v1.0.md) (§1.1 — the
+> filename is historical, the contents are live).
+>
+> One breaking change ships in it, under the §3 **semantic change**
+> predicate, with its §4 window waived on the record below (§8).
 
 ### Changed
 
@@ -81,6 +89,20 @@ rules in [`docs/semver-policy-2.0.md`](./docs/semver-policy-2.0.md).
   Gating is also directional (§7): an old client meeting a 3.0 server
   does not know the token exists and receives the new codes — the
   residual direction the major-release requirement exists to cover.
+
+### Documentation
+
+- **Surface-doc reconciliation (§9 step 1).** The inventory pass this
+  procedure requires before a major found the `send_message` /
+  `peer_send` `deliver` input, the `peer_user_turn` capability token and
+  the five `user_turn_*` error codes — all shipped in 2.1.0 (#323) —
+  missing from [`docs/api-surface-v1.0.md`](./docs/api-surface-v1.0.md),
+  and the appendix's error-code count still reading 20 after #335 added
+  two. §1 defines the public API as *exactly* the companion doc's stable
+  items, so until now those eight interfaces were outside the declared
+  contract despite shipping as stable. They are added, and the count is
+  corrected to 27. No behavior changed; this is the same class of gap
+  §8 recorded closing at 2.0.0.
 
 ## [2.2.0] — 2026-08-10
 
