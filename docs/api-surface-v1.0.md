@@ -189,7 +189,7 @@ verbatim execution should pick a different leading token (e.g. `bash -c
 Errors: `target_too_small` (halving the target would fall below
 `min_pane_width` / `min_pane_height` — target-local, another target may
 still split), `pane_limit_reached` (MAX_PANES = 16 — tab-global),
-`split_refused` (neither of those; currently only a terminal below the
+`split_refused` (neither of those; from 3.0 only a terminal below the
 layout threshold — see §5.1), `cwd_invalid`, `pane_not_found`, `name_in_use`,
 `name_invalid`, `io_error`; with a `tab` selector also `tab_not_found`,
 `tab_ambiguous`, `target_tab_mismatch`, and (for `tab: {new: …}`)
@@ -679,16 +679,20 @@ the resolved tab is what keeps that failure uniform. Calls without `tab` keep
 requiring only `caller_scope`, so pre-#329 behavior is untouched.
 
 Servers that report a refused split **by cause** advertise
-`split_refusal_causes` (#335), appended last to the capability list. Like
-`subscribe_pane_scope` it is **advertise-only**: no client gates a request on
-it, because a client sends nothing new — what changed is which error code
-comes back from a refused `split` (`target_too_small` / `pane_limit_reached`
-instead of a single `split_refused`). It is on the list because that
-distinction cannot be read off one reply: `split_refused` from a #335 server
-means "neither of the two named causes", while from an older one it means "one
-of them, unspecified". A client that has not confirmed the token must keep the
-conservative pre-#335 reading of `split_refused` — cause unknown, could be
-either.
+`split_refusal_causes` (#335), appended last to the capability list. This is
+the capability path of `semver-policy-2.0.md` §7 used as intended: the
+behavior flips in a **major** release (3.0), and the clients that need it gate
+on the token and fail closed. Every `split` the bundled mcp-peer sends is gated
+on it — including one with no `tab` selector, which used to require only
+`caller_scope` — because `spawn_pane`'s contract now states that a refusal
+which is not `pane_limit_reached` is target-local, and a 2.x server cannot keep
+that promise: it answers both causes with `split_refused`. The breach would be
+silent (a `split_refused` is a valid answer on either server) and expensive
+(the caller gives up on a tab that still has room), so the call is refused with
+`server_too_old` instead. `{new: …}` placements keep gating on `spawn_tab`:
+they send `spawn_tab`, whose refusals #335 did not touch. Gating is directional
+(§7): an old client meeting a 3.0 server still receives the new codes, and that
+residual direction is why this is a major-release change.
 
 ### 3.5 Event envelope — stable
 
@@ -790,9 +794,9 @@ these as `[<code>] <human message>` in JSON-RPC error message strings.
 | `internal` | every request | Server invariant violation. |
 | `pane_not_found` | pane-targeted requests | `PaneRef` did not resolve. |
 | `pane_vanished` | pane-targeted requests | Resolved then disappeared mid-flight. Rare. |
-| `split_refused` | `split`, `spawn_*` (and layout TOML apply); `spawn_tab` only for a terminal below the layout threshold | **Deprecated as a diagnosis (#335)** — it used to fold the two causes below into one code, so a caller could not tell a retryable target from a full tab. Still emitted, but only for refusals that are neither: a terminal below the layout threshold, and the workspace-vanished race. Treat as *cause unknown*. Corrected in #290: `new_tab` never returned this — its capacity failure is `tab_limit_reached`. |
-| `target_too_small` | `split`, `spawn_pane` / `spawn_claude_pane` / `spawn_codex_pane` (#335) | Halving the **target pane** along the requested axis would fall below `min_pane_width` / `min_pane_height`. **Target-local**: the tab is not full, and the message carries the observed numbers (the target's extent on the split axis, the size each half would get, the minimum required, and the tab's pane count against MAX_PANES) so a caller can retry against a bigger target or the other direction. |
-| `pane_limit_reached` | `split`, `spawn_pane` / `spawn_claude_pane` / `spawn_codex_pane` (#335) | The **tab** already holds MAX_PANES = 16 panes. **Tab-global**: no target in it will split; close a pane or use `tab: {new: …}`. Checked before geometry, so it wins over `target_too_small`. Distinct from `tab_limit_reached`, which is about the number of tabs. |
+| `split_refused` | `split`, `spawn_*` (and layout TOML apply); `spawn_tab` only for a terminal below the layout threshold | **Narrowed in 3.0 (#335)** — through 2.x it folded the two causes below into one code, so a caller could not tell a retryable target from a full tab. From 3.0 it means *neither* of them: a terminal below the layout threshold, or the workspace-vanished race. Read from a 2.x server it still means "one of the two, unspecified", so a client that has not confirmed `split_refusal_causes` (§3.4) must keep that weaker reading. Corrected in #290: `new_tab` never returned this — its capacity failure is `tab_limit_reached`. |
+| `target_too_small` | `split`, `spawn_pane` / `spawn_claude_pane` / `spawn_codex_pane` (#335, 3.0) | Halving the **target pane** along the requested axis would fall below `min_pane_width` / `min_pane_height`. **Target-local**: the tab is not full, and the message carries the observed numbers (the target's extent on the split axis, the size each half would get, the minimum required, and the tab's pane count against MAX_PANES) so a caller can retry against a bigger target or the other direction. |
+| `pane_limit_reached` | `split`, `spawn_pane` / `spawn_claude_pane` / `spawn_codex_pane` (#335, 3.0) | The **tab** already holds MAX_PANES = 16 panes. **Tab-global**: no target in it will split; close a pane or use `tab: {new: …}`. Checked before geometry, so it wins over `target_too_small`. Distinct from `tab_limit_reached`, which is about the number of tabs. |
 | `io_error` | requests with PTY side-effects | OS-level write/spawn failure. |
 | `last_pane` | `close` | Refused to remove the only pane of the only tab. |
 | `cwd_invalid` | `split`, `new_tab`, `spawn_tab` | `cwd` missing or not a directory. Pre-mutation rejection — no half-mutated layout. |

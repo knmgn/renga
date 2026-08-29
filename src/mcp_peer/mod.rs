@@ -558,7 +558,7 @@ fn tools_spec() -> Value {
         },
         {
             "name": "spawn_pane",
-            "description": "Create a new pane: by default splits a pane in this renga tab, or — with the `tab` selector — splits inside another tab or spawns a fresh background tab. Returns the new pane's numeric id so you can address it from later tool calls. A refusal names its cause, and the two causes need different reactions: `target_too_small` is TARGET-LOCAL — only this target is out of room, and the message reports its geometry, the minimum required and the tab's pane count, so retry against a bigger pane (list_panes shows the geometry) or along the other direction; `pane_limit_reached` is tab-global — the tab is at its 16-pane cap and no target will help, so close a pane or pass `tab: {\"new\": {}}`. Unless the refusal reports `pane_limit_reached`, it does NOT mean the tab is out of capacity. The legacy `split_refused` code survives only for causes that are neither (currently: the whole terminal is below the layout threshold) — treat it as cause unknown.",
+            "description": "Create a new pane: by default splits a pane in this renga tab, or — with the `tab` selector — splits inside another tab or spawns a fresh background tab. Returns the new pane's numeric id so you can address it from later tool calls. A refusal names its cause, and the two causes need different reactions: `target_too_small` is TARGET-LOCAL — only this target is out of room, and the message reports its geometry, the minimum required and the tab's pane count, so retry against a bigger pane (list_panes shows the geometry) or along the other direction; `pane_limit_reached` is tab-global — the tab is at its 16-pane cap and no target will help, so close a pane or pass `tab: {\"new\": {}}`. Unless the refusal reports `pane_limit_reached`, it does NOT mean the tab is out of capacity. The legacy `split_refused` code survives only for causes that are neither (currently: the whole terminal is below the layout threshold) — treat it as cause unknown. Needs a renga server advertising the split_refusal_causes capability; an older one answers both causes with the ambiguous `split_refused`, so it is refused (server_too_old) rather than allowed to break the target-local promise above.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1511,18 +1511,28 @@ enum SpawnPlacement {
 }
 
 impl SpawnPlacement {
-    /// The capability the outgoing request must be gated on. Any
-    /// explicit selector — including one that resolves to the caller's
-    /// own tab — requires [`crate::ipc::CAP_SPAWN_TAB`]: an older
-    /// server would silently drop the unknown field and spawn in the
-    /// caller's tab, which is exactly the wrong-tab accident the
-    /// capability exists to prevent. `SERVER_CAPABILITIES` is
-    /// additive, so a `spawn_tab` server always understands
-    /// `caller_scope` too.
+    /// The capability the outgoing request must be gated on.
+    ///
+    /// Both split placements require
+    /// [`crate::ipc::CAP_SPLIT_REFUSAL_CAUSES`] (Issue #335, flipped in
+    /// 3.0): this tool's contract now says a refusal that is not
+    /// `pane_limit_reached` is target-local, and a pre-3.0 server
+    /// cannot honor that — it answers both causes with `split_refused`,
+    /// so the promise would be a lie exactly when a caller acts on it
+    /// (giving up on a tab that has room). Fail closed with
+    /// `server_too_old` instead; the running renga process can predate
+    /// the binary on disk, so this is a live skew, not a theoretical
+    /// one. `SERVER_CAPABILITIES` is append-only, so this token
+    /// subsumes the `caller_scope` / `spawn_tab` gates the two arms
+    /// used to carry — a #335 server understands both.
+    ///
+    /// `NewTab` keeps [`crate::ipc::CAP_SPAWN_TAB`]: it sends
+    /// `SpawnTab`, not `Split`, and #335 did not touch that request's
+    /// refusals.
     fn required_cap(&self) -> &'static str {
         match self {
-            SpawnPlacement::Here => crate::ipc::CAP_CALLER_SCOPE,
-            _ => crate::ipc::CAP_SPAWN_TAB,
+            SpawnPlacement::Here | SpawnPlacement::Tab(_) => crate::ipc::CAP_SPLIT_REFUSAL_CAUSES,
+            SpawnPlacement::NewTab { .. } => crate::ipc::CAP_SPAWN_TAB,
         }
     }
 }
@@ -3765,18 +3775,19 @@ mod tests {
         );
     }
 
-    /// Any explicit selector — even one resolving to the caller's own
-    /// tab — must escalate the required capability: an older server
-    /// would ignore the field and spawn in the wrong tab.
+    /// Every placement that sends a `Split` gates on #335's token, the
+    /// newest one, because the tool now promises a refusal names its
+    /// cause — a promise a pre-3.0 server cannot keep. `{new: …}`
+    /// sends `SpawnTab` instead and keeps #290's.
     #[test]
     fn spawn_placement_capability_escalates_with_any_selector() {
         assert_eq!(
             SpawnPlacement::Here.required_cap(),
-            crate::ipc::CAP_CALLER_SCOPE
+            crate::ipc::CAP_SPLIT_REFUSAL_CAUSES
         );
         assert_eq!(
             SpawnPlacement::Tab(crate::ipc::TabSelector::Index(0)).required_cap(),
-            crate::ipc::CAP_SPAWN_TAB
+            crate::ipc::CAP_SPLIT_REFUSAL_CAUSES
         );
         assert_eq!(
             SpawnPlacement::NewTab { label: None }.required_cap(),

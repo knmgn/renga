@@ -9,12 +9,16 @@ rules in [`docs/semver-policy-2.0.md`](./docs/semver-policy-2.0.md).
 
 ## [Unreleased]
 
-### Added
+> **Targets 3.0.0.** The entries below are a breaking change to the IPC
+> error surface and must not ship in a 2.x minor — see *Changed* for the
+> release-gating rationale.
 
-- **A refused split now names its cause.** (#335)
+### Changed
+
+- **BREAKING: a refused split now names its cause.** (#335)
   `spawn_pane` (and `spawn_claude_pane` / `spawn_codex_pane`, and the
-  `split` IPC request) used to answer both of its refusal conditions
-  with one code and one string:
+  `split` IPC request) answered both of its refusal conditions with one
+  code and one string:
   `[split_refused] split refused (max panes reached or pane too small)`.
   The two conditions need opposite reactions, and the message let a
   caller pick the wrong one. They are now separate codes:
@@ -25,6 +29,13 @@ rules in [`docs/semver-policy-2.0.md`](./docs/semver-policy-2.0.md).
     another target — or the other direction — can still succeed.
   - `pane_limit_reached` — the **tab** is at its 16-pane cap. This is
     *tab-global*: no target in it will split.
+
+  `split_refused` is not retired: from 3.0 it is the code for split
+  refusals that are *neither* of those — currently a terminal below the
+  layout threshold, and the workspace-vanished race. Its **meaning**
+  changes, which is what makes this breaking: on a 2.x server the code
+  means "one of the two causes, unspecified"; on a 3.0 server it means
+  "neither of them".
 
   Both messages carry the numbers the decision was made from, so a
   caller can branch mechanically without a second round-trip:
@@ -40,25 +51,36 @@ rules in [`docs/semver-policy-2.0.md`](./docs/semver-policy-2.0.md).
   gave up while a 397x53 pane in the same tab was splittable well
   within the cap.
 
-  Servers that report a refused split by cause advertise a
-  `split_refusal_causes` capability token, so a client can tell the two
-  meanings of `split_refused` apart in advance instead of having to
-  guess from a single reply. Like `subscribe_pane_scope` the token is
-  advertise-only — it gates no request, because a client sends nothing
-  new.
+  **Release gating.** §3 predicate: **semantic change** — the same
+  `split` request now produces a materially different, observable
+  `code`. It is a breaking change that cannot be
+  expressed as add-the-new / remove-the-old — one `code` field cannot
+  carry both answers at once, so there is no window in which a server
+  emits the old value and the new one together. It therefore takes the
+  capability path of `docs/semver-policy-2.0.md` §7: the behavior flips
+  in a **major** release and is gated on a new `split_refusal_causes`
+  token. Every `split` the bundled mcp-peer sends now requires that
+  token — including one with no `tab` selector, which used to require
+  only `caller_scope` — and fails closed with `server_too_old` against
+  an older server, because `spawn_pane`'s "not `pane_limit_reached` ⇒
+  target-local" promise is one a 2.x server cannot keep, and its breach
+  is invisible in the reply. `{new: …}` placements keep gating on
+  `spawn_tab`: they send `spawn_tab`, whose refusals #335 did not
+  touch.
 
-### Deprecated
+  **§4 window waived** (recorded per §8). §4 asks for one full minor
+  release in which the change is announced as deprecated before it
+  lands. That window is deliberately skipped: the change goes straight
+  into 3.0 with no 2.x deprecation-notice release. Decided by the
+  repository owner (happy-ryo), on the grounds that the set of clients
+  consuming these codes is small and known, and that the window would
+  buy them little here — a single `code` field cannot carry the old and
+  the new answer at once, so a deprecation minor could only announce
+  the change, never let a client migrate ahead of it.
 
-- **`split_refused` as a diagnosis.** (#335) The code stays on the wire
-  for clients that still match it, but it no longer describes either of
-  the two causes above. It is now emitted only for refusals that are
-  neither — currently a terminal below the layout threshold, and the
-  workspace-vanished race — and should be treated as *cause unknown*.
-  Clients branching on split refusals should match `target_too_small` /
-  `pane_limit_reached` instead. A client that has not seen the
-  `split_refusal_causes` token must keep reading `split_refused` the
-  pre-#335 way (cause unknown, could be either) — an older server still
-  answers both causes with it.
+  Gating is also directional (§7): an old client meeting a 3.0 server
+  does not know the token exists and receives the new codes — the
+  residual direction the major-release requirement exists to cover.
 
 ## [2.2.0] — 2026-08-10
 

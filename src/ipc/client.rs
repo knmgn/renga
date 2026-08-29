@@ -772,13 +772,16 @@ mod tests {
     /// does so with an `Ok` a client cannot distinguish from a correct
     /// one, which is why it is gated rather than advertise-only.
     ///
-    /// `split_refusal_causes` is #335's, and is advertise-only like
-    /// `subscribe_pane_scope`: it gates no request, because a client
-    /// sends nothing new — the change is which error code comes back
-    /// from a refused `Split`. It is on the list because that
-    /// distinction cannot be read off one reply: `split_refused` from
-    /// a #335 server means "neither of the two named causes", while
-    /// from an older one it means "one of them, unspecified".
+    /// `split_refusal_causes` is #335's, and belongs to the first kind
+    /// even though the client sends nothing new: what changed is which
+    /// error code a refused `Split` comes back with, and `spawn_pane`
+    /// now tells callers that a refusal which is not
+    /// `pane_limit_reached` is target-local. A pre-3.0 server answers
+    /// both causes with `split_refused`, so that promise would be
+    /// wrong precisely when a caller acts on it — and the reply gives
+    /// no way to notice, since `split_refused` is a valid answer on
+    /// either server with two different meanings. Hence gated, not
+    /// advertise-only.
     #[test]
     fn capability_exposure_mints_no_new_token() {
         assert_eq!(
@@ -930,6 +933,40 @@ mod tests {
             .map(|s| s.to_string())
             .collect();
         assert!(require_capability(super::super::CAP_CROSS_TAB_LIST, &advertised).is_ok());
+    }
+
+    /// A 2.x server answers both of #335's causes with `split_refused`,
+    /// so a client that has been told "a refusal which is not
+    /// `pane_limit_reached` is target-local" would act on a promise
+    /// that server never made — and nothing in the reply reveals it,
+    /// since `split_refused` is a valid answer on both. Refuse it.
+    #[test]
+    fn require_split_refusal_causes_fails_closed_against_a_2x_server() {
+        // Spelled out rather than derived from SERVER_CAPABILITIES:
+        // the point is to simulate the token set of an older build.
+        let advertised = vec![
+            super::super::CAP_CALLER_SCOPE.to_string(),
+            super::super::CAP_CROSS_TAB_PEERS.to_string(),
+            super::super::CAP_SPAWN_TAB.to_string(),
+            super::super::CAP_CALLER_SCOPE_CLOSE_IDENTITY.to_string(),
+            super::super::CAP_PEER_USER_TURN.to_string(),
+            super::super::CAP_SUBSCRIBE_PANE_SCOPE.to_string(),
+            super::super::CAP_CROSS_TAB_LIST.to_string(),
+        ];
+        let err =
+            require_capability(super::super::CAP_SPLIT_REFUSAL_CAUSES, &advertised).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("server_too_old"), "got: {msg}");
+        assert!(msg.contains("split_refusal_causes"), "got: {msg}");
+    }
+
+    #[test]
+    fn require_split_refusal_causes_accepts_a_335_server() {
+        let advertised: Vec<String> = super::super::SERVER_CAPABILITIES
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert!(require_capability(super::super::CAP_SPLIT_REFUSAL_CAUSES, &advertised).is_ok());
     }
 
     #[test]
