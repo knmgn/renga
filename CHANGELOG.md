@@ -9,6 +9,47 @@ rules in [`docs/semver-policy-2.0.md`](./docs/semver-policy-2.0.md).
 
 ## [Unreleased]
 
+### Added
+
+- **A refused split now names its cause.** (#335)
+  `spawn_pane` (and `spawn_claude_pane` / `spawn_codex_pane`, and the
+  `split` IPC request) used to answer both of its refusal conditions
+  with one code and one string:
+  `[split_refused] split refused (max panes reached or pane too small)`.
+  The two conditions need opposite reactions, and the message let a
+  caller pick the wrong one. They are now separate codes:
+
+  - `target_too_small` — halving the **target pane** along the
+    requested axis would fall below `min_pane_width` /
+    `min_pane_height`. This is *target-local*: the tab has room, and
+    another target — or the other direction — can still succeed.
+  - `pane_limit_reached` — the **tab** is at its 16-pane cap. This is
+    *tab-global*: no target in it will split.
+
+  Both messages carry the numbers the decision was made from, so a
+  caller can branch mechanically without a second round-trip:
+  `target_too_small` reports the target's extent on the split axis, the
+  size each half would get, the minimum required, and the tab's pane
+  count against the cap; `pane_limit_reached` reports the count against
+  the cap. `spawn_pane`'s tool description now states the rule
+  explicitly — unless a refusal reports `pane_limit_reached`, it does
+  not mean the tab is out of capacity.
+
+  Observed in practice: a watcher spawn anchored on a 24-column pane
+  was refused, the caller read the refusal as "the tab is full", and
+  gave up while a 397x53 pane in the same tab was splittable well
+  within the cap.
+
+### Deprecated
+
+- **`split_refused` as a diagnosis.** (#335) The code stays on the wire
+  for clients that still match it, but it no longer describes either of
+  the two causes above. It is now emitted only for refusals that are
+  neither — currently a terminal below the layout threshold, and the
+  workspace-vanished race — and should be treated as *cause unknown*.
+  Clients branching on split refusals should match `target_too_small` /
+  `pane_limit_reached` instead.
+
 ## [2.2.0] — 2026-08-10
 
 ### Added

@@ -186,8 +186,11 @@ This is **frozen behavior**; no opt-out flag in v1.0. Callers that want
 verbatim execution should pick a different leading token (e.g. `bash -c
 'claude ...'`).
 
-Errors: `split_refused` (MAX_PANES = 16, or below `min_pane_width` /
-`min_pane_height`), `cwd_invalid`, `pane_not_found`, `name_in_use`,
+Errors: `target_too_small` (halving the target would fall below
+`min_pane_width` / `min_pane_height` — target-local, another target may
+still split), `pane_limit_reached` (MAX_PANES = 16 — tab-global),
+`split_refused` (neither of those; currently only a terminal below the
+layout threshold — see §5.1), `cwd_invalid`, `pane_not_found`, `name_in_use`,
 `name_invalid`, `io_error`; with a `tab` selector also `tab_not_found`,
 `tab_ambiguous`, `target_tab_mismatch`, and (for `tab: {new: …}`)
 `tab_limit_reached` (MAX_TABS = 16).
@@ -775,7 +778,9 @@ these as `[<code>] <human message>` in JSON-RPC error message strings.
 | `internal` | every request | Server invariant violation. |
 | `pane_not_found` | pane-targeted requests | `PaneRef` did not resolve. |
 | `pane_vanished` | pane-targeted requests | Resolved then disappeared mid-flight. Rare. |
-| `split_refused` | `split`, `spawn_*` (and layout TOML apply); `spawn_tab` only for a terminal below the layout threshold | MAX_PANES = 16, or below `min_pane_width` / `min_pane_height`. Corrected in #290: `new_tab` never returned this — its capacity failure is `tab_limit_reached`. |
+| `split_refused` | `split`, `spawn_*` (and layout TOML apply); `spawn_tab` only for a terminal below the layout threshold | **Deprecated as a diagnosis (#335)** — it used to fold the two causes below into one code, so a caller could not tell a retryable target from a full tab. Still emitted, but only for refusals that are neither: a terminal below the layout threshold, and the workspace-vanished race. Treat as *cause unknown*. Corrected in #290: `new_tab` never returned this — its capacity failure is `tab_limit_reached`. |
+| `target_too_small` | `split`, `spawn_pane` / `spawn_claude_pane` / `spawn_codex_pane` (#335) | Halving the **target pane** along the requested axis would fall below `min_pane_width` / `min_pane_height`. **Target-local**: the tab is not full, and the message carries the observed numbers (the target's extent on the split axis, the size each half would get, the minimum required, and the tab's pane count against MAX_PANES) so a caller can retry against a bigger target or the other direction. |
+| `pane_limit_reached` | `split`, `spawn_pane` / `spawn_claude_pane` / `spawn_codex_pane` (#335) | The **tab** already holds MAX_PANES = 16 panes. **Tab-global**: no target in it will split; close a pane or use `tab: {new: …}`. Checked before geometry, so it wins over `target_too_small`. Distinct from `tab_limit_reached`, which is about the number of tabs. |
 | `io_error` | requests with PTY side-effects | OS-level write/spawn failure. |
 | `last_pane` | `close` | Refused to remove the only pane of the only tab. |
 | `cwd_invalid` | `split`, `new_tab`, `spawn_tab` | `cwd` missing or not a directory. Pre-mutation rejection — no half-mutated layout. |
@@ -785,7 +790,7 @@ these as `[<code>] <human message>` in JSON-RPC error message strings.
 | `tab_not_found` | `split` with `tab`; `list` with `tab` (#329) | Selector's display name matched no tab, or the 0-based index is out of range. Pre-mutation rejection. |
 | `tab_ambiguous` | `split` with `tab`; `list` with `tab` (#329) | `{name}` matched several tabs. Labels are not unique; the server never first-matches — re-address via `{index}` or `{pane_id}`. |
 | `target_tab_mismatch` | `split` with `tab` | Numeric `target` lives in a different tab than the selector picked. The request contradicts itself; refused instead of following either half. |
-| `tab_limit_reached` | `new_tab`, `spawn_tab` | MAX_TABS = 16 tabs already open. Deliberately not `split_refused`, which is about pane capacity inside one tab. |
+| `tab_limit_reached` | `new_tab`, `spawn_tab` | MAX_TABS = 16 tabs already open. Deliberately not `pane_limit_reached`, which is about pane capacity inside one tab. |
 | `codex_not_installed` | `spawn_codex_pane` | Codex's `~/.codex/config.toml` is missing the renga-peers entry, the file is unreadable, or the `RENGA_PEER_CLIENT_KIND=codex` env-var passthrough is absent. Surfaced from the MCP layer (not `renga::ipc::err_code`); branch on the `[code]` token same as the others. Run `renga mcp install --client codex` to remediate. |
 | `server_too_old` | any capability-gated call (§3.4) | The connected server did not advertise the capability the call needs, so the client refused to send it. Raised **client-side** by `require_capability` and surfaced from the MCP layer (not `renga::ipc::err_code`); branch on the `[code]` token same as the others. The message names the advertised set and the remedy: the running renga *process* predates the feature even when the binary on disk does not, so restart renga. |
 

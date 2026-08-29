@@ -489,7 +489,7 @@ fn a_refused_split_leaves_both_workspaces_focus_untouched() {
             None,
         )
         .expect_err("split must be refused");
-    assert_eq!(err.code, Some(ipc::err_code::SPLIT_REFUSED));
+    assert_eq!(err.code, Some(ipc::err_code::TARGET_TOO_SMALL));
 
     assert_eq!(app.workspaces[0].focused_pane_id, caller_focus_before);
     assert_eq!(app.workspaces[1].focused_pane_id, active_focus_before);
@@ -671,7 +671,7 @@ fn a_cross_tab_split_guards_against_the_current_terminal() {
             None,
         )
         .expect_err("46 cols cannot hold two 20-column panes");
-    assert_eq!(err.code, Some(ipc::err_code::SPLIT_REFUSED));
+    assert_eq!(err.code, Some(ipc::err_code::TARGET_TOO_SMALL));
     app.shutdown();
 }
 

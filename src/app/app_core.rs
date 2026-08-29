@@ -364,8 +364,8 @@ fn copy_to_windows_clipboard(text: &str) -> std::io::Result<()> {
 /// Terminal dimensions below which the layout pass is skipped
 /// entirely — there is not enough room to place a pane area, a tab bar
 /// and borders.
-const MIN_LAYOUT_COLS: u16 = 20;
-const MIN_LAYOUT_ROWS: u16 = 5;
+pub(crate) const MIN_LAYOUT_COLS: u16 = 20;
+pub(crate) const MIN_LAYOUT_ROWS: u16 = 5;
 
 impl App {
     /// Recompute pane rectangles and apply sizes to every PTY in the

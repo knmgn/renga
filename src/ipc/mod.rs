@@ -1105,10 +1105,44 @@ pub mod err_code {
     /// A pane id resolved on lookup but disappeared before the App
     /// could act on it (close / exit race). Rare.
     pub const PANE_VANISHED: &str = "pane_vanished";
-    /// The workspace cannot accept another split — either the
-    /// MAX_PANES cap is reached or the target pane is already at
-    /// the minimum geometry.
+    /// The workspace cannot accept another split.
+    ///
+    /// **Deprecated as a diagnosis** (Issue #335). This code used to
+    /// fold two unrelated conditions — "the *target pane* is too
+    /// small" and "the *tab* is at its pane cap" — into one string,
+    /// so a caller could not tell a retry-with-another-target
+    /// situation from a genuine out-of-capacity one. Those two now
+    /// have their own codes, [`TARGET_TOO_SMALL`] and
+    /// [`PANE_LIMIT_REACHED`].
+    ///
+    /// The constant stays on the wire as a compatibility alias for
+    /// clients that still match it, and is emitted only for split
+    /// refusals that are *neither* of the split-out causes —
+    /// currently a terminal below the layout threshold (no workspace
+    /// has usable geometry, so no target can be judged) and the
+    /// "workspace vanished" race. Treat it as **cause unknown**: it
+    /// carries no promise about whether another target would help.
     pub const SPLIT_REFUSED: &str = "split_refused";
+    /// The *target pane* is too small to split along the requested
+    /// axis: halving it would leave panes under `min_pane_width` /
+    /// `min_pane_height` (Issue #335).
+    ///
+    /// This is a **target-local** condition. The tab is not out of
+    /// capacity — the message reports the tab's pane count against
+    /// its cap precisely so a caller can see that — and retrying
+    /// against a larger target, or along the other axis, can
+    /// succeed. The message also carries the observed numbers: the
+    /// target's geometry on the split axis, the size each half would
+    /// get, and the minimum required.
+    pub const TARGET_TOO_SMALL: &str = "target_too_small";
+    /// The *tab* already holds `MAX_PANES` panes, so it cannot accept
+    /// another one (Issue #335).
+    ///
+    /// This is a **tab-global** condition: no target inside this tab
+    /// will split. The caller must close a pane or place the new one
+    /// in another tab (`tab: {new: …}`). Distinct from
+    /// [`TAB_LIMIT_REACHED`], which is about the number of *tabs*.
+    pub const PANE_LIMIT_REACHED: &str = "pane_limit_reached";
     /// PTY write / spawn / OS-level I/O failure surfaced to the
     /// client so it can distinguish "setup broken" from "request
     /// invalid".
@@ -1150,8 +1184,8 @@ pub mod err_code {
     pub const TARGET_TAB_MISMATCH: &str = "target_tab_mismatch";
     /// Creating another tab would exceed `MAX_TABS`. Emitted by
     /// `NewTab` / `SpawnTab` (and the `tab: {new: …}` selector).
-    /// Deliberately distinct from `SPLIT_REFUSED`, which is about pane
-    /// capacity *inside* one tab.
+    /// Deliberately distinct from [`PANE_LIMIT_REACHED`], which is
+    /// about pane capacity *inside* one tab.
     pub const TAB_LIMIT_REACHED: &str = "tab_limit_reached";
 
     // ── user-turn delivery (Issue #323) ───────────────────────

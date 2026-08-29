@@ -589,7 +589,8 @@ fn split_refused_keeps_focus_and_emits_no_pane_started() {
     // Drive handle_split into its refused arm (pane too small
     // after halving, below `min_pane_width` — default 20) and
     // confirm:
-    //   * SPLIT_REFUSED bubbles up,
+    //   * TARGET_TOO_SMALL bubbles up (Issue #335: a target-local
+    //     refusal is no longer folded into `split_refused`),
     //   * focus stays where it was,
     //   * the requested name is NOT registered,
     //   * no PaneStarted event leaks out for the nonexistent pane.
@@ -627,7 +628,7 @@ fn split_refused_keeps_focus_and_emits_no_pane_started() {
             None,
         )
         .expect_err("too-narrow split must be refused");
-    assert_eq!(err.code, Some(ipc::err_code::SPLIT_REFUSED));
+    assert_eq!(err.code, Some(ipc::err_code::TARGET_TOO_SMALL));
 
     assert_eq!(
         app.ws().focused_pane_id,
@@ -644,6 +645,123 @@ fn split_refused_keeps_focus_and_emits_no_pane_started() {
         .any(|ev| matches!(ev, ipc::Event::PaneStarted { .. }));
     assert!(!any_started, "refused split must not emit PaneStarted");
 
+    app.shutdown();
+}
+
+/// Issue #335: the target-local refusal must say so, and carry the
+/// numbers the decision was made from, so a caller can branch without
+/// a second round-trip.
+#[test]
+fn a_too_small_target_reports_its_geometry_and_the_tab_headroom() {
+    let mut app = App::new(40, 80).expect("App::new");
+    app.handle_split(
+        &ipc::PaneRef::Focused,
+        ipc::Direction::Vertical,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .expect("first split should succeed");
+
+    let err = app
+        .handle_split(
+            &ipc::PaneRef::Focused,
+            ipc::Direction::Vertical,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect_err("too-narrow split must be refused");
+    assert_eq!(err.code, Some(ipc::err_code::TARGET_TOO_SMALL));
+    let msg = &err.message;
+    assert!(msg.contains("columns wide"), "{msg}");
+    assert!(msg.contains("min_pane_width"), "{msg}");
+    assert!(msg.contains("target-local"), "{msg}");
+    // The tab count is what tells the caller this is *not* a capacity
+    // problem: two panes against a cap of sixteen.
+    assert!(
+        msg.contains(&format!("2 of {} panes", App::MAX_PANES)),
+        "{msg}"
+    );
+    app.shutdown();
+}
+
+/// The sibling of the test above: the tab-global cause gets its own
+/// code, so an orchestrator can tell "retry against another target"
+/// from "this tab is full" (Issue #335).
+#[test]
+fn the_pane_cap_reports_pane_limit_reached_not_split_refused() {
+    let mut app = App::new(60, 240).expect("App::new");
+    // Split the roomiest pane each round so the tree stays balanced —
+    // chaining splits off one pane runs out of geometry long before
+    // the cap.
+    while app.ws().layout.pane_count() < App::MAX_PANES {
+        app.relayout_workspace(0);
+        let (id, rect) = app
+            .ws()
+            .last_pane_rects
+            .iter()
+            .copied()
+            .max_by_key(|(_, r)| u32::from(r.width) * u32::from(r.height))
+            .expect("laid-out panes");
+        let direction = if rect.width >= rect.height * 2 {
+            ipc::Direction::Vertical
+        } else {
+            ipc::Direction::Horizontal
+        };
+        app.handle_split(
+            &ipc::PaneRef::Id(id),
+            direction,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("fill up to MAX_PANES");
+    }
+    app.relayout_workspace(0);
+
+    let (id, rect) = app
+        .ws()
+        .last_pane_rects
+        .iter()
+        .copied()
+        .max_by_key(|(_, r)| u32::from(r.width) * u32::from(r.height))
+        .expect("laid-out panes");
+    // The cap is checked before any geometry, so even the roomiest
+    // pane — one that would otherwise split fine — is refused with the
+    // tab-global code.
+    assert!(
+        rect.width / 2 >= app.min_pane_width,
+        "{rect:?} is splittable"
+    );
+    let err = app
+        .handle_split(
+            &ipc::PaneRef::Id(id),
+            ipc::Direction::Vertical,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect_err("pane cap reached");
+    assert_eq!(err.code, Some(ipc::err_code::PANE_LIMIT_REACHED));
+    assert!(
+        err.message
+            .contains(&format!("{} of {} panes", App::MAX_PANES, App::MAX_PANES)),
+        "{}",
+        err.message
+    );
     app.shutdown();
 }
 

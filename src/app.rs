@@ -25,6 +25,7 @@ mod sidebar_input;
 mod user_turn;
 mod workspace_state;
 
+pub(crate) use self::app_core::{MIN_LAYOUT_COLS, MIN_LAYOUT_ROWS};
 pub(crate) use self::app_state::CloseConfirm;
 pub(crate) use self::app_state::CLAUDE_PEER_LAUNCH_CMD;
 pub use self::app_state::{App, AppCommand, AppEvent};
@@ -37,7 +38,7 @@ use self::codex_peer::{write_input_to_pane, CodexPeerNotificationState, PendingC
 pub(crate) use self::keyboard_input::key_event_to_bytes_pub;
 use self::keyboard_input::{extract_preview_selected_text, extract_selected_text};
 use self::layout_ops::{
-    default_command_for_role, dir_name, resolve_optional_cwd, strip_verbatim_prefix,
+    default_command_for_role, dir_name, resolve_optional_cwd, strip_verbatim_prefix, SplitRefusal,
 };
 pub use self::layout_tree::{LayoutNode, SplitDirection};
 #[cfg(test)]

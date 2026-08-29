@@ -558,7 +558,7 @@ fn tools_spec() -> Value {
         },
         {
             "name": "spawn_pane",
-            "description": "Create a new pane: by default splits a pane in this renga tab, or — with the `tab` selector — splits inside another tab or spawns a fresh background tab. Returns the new pane's numeric id so you can address it from later tool calls. Refuses if the target is already at minimum size or the tab has hit its pane cap.",
+            "description": "Create a new pane: by default splits a pane in this renga tab, or — with the `tab` selector — splits inside another tab or spawns a fresh background tab. Returns the new pane's numeric id so you can address it from later tool calls. A refusal names its cause, and the two causes need different reactions: `target_too_small` is TARGET-LOCAL — only this target is out of room, and the message reports its geometry, the minimum required and the tab's pane count, so retry against a bigger pane (list_panes shows the geometry) or along the other direction; `pane_limit_reached` is tab-global — the tab is at its 16-pane cap and no target will help, so close a pane or pass `tab: {\"new\": {}}`. Unless the refusal reports `pane_limit_reached`, it does NOT mean the tab is out of capacity. The legacy `split_refused` code survives only for causes that are neither (currently: the whole terminal is below the layout threshold) — treat it as cause unknown.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

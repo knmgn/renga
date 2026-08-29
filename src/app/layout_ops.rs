@@ -1,5 +1,98 @@
 use super::*;
 
+/// Why [`App::try_split_pane_in_workspace`] refused, with the numbers
+/// the decision was made from (Issue #335).
+///
+/// The point of the split is the one distinction a caller has to act
+/// on: `TargetTooSmall` is **target-local** — another target in the
+/// same tab may still split — while `PaneLimitReached` is
+/// **tab-global** and no target will help. Folding both into one
+/// `split_refused` string made an orchestrator that read the refusal
+/// as "the tab is full" give up on capacity that existed.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum SplitRefusal {
+    /// The tab already holds `MAX_PANES` panes.
+    PaneLimitReached { panes: usize, max: usize },
+    /// Halving the target along the requested axis would leave panes
+    /// under the configured minimum. `available` is the target's
+    /// current extent on that axis, `required` the per-pane minimum
+    /// (`min_pane_width` / `min_pane_height`).
+    TargetTooSmall {
+        target: usize,
+        direction: SplitDirection,
+        available: u16,
+        required: u16,
+        panes: usize,
+        max: usize,
+    },
+    /// The terminal itself is below the layout threshold, so no
+    /// workspace has geometry any target could be judged against.
+    TerminalTooSmall { cols: u16, rows: u16 },
+    /// The workspace disappeared between resolution and the split.
+    WorkspaceMissing { ws_index: usize },
+}
+
+impl SplitRefusal {
+    /// Wire code for this refusal. Only the two split-out causes get
+    /// their own code; the rest keep the legacy `split_refused`,
+    /// which callers must treat as "cause unknown".
+    pub(crate) fn code(&self) -> &'static str {
+        match self {
+            SplitRefusal::PaneLimitReached { .. } => ipc::err_code::PANE_LIMIT_REACHED,
+            SplitRefusal::TargetTooSmall { .. } => ipc::err_code::TARGET_TOO_SMALL,
+            SplitRefusal::TerminalTooSmall { .. } | SplitRefusal::WorkspaceMissing { .. } => {
+                ipc::err_code::SPLIT_REFUSED
+            }
+        }
+    }
+
+    /// Human-readable message carrying the observed values, so a
+    /// caller can branch on the code and a human can see *why*
+    /// without a second round-trip.
+    pub(crate) fn message(&self) -> String {
+        match *self {
+            SplitRefusal::PaneLimitReached { panes, max } => format!(
+                "pane limit reached: this tab already holds {panes} of {max} panes, so no target \
+                 in it can be split. Close a pane, or place the new one in another tab \
+                 (tab: {{\"new\": {{}}}})."
+            ),
+            SplitRefusal::TargetTooSmall {
+                target,
+                direction,
+                available,
+                required,
+                panes,
+                max,
+            } => {
+                let (axis, unit, knob) = match direction {
+                    SplitDirection::Vertical => ("wide", "columns", "min_pane_width"),
+                    SplitDirection::Horizontal => ("tall", "rows", "min_pane_height"),
+                };
+                format!(
+                    "target pane {target} is too small to split: it is {available} {unit} {axis}, \
+                     so each half would get {half} {unit}, below the {required}-{unit_singular} \
+                     minimum ({knob}). This refusal is target-local — the tab holds {panes} of \
+                     {max} panes, so a larger target (or the other direction) can still succeed.",
+                    half = available / 2,
+                    unit_singular = &unit[..unit.len() - 1],
+                )
+            }
+            SplitRefusal::TerminalTooSmall { cols, rows } => format!(
+                "terminal too small to lay out any split ({cols}x{rows}, minimum \
+                 {MIN_LAYOUT_COLS}x{MIN_LAYOUT_ROWS}); no target in any tab can be judged \
+                 against current geometry"
+            ),
+            SplitRefusal::WorkspaceMissing { ws_index } => {
+                format!("workspace {ws_index} vanished before the split could be applied")
+            }
+        }
+    }
+
+    pub(crate) fn into_coded_error(self) -> ipc::CodedError {
+        ipc::CodedError::new(self.code(), self.message())
+    }
+}
+
 impl App {
     pub(crate) fn new_tab(&mut self) -> Result<usize> {
         self.new_tab_with_cwd(None)
@@ -172,7 +265,7 @@ impl App {
         }
     }
 
-    const MAX_PANES: usize = 16;
+    pub(crate) const MAX_PANES: usize = 16;
     /// Cap on simultaneously open tabs. Exists for the same reason as
     /// `MAX_PANES`: automated orchestration (`spawn_*` with `tab:
     /// {new: …}`) can create tabs in a loop, and every tab carries a
@@ -205,8 +298,37 @@ impl App {
         self.split_pane_in_workspace(ws_index, target, direction, new_pane_first, cwd_override)
     }
 
+    /// Option-returning wrapper over [`Self::try_split_pane_in_workspace`]
+    /// for the interactive callers (key chords, double-click, layout
+    /// TOML apply) that only ever ask "did it split?" — none of them
+    /// has anywhere to show a cause. The IPC path uses the detailed
+    /// form so it can report *which* refusal it hit.
+    pub(crate) fn split_pane_in_workspace(
+        &mut self,
+        ws_index: usize,
+        target_pane_id: usize,
+        direction: SplitDirection,
+        new_pane_first: bool,
+        cwd_override: Option<PathBuf>,
+    ) -> Result<Option<usize>> {
+        Ok(self
+            .try_split_pane_in_workspace(
+                ws_index,
+                target_pane_id,
+                direction,
+                new_pane_first,
+                cwd_override,
+            )?
+            .ok())
+    }
+
     /// Split `target_pane_id` inside workspace `ws_index`, regardless of
     /// which tab is currently on screen.
+    ///
+    /// A refusal comes back as [`SplitRefusal`] rather than a bare
+    /// `None` (Issue #335): the three reasons a split can be refused
+    /// need different reactions from a caller, and only this function
+    /// still has the numbers the decision was made from.
     ///
     /// Every piece of state this touches — the pane cap, the geometry
     /// used for the min-size guard and the new PTY's first-frame size,
@@ -216,29 +338,34 @@ impl App {
     /// one, which is why the relayout at the end is targeted too:
     /// `mark_layout_change` (with its repaint cooldown) is only right
     /// for the tab the user is actually watching.
-    pub(crate) fn split_pane_in_workspace(
+    pub(crate) fn try_split_pane_in_workspace(
         &mut self,
         ws_index: usize,
         target_pane_id: usize,
         direction: SplitDirection,
         new_pane_first: bool,
         cwd_override: Option<PathBuf>,
-    ) -> Result<Option<usize>> {
+    ) -> Result<std::result::Result<usize, SplitRefusal>> {
         if self.workspaces.get(ws_index).is_none() {
-            return Ok(None);
+            return Ok(Err(SplitRefusal::WorkspaceMissing { ws_index }));
         }
-        if self.workspaces[ws_index].layout.pane_count() >= Self::MAX_PANES {
-            return Ok(None);
+        let panes = self.workspaces[ws_index].layout.pane_count();
+        if panes >= Self::MAX_PANES {
+            return Ok(Err(SplitRefusal::PaneLimitReached {
+                panes,
+                max: Self::MAX_PANES,
+            }));
         }
 
         // Below the layout threshold no workspace has usable rects —
         // `relayout_workspace` bails, so `last_pane_rects` describes a
         // terminal that is gone. Refuse rather than judge "is there
-        // room?" against geometry we know is stale; the caller gets
-        // `split_refused`, which is also the honest answer for a
-        // terminal this small.
+        // room?" against geometry we know is stale. This is the one
+        // refusal that is neither target-local nor a pane-cap hit, so
+        // it keeps the legacy `split_refused` code.
         if self.terminal_too_small_for_layout() {
-            return Ok(None);
+            let (cols, rows) = self.last_term_size;
+            return Ok(Err(SplitRefusal::TerminalTooSmall { cols, rows }));
         }
 
         let focused_rect = self.workspaces[ws_index]
@@ -248,17 +375,19 @@ impl App {
             .map(|&(_, rect)| rect);
 
         if let Some(rect) = focused_rect {
-            match direction {
-                SplitDirection::Vertical => {
-                    if rect.width / 2 < self.min_pane_width {
-                        return Ok(None);
-                    }
-                }
-                SplitDirection::Horizontal => {
-                    if rect.height / 2 < self.min_pane_height {
-                        return Ok(None);
-                    }
-                }
+            let (available, required) = match direction {
+                SplitDirection::Vertical => (rect.width, self.min_pane_width),
+                SplitDirection::Horizontal => (rect.height, self.min_pane_height),
+            };
+            if available / 2 < required {
+                return Ok(Err(SplitRefusal::TargetTooSmall {
+                    target: target_pane_id,
+                    direction,
+                    available,
+                    required,
+                    panes,
+                    max: Self::MAX_PANES,
+                }));
             }
         }
 
@@ -323,7 +452,7 @@ impl App {
         // A split during a single-pane tab-close prompt would widen the
         // blast radius past what the user agreed to.
         self.revalidate_close_confirm();
-        Ok(Some(new_id))
+        Ok(Ok(new_id))
     }
 
     pub(crate) fn spawn_claude_in_selected_dir(&mut self, direction: SplitDirection) -> Result<()> {

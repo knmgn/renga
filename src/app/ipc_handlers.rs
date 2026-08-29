@@ -896,18 +896,14 @@ impl App {
         // No focus round-trip any more: the indexed primitive takes the
         // target directly, so a refused split leaves every workspace's
         // focus exactly where it was instead of relying on a restore.
-        let new_pane_id = match self
-            .split_pane_in_workspace(ws_idx, target_pane_id, split_dir, false, cwd_override)
+        // A refusal is reported by cause (Issue #335): `target_too_small`
+        // is target-local and worth retrying elsewhere in the tab,
+        // `pane_limit_reached` is not. The legacy `split_refused` is
+        // left only for the causes that are neither.
+        let new_pane_id = self
+            .try_split_pane_in_workspace(ws_idx, target_pane_id, split_dir, false, cwd_override)
             .map_err(|e| ipc::CodedError::new(ipc::err_code::IO_ERROR, e.to_string()))?
-        {
-            Some(id) => id,
-            None => {
-                return Err(ipc::CodedError::new(
-                    ipc::err_code::SPLIT_REFUSED,
-                    "split refused (max panes reached or pane too small)",
-                ));
-            }
-        };
+            .map_err(SplitRefusal::into_coded_error)?;
         let effective_command = command.or_else(|| default_command_for_role(role.as_deref()));
         if let Some(pane) = self.workspaces[ws_idx].panes.get_mut(&new_pane_id) {
             if let Some(cmd) = effective_command {
