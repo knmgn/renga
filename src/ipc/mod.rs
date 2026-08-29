@@ -232,6 +232,25 @@ pub const CAP_SUBSCRIBE_PANE_SCOPE: &str = "subscribe_pane_scope";
 /// back to #288.
 pub const CAP_CROSS_TAB_LIST: &str = "cross_tab_list";
 
+/// Capability token advertised by servers that report a refused split
+/// **by cause** (Issue #335): `target_too_small` for a target-local
+/// refusal, `pane_limit_reached` for the tab-global pane cap, with
+/// [`err_code::SPLIT_REFUSED`] left for refusals that are neither.
+///
+/// Like [`CAP_SUBSCRIBE_PANE_SCOPE`], this token is **advertise-only**:
+/// no client gates a request on it and its absence changes no client
+/// behaviour. It exists because the distinction it names cannot be
+/// inferred from a single reply. An older server answers every refusal
+/// with `split_refused`, which on a #335 server means "cause unknown" —
+/// so a client that reads one `split_refused` cannot tell "this server
+/// examined the causes and found neither" from "this server does not
+/// examine causes at all". With the token, a client knows in advance
+/// which of the two it is talking to; without it, the conservative
+/// reading of `split_refused` (the pre-#335 one: could be either
+/// cause) is the correct one.
+
+pub const CAP_SPLIT_REFUSAL_CAUSES: &str = "split_refusal_causes";
+
 /// Every capability token this build's server advertises. Additive by
 /// construction — clients match on tokens they know and ignore the
 /// rest.
@@ -243,6 +262,7 @@ pub const SERVER_CAPABILITIES: &[&str] = &[
     CAP_PEER_USER_TURN,
     CAP_SUBSCRIBE_PANE_SCOPE,
     CAP_CROSS_TAB_LIST,
+    CAP_SPLIT_REFUSAL_CAUSES,
 ];
 
 /// One IPC call from a client to the running renga instance.

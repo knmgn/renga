@@ -771,6 +771,14 @@ mod tests {
     /// `tab` on a `List` and answers with the caller's tab alone, and
     /// does so with an `Ok` a client cannot distinguish from a correct
     /// one, which is why it is gated rather than advertise-only.
+    ///
+    /// `split_refusal_causes` is #335's, and is advertise-only like
+    /// `subscribe_pane_scope`: it gates no request, because a client
+    /// sends nothing new — the change is which error code comes back
+    /// from a refused `Split`. It is on the list because that
+    /// distinction cannot be read off one reply: `split_refused` from
+    /// a #335 server means "neither of the two named causes", while
+    /// from an older one it means "one of them, unspecified".
     #[test]
     fn capability_exposure_mints_no_new_token() {
         assert_eq!(
@@ -783,6 +791,7 @@ mod tests {
                 super::super::CAP_PEER_USER_TURN,
                 super::super::CAP_SUBSCRIBE_PANE_SCOPE,
                 super::super::CAP_CROSS_TAB_LIST,
+                super::super::CAP_SPLIT_REFUSAL_CAUSES,
             ],
             "#304 is introspection only and adds no capability token"
         );

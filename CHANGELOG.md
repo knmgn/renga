@@ -40,6 +40,13 @@ rules in [`docs/semver-policy-2.0.md`](./docs/semver-policy-2.0.md).
   gave up while a 397x53 pane in the same tab was splittable well
   within the cap.
 
+  Servers that report a refused split by cause advertise a
+  `split_refusal_causes` capability token, so a client can tell the two
+  meanings of `split_refused` apart in advance instead of having to
+  guess from a single reply. Like `subscribe_pane_scope` the token is
+  advertise-only — it gates no request, because a client sends nothing
+  new.
+
 ### Deprecated
 
 - **`split_refused` as a diagnosis.** (#335) The code stays on the wire
@@ -48,7 +55,10 @@ rules in [`docs/semver-policy-2.0.md`](./docs/semver-policy-2.0.md).
   neither — currently a terminal below the layout threshold, and the
   workspace-vanished race — and should be treated as *cause unknown*.
   Clients branching on split refusals should match `target_too_small` /
-  `pane_limit_reached` instead.
+  `pane_limit_reached` instead. A client that has not seen the
+  `split_refusal_causes` token must keep reading `split_refused` the
+  pre-#335 way (cause unknown, could be either) — an older server still
+  answers both causes with it.
 
 ## [2.2.0] — 2026-08-10
 

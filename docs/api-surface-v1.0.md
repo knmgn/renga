@@ -678,6 +678,18 @@ and under-counts its own capacity. Gating on the request *shape* rather than on
 the resolved tab is what keeps that failure uniform. Calls without `tab` keep
 requiring only `caller_scope`, so pre-#329 behavior is untouched.
 
+Servers that report a refused split **by cause** advertise
+`split_refusal_causes` (#335), appended last to the capability list. Like
+`subscribe_pane_scope` it is **advertise-only**: no client gates a request on
+it, because a client sends nothing new — what changed is which error code
+comes back from a refused `split` (`target_too_small` / `pane_limit_reached`
+instead of a single `split_refused`). It is on the list because that
+distinction cannot be read off one reply: `split_refused` from a #335 server
+means "neither of the two named causes", while from an older one it means "one
+of them, unspecified". A client that has not confirmed the token must keep the
+conservative pre-#335 reading of `split_refused` — cause unknown, could be
+either.
+
 ### 3.5 Event envelope — stable
 
 `#[serde(tag = "type", rename_all = "snake_case")]`.
