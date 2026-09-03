@@ -9,6 +9,12 @@ rules in [`docs/semver-policy-2.0.md`](./docs/semver-policy-2.0.md).
 
 ## [Unreleased]
 
+## [3.1.0] — 2026-09-04
+
+> **First release of the `knmgn/renga` fork.** The version line
+> continues from upstream's 3.0.0 for continuity; the command this
+> release installs is `renga-cp`, not `renga`.
+
 ### Changed
 
 - **This repository is now its own line, not a branch of upstream's.**

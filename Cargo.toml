@@ -246,7 +246,22 @@ name = "renga-cp"
 # input (the old height clamp and scroll-position dependence were both
 # undocumented), so no frozen v1.0 API surface item (MCP wire shape,
 # CLI flags, config keys, env vars) changes incompatibly.
-version = "3.0.0"
+# 3.1.0 is the first release of the knmgn/renga fork. It adds GitHub
+# Copilot CLI as a third peer client — `spawn_copilot_pane`, `renga-cp
+# mcp install --client copilot`, `PeerClientKind::Copilot`, and the
+# `copilot_not_installed` error code — and fixes a display bug the live
+# testing of that feature exposed: a pane's rendered client came from
+# OSC-title latches that any agent could contaminate, so a Copilot
+# worker nudged by a Claude orchestrator repainted itself as Claude.
+# Minor bump: every frozen-surface item here is additive (a new MCP
+# tool, a new `--client` value, a new error code token, a new
+# `RENGA_PEER_CLIENT_KIND` value), and the display fix is a bug fix.
+# The command rename `renga` -> `renga-cp` is not counted as a break in
+# this line: it is what makes the fork installable beside upstream, and
+# this is the line's first release, so it has no prior consumers to
+# break. Upstream users switching over should read it as a different
+# command, not an upgrade.
+version = "3.1.0"
 edition = "2021"
 description = "AI-native terminal for orchestrating multiple Claude Code and Codex agents in one workspace"
 
