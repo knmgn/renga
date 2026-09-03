@@ -57,6 +57,11 @@ pub struct Pane {
     /// codex_peer detection) still uses the live `is_codex_running()`
     /// signal — see issue #209 for the cosmetic-vs-foreground split.
     pub codex_seen: Arc<AtomicBool>,
+    /// Copilot CLI equivalent of `claude_seen` / `codex_seen`. Latches
+    /// on the first OSC title mentioning "copilot" — Copilot CLI sets
+    /// `GitHub Copilot` at startup — and never resets, for the same
+    /// cosmetic-indicator reason the other two latches exist.
+    pub copilot_seen: Arc<AtomicBool>,
     /// Cache of the most recently *detected* Claude caret cell on
     /// this pane: `(host_row, host_col)` in vt100 screen coords —
     /// already shifted to land on Claude's inverse-video marker.
@@ -191,6 +196,8 @@ impl Pane {
         let claude_seen_clone = Arc::clone(&claude_seen);
         let codex_seen = Arc::new(AtomicBool::new(false));
         let codex_seen_clone = Arc::clone(&codex_seen);
+        let copilot_seen = Arc::new(AtomicBool::new(false));
+        let copilot_seen_clone = Arc::clone(&copilot_seen);
         let mouse_protocol_cache = Arc::new(Mutex::new(None));
         let mouse_protocol_cache_clone = Arc::clone(&mouse_protocol_cache);
         let alternate_scroll_mode = Arc::new(AtomicBool::new(false));
@@ -205,6 +212,7 @@ impl Pane {
                 prompt_seen_clone,
                 claude_seen_clone,
                 codex_seen_clone,
+                copilot_seen_clone,
                 mouse_protocol_cache_clone,
                 alternate_scroll_mode_clone,
                 id,
@@ -229,6 +237,7 @@ impl Pane {
             prompt_seen,
             claude_seen,
             codex_seen,
+            copilot_seen,
             claude_caret_cache: Mutex::new(None),
             mouse_protocol_cache,
             alternate_scroll_mode,
@@ -535,6 +544,18 @@ impl Pane {
         }
     }
 
+    /// Check if GitHub Copilot CLI is running in this pane (by current
+    /// window title, which it sets to `GitHub Copilot`). Live signal,
+    /// same caveats as the Claude and Codex variants; use
+    /// `copilot_ever_seen()` for cosmetic indicators.
+    pub fn is_copilot_running(&self) -> bool {
+        if let Ok(t) = self.title.lock() {
+            title_mentions_client(&t, "copilot")
+        } else {
+            false
+        }
+    }
+
     fn effective_mouse_protocol(
         &self,
         mode: vt100::MouseProtocolMode,
@@ -613,6 +634,13 @@ impl Pane {
     /// `is_codex_running()` so it sees the honest current state.
     pub fn codex_ever_seen(&self) -> bool {
         self.codex_seen.load(Ordering::Relaxed)
+    }
+
+    /// Sticky check: has Copilot CLI ever been observed in this pane?
+    /// Cosmetic-indicator counterpart to `is_copilot_running()`, same
+    /// split as [`Self::codex_ever_seen`].
+    pub fn copilot_ever_seen(&self) -> bool {
+        self.copilot_seen.load(Ordering::Relaxed)
     }
 
     /// Whether it is safe to synthesize a shell command line into this
@@ -986,6 +1014,7 @@ fn pty_reader_thread(
     prompt_seen: Arc<AtomicBool>,
     claude_seen: Arc<AtomicBool>,
     codex_seen: Arc<AtomicBool>,
+    copilot_seen: Arc<AtomicBool>,
     mouse_protocol_cache: Arc<Mutex<Option<CachedMouseProtocol>>>,
     alternate_scroll_mode: Arc<AtomicBool>,
     pane_id: usize,
@@ -1043,6 +1072,9 @@ fn pty_reader_thread(
                     }
                     if lower.contains("codex") {
                         codex_seen.store(true, Ordering::Relaxed);
+                    }
+                    if lower.contains("copilot") {
+                        copilot_seen.store(true, Ordering::Relaxed);
                     }
                     if let Ok(mut t) = title.lock() {
                         *t = new_title;

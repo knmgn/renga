@@ -275,11 +275,7 @@ impl PeerCtx {
 }
 
 fn parse_client_kind(raw: &str) -> Option<PeerClientKind> {
-    match raw.trim().to_ascii_lowercase().as_str() {
-        "claude" => Some(PeerClientKind::Claude),
-        "codex" => Some(PeerClientKind::Codex),
-        _ => None,
-    }
+    PeerClientKind::parse_label(raw)
 }
 
 // ── stdio JSON-RPC frame plumbing ─────────────────────────────
@@ -390,6 +386,19 @@ you on the shoulder — answer right away, even if you're in the middle of somet
 Read the from_id and from_name attributes to understand who sent the message. Reply by \
 calling send_message with their from_id.\n\n"
         }
+        PeerClientKind::Copilot => {
+            "IMPORTANT: renga may inject a one-shot nudge into this Copilot pane telling you to run \
+check_messages, or show a focused-pane notification overlay that inserts the same prompt only after \
+the user accepts it. Treat either path as a prompt to drain your MCP inbox immediately. The actual \
+peer request body comes from check_messages, and each returned message should be handled like a \
+direct coworker instruction unless it conflicts with a higher-priority system, developer, or user \
+instruction. If a peer asks you to inspect panes, run tools, edit code, or otherwise take action, \
+do that work; do not reduce the interaction to a mere acknowledgement. Focused panes may be left \
+unnudged so renga does not scribble over the active conversation; check_messages at sensible \
+checkpoints even if no pane-local nudge appeared. Use send_message when a reply, clarification, \
+status update, or handoff is actually needed.\n\n\
+Peer tools are exposed to you as `renga-peers-<tool>` (for example `renga-peers-check_messages`).\n\n"
+        }
         PeerClientKind::Codex => {
             "IMPORTANT: renga may inject a one-shot nudge into the Codex pane telling you to run \
 check_messages, or show a focused-pane notification overlay that inserts the same prompt only after \
@@ -419,9 +428,9 @@ the numeric id from list_peers for peers in other tabs.\n\
 - set_summary: Set a 1-2 sentence summary of what you're working on; surfaced on list_panes / list_peers for other peers.\n\
 - check_messages: Drain any queued peer messages still waiting for this client.\n\n\
 Pane control tools. For list_panes, spawn_pane, spawn_claude_pane, spawn_codex_pane, \
-focus_pane, inspect_pane, send_keys, close_pane and set_pane_identity, \"current tab\" means \
+spawn_copilot_pane, focus_pane, inspect_pane, send_keys, close_pane and set_pane_identity, \"current tab\" means \
 the tab YOUR pane lives in, not whichever tab the user happens to be looking at — so these \
-stay correct while the user switches tabs. For all nine, relative targets (`focused`, a \
+stay correct while the user switches tabs. For all ten, relative targets (`focused`, a \
 stable name) never leave your tab; a numeric pane id from another tab does reach across, \
 which is the deliberate escape hatch for orchestrating sibling tabs. new_tab creates a whole \
 new tab:\n\
@@ -441,6 +450,10 @@ for orchestrator flows — keeps Claude launch policy in renga instead of in eve
 structured `args[]` instead of a free-form command string and launches plain `codex`. Prefer \
 this over `spawn_pane(command=\"codex ...\")` so orchestrator prompts do not have to synthesize \
 shell-quoted Codex commands.\n\
+- spawn_copilot_pane: The same convenience for GitHub Copilot CLI, launching plain `copilot`. \
+Copilot asks for folder trust on first launch in a directory and for permission on each tool \
+use; renga deliberately refuses to type into those dialogs, so pass `--allow-all-tools` (or \
+narrower `--allow-tool` values) in `args[]` when the pane is meant to work unattended.\n\
 - close_pane: Close a pane by id, name, or `focused`. `focused` and names mean YOUR tab; a \
 numeric id may name a pane in any tab. Refuses when it's the last pane of the last tab.\n\
 - focus_pane: Move keyboard focus to another pane. Whenever the resolved pane is not in the \
@@ -478,7 +491,8 @@ strings. For arbitrary shell commands (non-Claude), use spawn_pane / new_tab. Wh
 are asked to run a bare `claude` invocation the MCP still auto-upgrades it to the \
 peer-enabled form (`claude --dangerously-load-development-channels server:renga-peers`), but \
 spawn_claude_pane is the recommended API for agent harnesses. For Codex launches, prefer \
-spawn_codex_pane once `renga mcp install --client codex` has been run for that user.\n\n\
+spawn_codex_pane once `renga mcp install --client codex` has been run for that user, and \
+spawn_copilot_pane once `renga mcp install --client copilot` has been run.\n\n\
 IMPORTANT about pane control: these tools affect the user's live layout. Use them with \
 restraint — don't close or focus panes you don't own unless the user asked you to. When in \
 doubt, ask first."
@@ -708,6 +722,54 @@ fn tools_spec() -> Value {
             }
         },
         {
+            "name": "spawn_copilot_pane",
+            "description": "Higher-level convenience over `spawn_pane`: splits a pane and launches GitHub Copilot CLI without the orchestrating caller having to synthesize a shell-quoted `copilot ...` command string. This helper assumes the user has already run `renga mcp install --client copilot`; that registration injects the `RENGA_PEER_CLIENT_KIND=copilot` env into Copilot's MCP server subprocess, so a plain `copilot` launch is enough for the new pane to register as a pull-based peer. Extra `args[]` are appended after the `copilot` token using the same POSIX-style shell quoting as spawn_claude_pane. Pane creation semantics (split refusal, cwd validation, name / role attachment) match `spawn_pane`. Note that Copilot prompts for folder trust on first launch in a directory and for each tool use unless the pane was launched with `--allow-tool`/`--allow-all-tools`; renga refuses to type into those dialogs, so an unattended worker pane usually wants those flags in `args[]`.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "direction": {
+                        "type": "string",
+                        "enum": ["vertical", "horizontal"],
+                        "description": "`vertical` splits side-by-side (new pane to the right); `horizontal` splits top/bottom (new pane on the bottom). Required unless `tab` is `{\"new\": …}` (omit it there)."
+                    },
+                    "target": {
+                        "type": "string",
+                        "description": "Pane to split. Numeric id, stable name, or the literal 'focused'. Defaults to 'focused' when omitted. With a `tab` selector the target must live in the selected tab. Omit with `tab: {\"new\": …}`."
+                    },
+                    "tab": {
+                        "type": "object",
+                        "properties": {
+                            "name": { "type": "string" },
+                            "index": { "type": "integer", "minimum": 0 },
+                            "pane_id": { "type": "integer", "minimum": 0 },
+                            "new": {
+                                "type": "object",
+                                "properties": { "name": { "type": "string" } }
+                            }
+                        },
+                        "description": "Optional tab placement — same selector and semantics as `spawn_pane`'s `tab`: exactly one of {\"name\"}, {\"index\"}, {\"pane_id\"}, or {\"new\": {…}} for a fresh single-pane background tab (visible tab unchanged; `direction`/`target` must be omitted). Requires the server's spawn_tab capability; older servers are refused instead of spawning into the wrong tab."
+                    },
+                    "name": {
+                        "type": "string",
+                        "description": "Optional stable id for the new pane so it can be addressed by name later."
+                    },
+                    "role": {
+                        "type": "string",
+                        "description": "Optional free-form role label (e.g. 'worker', 'reviewer', 'curator'). Shown in the UI and in list_panes output."
+                    },
+                    "cwd": {
+                        "type": "string",
+                        "description": "Optional working directory for the new pane. Absolute paths are used as-is; relative paths are resolved against the caller pane's cwd. Same semantics as `spawn_pane`'s cwd."
+                    },
+                    "args": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Additional Copilot CLI args appended after the `copilot` token. renga owns shell quoting for each item, so callers should pass one logical token per array entry."
+                    }
+                }
+            }
+        },
+        {
             "name": "close_pane",
             "description": "Close a pane, terminating its process. Relative targets ('focused', a name) resolve inside your own tab; a numeric id may name a pane in any tab, which is the deliberate cross-tab escape hatch. Fails with code 'last_pane' when the target is the last pane of the only remaining tab. Needs a renga server advertising the caller_scope_close_identity capability; older servers are refused (server_too_old) rather than closing a pane in whatever tab the user is viewing.",
             "inputSchema": {
@@ -873,7 +935,9 @@ fn handle_initialize(id: &Value, params: &Value, ctx: &PeerCtx) -> Value {
         .unwrap_or("2025-06-18");
     let experimental = match ctx.client_kind {
         PeerClientKind::Claude => json!({ "claude/channel": {} }),
-        PeerClientKind::Codex => json!({}),
+        // Pull clients get no channel capability: declaring one would
+        // advertise a push path neither of them can receive.
+        PeerClientKind::Codex | PeerClientKind::Copilot => json!({}),
     };
     ok_response(
         id,
@@ -975,10 +1039,7 @@ tab index shown is display metadata that shifts when tabs close:\n\n",
 }
 
 fn kind_label(kind: PeerClientKind) -> &'static str {
-    match kind {
-        PeerClientKind::Claude => "claude",
-        PeerClientKind::Codex => "codex",
-    }
+    kind.label()
 }
 
 fn receive_mode_label(mode: ipc::PeerReceiveMode) -> &'static str {
@@ -1442,6 +1503,7 @@ fn handle_tools_call(id: &Value, params: &Value, ctx: &PeerCtx) -> Result<Value>
         "spawn_pane" => handle_spawn_pane(id, &args, ctx),
         "spawn_claude_pane" => handle_spawn_claude_pane(id, &args, ctx),
         "spawn_codex_pane" => handle_spawn_codex_pane(id, &args, ctx),
+        "spawn_copilot_pane" => handle_spawn_copilot_pane(id, &args, ctx),
         "close_pane" => handle_close_pane(id, &args, ctx),
         "focus_pane" => handle_focus_pane(id, &args, ctx),
         "new_tab" => handle_new_tab(id, &args, ctx),
@@ -2212,6 +2274,14 @@ fn build_codex_launch_command(extra_args: &[String]) -> String {
     parts.join(" ")
 }
 
+fn build_copilot_launch_command(extra_args: &[String]) -> String {
+    let mut parts: Vec<String> = vec!["copilot".to_string()];
+    for a in extra_args {
+        parts.push(shell_quote(a));
+    }
+    parts.join(" ")
+}
+
 fn parse_string_args_array(args: &Value) -> std::result::Result<Vec<String>, String> {
     match args.get("args") {
         None => Ok(Vec::new()),
@@ -2646,6 +2716,137 @@ fn handle_spawn_codex_pane_with(
             -32603,
             &format!(
                 "renga refused spawn_codex_pane: {}",
+                fmt_code(&message, &code)
+            ),
+        ),
+        Ok(other) => err_response(id, -32603, &format!("unexpected renga response: {other:?}")),
+        Err(e) => err_response(id, -32603, &format!("renga call failed: {e}")),
+    }
+}
+
+fn handle_spawn_copilot_pane(id: &Value, args: &Value, ctx: &PeerCtx) -> Value {
+    handle_spawn_copilot_pane_with(id, args, ctx, install::verify_copilot_renga_peers_install)
+}
+
+/// Inner form with an injectable verifier so unit tests can drive the
+/// `RENGA_PEER_CLIENT_KIND` check independently of the host machine's
+/// `~/.copilot/mcp-config.json`.
+fn handle_spawn_copilot_pane_with(
+    id: &Value,
+    args: &Value,
+    ctx: &PeerCtx,
+    verify_copilot_install: fn() -> std::result::Result<(), String>,
+) -> Value {
+    let placement = match parse_spawn_placement(args) {
+        Ok(p) => p,
+        Err(msg) => return err_response(id, -32602, &msg),
+    };
+    let split_params = match &placement {
+        SpawnPlacement::NewTab { .. } => None,
+        _ => {
+            let direction = match parse_direction(args.get("direction").and_then(|v| v.as_str())) {
+                Ok(d) => d,
+                Err(msg) => return err_response(id, -32602, &msg),
+            };
+            Some((
+                direction,
+                parse_target(args.get("target").and_then(|v| v.as_str())),
+            ))
+        }
+    };
+    let name = opt_string(args, "name");
+    let role = opt_string(args, "role");
+    let cwd = opt_string(args, "cwd");
+    let extra_args = match parse_string_args_array(args) {
+        Ok(v) => v,
+        Err(msg) => return err_response(id, -32602, &msg),
+    };
+    let command = build_copilot_launch_command(&extra_args);
+
+    let (caller_pane, endpoint) = match require_connected(ctx, id, "spawn copilot pane") {
+        Ok(t) => t,
+        Err(resp) => return resp,
+    };
+
+    // Same guard as spawn_codex_pane (Issue #203): refuse to spawn
+    // unless Copilot's MCP config will inject
+    // `RENGA_PEER_CLIENT_KIND=copilot` into the new pane's mcp-peer
+    // subprocess. Otherwise the new pane registers as a
+    // push (claude) client and `send_message` delivery silently
+    // bifurcates from what the orchestrator expects. Runs after the
+    // detached/connected gate so a renga-not-reachable failure isn't
+    // hidden by a spurious `[copilot_not_installed]`.
+    if let Err(reason) = verify_copilot_install() {
+        // Always surface the remediation command — the verifier's
+        // detail string explains *which* check failed (file missing /
+        // entry missing / wrong value), but the user-actionable
+        // recovery is always the same.
+        return err_response(
+            id,
+            -32603,
+            &format!(
+                "renga refused spawn_copilot_pane: [copilot_not_installed] {reason} \
+                 (run `renga mcp install --client copilot` to register \
+                 Copilot with `RENGA_PEER_CLIENT_KIND=copilot`)"
+            ),
+        );
+    }
+    let cwd = match resolve_mcp_cwd(endpoint, caller_pane, cwd.as_deref()) {
+        Ok(v) => v,
+        Err(msg) => return err_response(id, -32602, &msg),
+    };
+    if let SpawnPlacement::NewTab { label } = placement {
+        return dispatch_spawn_tab(
+            id,
+            "spawn_copilot_pane",
+            "Copilot pane",
+            endpoint,
+            &Request::SpawnTab {
+                command: Some(command.clone()),
+                id: name,
+                label,
+                role,
+                cwd,
+                from_pane: Some(caller_pane),
+            },
+            Some(&command),
+        );
+    }
+    let required_cap = placement.required_cap();
+    let tab = match placement {
+        SpawnPlacement::Tab(selector) => Some(selector),
+        _ => None,
+    };
+    let (direction, target) = split_params.expect("split params parsed for non-new placement");
+    match client::send_request_requiring(
+        endpoint,
+        &Request::Split {
+            target,
+            direction,
+            command: Some(command.clone()),
+            id: name,
+            role,
+            cwd,
+            from_pane: Some(caller_pane),
+            tab,
+        },
+        required_cap,
+    ) {
+        Ok(Response::Ok { data }) => {
+            let new_id = data.get("id").and_then(|v| v.as_u64());
+            let msg = match new_id {
+                Some(n) => format!("Spawned Copilot pane id={n}. Launch command: {command}"),
+                None => {
+                    format!("Spawned Copilot pane (id not reported). Launch command: {command}")
+                }
+            };
+            ok_response(id, tool_text_result(&msg))
+        }
+        Ok(Response::Err { message, code }) => err_response(
+            id,
+            -32603,
+            &format!(
+                "renga refused spawn_copilot_pane: {}",
                 fmt_code(&message, &code)
             ),
         ),
@@ -4354,6 +4555,73 @@ mod tests {
             names.contains(&"spawn_codex_pane"),
             "spawn_codex_pane missing from tools list: {names:?}"
         );
+    }
+
+    #[test]
+    fn tools_spec_advertises_spawn_copilot_pane() {
+        let spec = tools_spec();
+        let names: Vec<&str> = spec
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|t| t.get("name").and_then(|v| v.as_str()))
+            .collect();
+        assert!(
+            names.contains(&"spawn_copilot_pane"),
+            "spawn_copilot_pane missing from tools list: {names:?}"
+        );
+    }
+
+    #[test]
+    fn build_copilot_launch_command_bare_defaults_to_plain_copilot() {
+        assert_eq!(build_copilot_launch_command(&[]), "copilot");
+    }
+
+    #[test]
+    fn build_copilot_launch_command_quotes_values_with_whitespace() {
+        let got = build_copilot_launch_command(&[
+            "--add-dir".to_string(),
+            "C:/Program Files/work".to_string(),
+        ]);
+        assert!(
+            got.contains("'C:/Program Files/work'"),
+            "arg with space not quoted: {got}"
+        );
+    }
+
+    /// Copilot is a pull client, so it must not be told it has a
+    /// `claude/channel` — advertising one would promise a push path it
+    /// cannot receive on.
+    #[test]
+    fn copilot_initialize_declares_no_channel_capability() {
+        let ctx = connected_ctx_with_kind(new_event_sink(), PeerClientKind::Copilot);
+        let resp = handle_initialize(&json!(1), &json!({}), &ctx);
+        let experimental = resp
+            .pointer("/result/capabilities/experimental")
+            .expect("experimental capabilities present");
+        assert_eq!(experimental, &json!({}));
+    }
+
+    #[test]
+    fn copilot_instructions_point_at_check_messages() {
+        let blob = instructions_blob(PeerClientKind::Copilot);
+        assert!(blob.contains("check_messages"), "{blob}");
+    }
+
+    #[test]
+    fn client_kind_labels_round_trip() {
+        for kind in [
+            PeerClientKind::Claude,
+            PeerClientKind::Codex,
+            PeerClientKind::Copilot,
+        ] {
+            assert_eq!(PeerClientKind::parse_label(kind.label()), Some(kind));
+        }
+        assert_eq!(
+            parse_client_kind("  COPILOT "),
+            Some(PeerClientKind::Copilot)
+        );
+        assert_eq!(parse_client_kind("gemini"), None);
     }
 
     #[test]

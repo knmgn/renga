@@ -76,6 +76,21 @@ fn install(force: bool, client: McpClient, codex_auto_approve_peer_tools: bool) 
                     ensure_codex_auto_approve_peer_tools()?;
                 }
             }
+            if client == McpClient::Copilot && verify_copilot_renga_peers_install().is_err() {
+                // Same self-heal as the Codex arm above, for the same
+                // reason: without it, `spawn_copilot_pane`'s
+                // `[copilot_not_installed]` hint sends the user to this
+                // command, which would find an entry, print "already
+                // registered" and change nothing — leaving them to
+                // discover `--force` on their own.
+                remove_silent(client)?;
+                install_copilot(&exe)?;
+                println!(
+                    "{}",
+                    install_success_message(client, &exe, codex_auto_approve_peer_tools)
+                );
+                return Ok(());
+            }
             println!(
                 "{SERVER_NAME} is already registered in {} → {existing}\n\
                  Re-run with `renga mcp install --client {client} --force` to overwrite with: {}",
@@ -90,6 +105,7 @@ fn install(force: bool, client: McpClient, codex_auto_approve_peer_tools: bool) 
     match client {
         McpClient::Claude => install_claude(&exe)?,
         McpClient::Codex => install_codex(&exe)?,
+        McpClient::Copilot => install_copilot(&exe)?,
     }
 
     if client == McpClient::Codex && codex_auto_approve_peer_tools {
@@ -126,6 +142,25 @@ fn install_claude(exe: &Path) -> Result<()> {
         .context("spawn `claude mcp add-json`")?;
     if !status.success() {
         bail!("`claude mcp add-json` exited with status {status}");
+    }
+    Ok(())
+}
+
+/// Register with GitHub Copilot CLI.
+///
+/// Shorter than [`install_codex`] because Copilot needs no config
+/// post-patch: `copilot mcp add --env` writes the variable straight
+/// into `~/.copilot/mcp-config.json`, so there is no sandbox
+/// passthrough list to repair. Tool approvals are a launch-time
+/// concern there (`--allow-tool`), not a config one, so there is no
+/// Copilot analogue of `--codex-auto-approve-peer-tools` either.
+fn install_copilot(exe: &Path) -> Result<()> {
+    let status = client_command(McpClient::Copilot)?
+        .args(copilot_add_args(exe))
+        .status()
+        .context("spawn `copilot mcp add`")?;
+    if !status.success() {
+        bail!("`copilot mcp add` exited with status {status}");
     }
     Ok(())
 }
@@ -175,6 +210,22 @@ fn install_success_message(
              prompt less often."
             }
         ),
+        McpClient::Copilot => format!(
+            "Registered {SERVER_NAME} in GitHub Copilot CLI → {}\n\
+             Next: launch `copilot` from inside a renga pane. This registration \
+             injects `{ENV_CLIENT_KIND}=copilot`, so peer messages are received \
+             through `check_messages` instead of Claude channels.\n\
+             Copilot exposes the tools as `{SERVER_NAME}-<tool>`; pass \
+             `--allow-tool='{SERVER_NAME}'` to stop it prompting for each peer \
+             call.\n\
+             Note: Copilot CLI may print \"Third-party MCP servers are disabled \
+             by your organization's Copilot policy\" at startup even on a personal \
+             account, where that policy does not apply. It is a known false \
+             warning (github/copilot-cli#1707, #1976, #2236) and does not stop \
+             {SERVER_NAME} from loading — run `renga mcp status --client copilot` \
+             to confirm the registration.",
+            exe.display()
+        ),
     }
 }
 
@@ -207,11 +258,16 @@ fn remove_silent(client: McpClient) -> Result<()> {
             .args(["mcp", "remove", SERVER_NAME])
             .status()
             .context("spawn `codex mcp remove`")?,
+        McpClient::Copilot => client_command(McpClient::Copilot)?
+            .args(["mcp", "remove", SERVER_NAME])
+            .status()
+            .context("spawn `copilot mcp remove`")?,
     };
     if !status.success() {
         let cmd = match client {
             McpClient::Claude => "`claude mcp remove`",
             McpClient::Codex => "`codex mcp remove`",
+            McpClient::Copilot => "`copilot mcp remove`",
         };
         bail!("{cmd} exited with status {status}");
     }
@@ -228,6 +284,21 @@ fn status(client: McpClient) -> Result<()> {
                 "{SERVER_NAME} is registered in {}:\n{line}",
                 client_display_name(client)
             );
+            // "Registered" is not the same as "usable". A Copilot entry
+            // without `RENGA_PEER_CLIENT_KIND=copilot` registers the
+            // pane as a *push* client, which Copilot cannot receive on,
+            // and `spawn_copilot_pane` refuses it outright — so a status
+            // that reported only presence would contradict the spawn
+            // error the user is trying to debug.
+            if client == McpClient::Copilot {
+                if let Err(reason) = verify_copilot_renga_peers_install() {
+                    println!(
+                        "\nWARNING: {reason}.\n\
+                         Peer messages will not reach this client until that is fixed. \
+                         Run `renga mcp install --client copilot` to repair the entry."
+                    );
+                }
+            }
             Ok(())
         }
         None => {
@@ -272,7 +343,38 @@ fn find_existing_entry(client: McpClient) -> Result<Option<String>> {
     match client {
         McpClient::Claude => find_existing_claude_entry(),
         McpClient::Codex => find_existing_codex_entry(),
+        McpClient::Copilot => find_existing_copilot_entry(),
     }
+}
+
+/// `copilot mcp get <name> --json` prints the entry as JSON on stdout
+/// when present, and exits non-zero with `Server "<name>" not found.`
+/// on stderr when absent — verified against Copilot CLI 1.0.82.
+fn find_existing_copilot_entry() -> Result<Option<String>> {
+    let out = client_command(McpClient::Copilot)?
+        .args(["mcp", "get", SERVER_NAME, "--json"])
+        .output()
+        .context("spawn `copilot mcp get`")?;
+    if out.status.success() {
+        let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if stdout.is_empty() {
+            return Ok(Some("<empty copilot registration output>".to_string()));
+        }
+        return Ok(Some(stdout));
+    }
+    let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+    if is_copilot_missing_entry(&stderr) {
+        return Ok(None);
+    }
+    bail!("`copilot mcp get` failed: {stderr}");
+}
+
+/// Distinguish "no such server" from a real failure (a broken config,
+/// a permissions problem). Getting this wrong the optimistic way would
+/// make `install` believe nothing is registered and silently overwrite.
+fn is_copilot_missing_entry(stderr: &str) -> bool {
+    let lower = stderr.to_ascii_lowercase();
+    lower.contains("not found") && lower.contains(SERVER_NAME)
 }
 
 /// Run `claude mcp list` and return the line mentioning our server, if
@@ -324,6 +426,19 @@ fn claude_payload(exe_str: &str) -> Result<String> {
         "args": ["mcp-peer"],
     }))
     .context("serialize Claude MCP config payload")
+}
+
+fn copilot_add_args(exe: &Path) -> Vec<OsString> {
+    vec![
+        OsString::from("mcp"),
+        OsString::from("add"),
+        OsString::from(SERVER_NAME),
+        OsString::from("--env"),
+        OsString::from(format!("{ENV_CLIENT_KIND}=copilot")),
+        OsString::from("--"),
+        exe.as_os_str().to_owned(),
+        OsString::from("mcp-peer"),
+    ]
 }
 
 fn codex_add_args(exe: &Path) -> Vec<OsString> {
@@ -413,6 +528,68 @@ pub(crate) fn verify_codex_renga_peers_install() -> std::result::Result<(), Stri
             path.display()
         ))
     }
+}
+
+/// Copilot CLI stores MCP servers as JSON under `~/.copilot`, or under
+/// `$COPILOT_HOME` when set — the CLI documents that override, so
+/// honoring it is what keeps the spawn guard from reporting a missing
+/// registration for a user who relocated the directory.
+fn copilot_config_path() -> Result<PathBuf> {
+    if let Some(home) = std::env::var_os("COPILOT_HOME") {
+        return Ok(PathBuf::from(home).join("mcp-config.json"));
+    }
+    let home = dirs::home_dir()
+        .ok_or_else(|| anyhow!("could not resolve the current user's home directory"))?;
+    Ok(home.join(".copilot").join("mcp-config.json"))
+}
+
+/// Copilot counterpart of [`verify_codex_renga_peers_install`], and it
+/// exists for exactly the same reason: renga classifies Copilot as a
+/// *pull* peer, so a pane whose mcp-peer subprocess did not receive
+/// `RENGA_PEER_CLIENT_KIND=copilot` falls back to
+/// [`crate::ipc::PeerClientKind::Claude`], advertises a push channel
+/// Copilot cannot receive, and drops every peer message on the floor
+/// with no error anywhere.
+pub(crate) fn verify_copilot_renga_peers_install() -> std::result::Result<(), String> {
+    let path = copilot_config_path()
+        .map_err(|e| format!("could not resolve Copilot MCP config path: {e}"))?;
+    let content = match fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(format!(
+                "Copilot MCP config not found at {}",
+                path.display()
+            ));
+        }
+        Err(e) => {
+            return Err(format!(
+                "could not read Copilot MCP config at {}: {e}",
+                path.display()
+            ));
+        }
+    };
+    if copilot_config_has_renga_peers_kind(&content) {
+        Ok(())
+    } else {
+        Err(format!(
+            "Copilot's renga-peers MCP entry at {} is missing `{ENV_CLIENT_KIND}=copilot`",
+            path.display()
+        ))
+    }
+}
+
+fn copilot_config_has_renga_peers_kind(json_src: &str) -> bool {
+    let parsed: serde_json::Value = match serde_json::from_str(json_src) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+    parsed
+        .get("mcpServers")
+        .and_then(|v| v.get(SERVER_NAME))
+        .and_then(|v| v.get("env"))
+        .and_then(|env| env.get(ENV_CLIENT_KIND))
+        .and_then(|v| v.as_str())
+        == Some("copilot")
 }
 
 /// Returns true if `toml_src` declares `RENGA_PEER_CLIENT_KIND = "codex"`
@@ -600,6 +777,7 @@ fn client_binary(client: McpClient) -> &'static str {
     match client {
         McpClient::Claude => "claude",
         McpClient::Codex => "codex",
+        McpClient::Copilot => "copilot",
     }
 }
 
@@ -607,6 +785,7 @@ fn client_display_name(client: McpClient) -> &'static str {
     match client {
         McpClient::Claude => "Claude Code",
         McpClient::Codex => "Codex",
+        McpClient::Copilot => "GitHub Copilot CLI",
     }
 }
 
@@ -722,6 +901,81 @@ mod tests {
                 "mcp-peer",
             ]
         );
+    }
+
+    #[test]
+    fn copilot_add_args_includes_pull_client_env() {
+        let args = copilot_add_args(Path::new("C:/Program Files/renga/renga.exe"));
+        let rendered: Vec<String> = args
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            rendered,
+            vec![
+                "mcp",
+                "add",
+                SERVER_NAME,
+                "--env",
+                "RENGA_PEER_CLIENT_KIND=copilot",
+                "--",
+                "C:/Program Files/renga/renga.exe",
+                "mcp-peer",
+            ]
+        );
+    }
+
+    /// Captured verbatim from `copilot mcp get renga-peers --json`
+    /// against Copilot CLI 1.0.82.
+    #[test]
+    fn copilot_config_kind_check_accepts_a_real_registration() {
+        let input = r#"{
+          "mcpServers": {
+            "renga-peers": {
+              "tools": ["*"],
+              "type": "local",
+              "command": "/home/u/renga",
+              "args": ["mcp-peer"],
+              "env": { "RENGA_PEER_CLIENT_KIND": "copilot" }
+            }
+          }
+        }"#;
+        assert!(copilot_config_has_renga_peers_kind(input));
+    }
+
+    /// The case the guard exists for: an entry registered without the
+    /// env var. The spawned pane would fall back to `Claude`, advertise
+    /// a push channel Copilot cannot receive, and drop every peer
+    /// message silently.
+    #[test]
+    fn copilot_config_kind_check_rejects_a_registration_without_the_env() {
+        let input = r#"{"mcpServers":{"renga-peers":{"type":"local","command":"/home/u/renga"}}}"#;
+        assert!(!copilot_config_has_renga_peers_kind(input));
+    }
+
+    #[test]
+    fn copilot_config_kind_check_rejects_the_wrong_client_kind() {
+        let input = r#"{"mcpServers":{"renga-peers":{"env":{"RENGA_PEER_CLIENT_KIND":"claude"}}}}"#;
+        assert!(!copilot_config_has_renga_peers_kind(input));
+    }
+
+    /// Malformed JSON must read as "not registered", never as
+    /// registered — the optimistic direction would silently overwrite.
+    #[test]
+    fn copilot_config_kind_check_rejects_unparseable_json() {
+        assert!(!copilot_config_has_renga_peers_kind("{ not json"));
+    }
+
+    /// Matches the real stderr of `copilot mcp get <missing> --json`,
+    /// which exits 1 with this wording.
+    #[test]
+    fn copilot_missing_entry_detection_matches_cli_message() {
+        assert!(is_copilot_missing_entry(&format!(
+            "Error: Server \"{SERVER_NAME}\" not found.\n\nAvailable servers:\n  other"
+        )));
+        // A real failure must not be read as "absent" — that would make
+        // install believe nothing is registered and overwrite blindly.
+        assert!(!is_copilot_missing_entry("EACCES: permission denied"));
     }
 
     #[test]

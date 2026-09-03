@@ -986,7 +986,7 @@ impl App {
             }
             let local_col = col.saturating_sub(rect.x).saturating_sub(1);
             let local_row = row.saturating_sub(rect.y).saturating_sub(1);
-            let codex_hint = self.pane_expects_codex_peer_delivery(self.active_tab, pane_id);
+            let codex_hint = self.pane_looks_like_codex(self.active_tab, pane_id);
 
             let bytes = if disable_forward {
                 None
@@ -1027,7 +1027,7 @@ impl App {
         };
         let bytes = self.ws().panes.get(&pane_id).and_then(|p| {
             p.click_forward_bytes(
-                self.pane_expects_codex_peer_delivery(self.active_tab, pane_id),
+                self.pane_looks_like_codex(self.active_tab, pane_id),
                 button,
                 PointerAction::Press,
                 local_col,
@@ -1063,7 +1063,7 @@ impl App {
             .and_then(|ws| ws.panes.get(&pane_id))
             .and_then(|p| {
                 p.click_forward_bytes(
-                    self.pane_expects_codex_peer_delivery(ws_idx, pane_id),
+                    self.pane_looks_like_codex(ws_idx, pane_id),
                     button,
                     action,
                     local_col,

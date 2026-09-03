@@ -135,16 +135,20 @@ impl App {
                 // Visible-input bootstrap is Claude-specific. Codex
                 // panes use a different composer layout, and trying to
                 // "steal" their draft into the IME overlay corrupts the
-                // handoff instead of preserving it.
-                let snapshot = (!self
-                    .pane_expects_codex_peer_delivery(self.active_tab, focused_id))
-                .then(|| {
-                    self.ws()
-                        .panes
-                        .get(&focused_id)
-                        .and_then(crate::input::overlay::snapshot_visible_input)
-                })
-                .flatten();
+                // handoff instead of preserving it. Copilot draws a
+                // Claude-shaped composer but on the alternate screen,
+                // which `snapshot_visible_input` has never been
+                // exercised against — so it stays excluded too until
+                // that is verified. The pull-delivery predicate happens
+                // to name exactly the set to exclude here.
+                let snapshot = (!self.pane_expects_pull_peer_delivery(self.active_tab, focused_id))
+                    .then(|| {
+                        self.ws()
+                            .panes
+                            .get(&focused_id)
+                            .and_then(crate::input::overlay::snapshot_visible_input)
+                    })
+                    .flatten();
 
                 if snapshot.as_ref().is_some_and(|snapshot| {
                     crate::input::overlay::visible_input_contains_claude_paste_placeholder(

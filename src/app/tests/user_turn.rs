@@ -11,9 +11,9 @@
 //!   contents, so none of it depends on sleeping next to a live PTY.
 
 use super::super::user_turn::{
-    claude_turn_readiness, codex_turn_readiness, normalize_user_turn_body, step_user_turn,
-    ComposerRead, TurnAgent, TurnReadiness, UserTurnStage, UserTurnStep, USER_TURN_CONFIRM_DELAY,
-    USER_TURN_DEADLINE, USER_TURN_SETTLE_DELAY,
+    claude_turn_readiness, codex_turn_readiness, copilot_turn_readiness, normalize_user_turn_body,
+    step_user_turn, ComposerRead, TurnAgent, TurnReadiness, UserTurnStage, UserTurnStep,
+    USER_TURN_CONFIRM_DELAY, USER_TURN_DEADLINE, USER_TURN_SETTLE_DELAY,
 };
 use super::super::*;
 
@@ -43,6 +43,265 @@ fn codex_readiness_of(bytes: &[u8], rows: u16, cols: u16) -> TurnReadiness {
     let mut parser = vt100::Parser::new(rows, cols, 0);
     parser.process(bytes);
     codex_turn_readiness(parser.screen())
+}
+
+fn copilot_readiness_of(bytes: &[u8], rows: u16, cols: u16) -> TurnReadiness {
+    let mut parser = vt100::Parser::new(rows, cols, 0);
+    parser.process(bytes);
+    copilot_turn_readiness(parser.screen())
+}
+
+/// Same screen, but through the dispatcher the *production* path uses.
+///
+/// `copilot_turn_readiness` is a test-only wrapper; everything real goes
+/// via `turn_readiness_on_screen`. Without a test on this side, mis-wiring
+/// the `TurnAgent::Copilot` arm to Codex's predicate — which breaks every
+/// user turn to a Copilot pane — passes the whole suite.
+fn copilot_readiness_via_dispatch(bytes: &[u8], rows: u16, cols: u16) -> TurnReadiness {
+    let mut parser = vt100::Parser::new(rows, cols, 0);
+    parser.process(bytes);
+    super::super::user_turn::turn_readiness_on_screen(TurnAgent::Copilot, parser.screen())
+}
+
+/// The composer as GitHub Copilot CLI 1.0.x actually draws it.
+///
+/// Captured from a live `copilot` pane driven through a PTY: it enters
+/// the alternate screen *before* painting anything (`ESC[?1049h` lands
+/// at byte offset 143 of the startup stream, ahead of the banner), then
+/// draws a status row, a full-width `─` rule, the `❯` prompt alone on
+/// its row, another rule, and a footer — the same sandwich Claude Code
+/// 2.x draws, on the other screen buffer.
+///
+/// `body` is what sits after the prompt glyph; empty for an idle
+/// composer.
+fn copilot_screen(footer: &str, body: &str) -> Vec<u8> {
+    copilot_screen_cols(footer, body, 40)
+}
+
+/// `copilot_screen` with an explicit pane width, so the busy footer can
+/// be exercised at the narrow widths a real split produces. `footer` may
+/// contain `\r\n` to model Copilot's responsive footer splitting across
+/// two rows.
+fn copilot_screen_cols(footer: &str, body: &str, cols: usize) -> Vec<u8> {
+    let rule = "─".repeat(cols);
+    // Cursor parked on the prompt row at the first edit cell (col 2),
+    // exactly where the live capture put it: `cursor_position: (37, 2)`
+    // for an idle composer, and one past the body for a draft.
+    let cursor_col = 3 + body.chars().count();
+    format!(
+        "\x1b[?1049h\x1b[2J\x1b[H\x1b[?25hsome transcript text\r\n\r\n\
+         /work/dir  Session: 0 AIC used\r\n{rule}\r\n\u{276F} {body}\r\n{rule}\r\n{footer}\
+         \x1b[5;{cursor_col}H"
+    )
+    .into_bytes()
+}
+
+// ── readiness: Copilot ────────────────────────────────────────
+
+/// The live idle footer, verbatim.
+const COPILOT_IDLE_FOOTER: &str = " \u{2190} open sidebar \u{00B7} / commands \u{00B7} ? help";
+
+#[test]
+fn copilot_idle_composer_is_ready() {
+    assert_eq!(
+        copilot_readiness_of(&copilot_screen(COPILOT_IDLE_FOOTER, ""), 8, 40),
+        TurnReadiness::Ready
+    );
+}
+
+/// The regression this whole agent exists to avoid.
+///
+/// Copilot's busy footer reads `esc interrupt` — **not** Claude's and
+/// Codex's `esc to interrupt` — so the original `BUSY_MARKERS` list
+/// missed it. Copilot keeps an empty, framed, caret-bearing composer on
+/// screen for the entire time it works, which means every structural
+/// check passes while it is mid-turn and this string is the only thing
+/// standing between a working agent and a turn typed over its work.
+#[test]
+fn copilot_working_footer_is_busy_not_ready() {
+    assert_eq!(
+        copilot_readiness_of(
+            &copilot_screen(
+                " \u{25C9} Working \u{00B7} 2.8 KiB   esc interrupt   Auto",
+                ""
+            ),
+            8,
+            40
+        ),
+        TurnReadiness::Busy
+    );
+}
+
+/// Copilot's permission dialog replaces the composer outright, boxes
+/// its `❯ 1. Yes` row in `│ … │` borders that cannot reach
+/// `COMPOSER_FRAME_MIN_CELLS`, and hides the hardware cursor. Captured
+/// from a live `Create file` prompt.
+#[test]
+fn copilot_permission_dialog_is_not_ready() {
+    let screen = "\x1b[?1049h\x1b[2J\x1b[H\x1b[?25l\
+         \u{256D}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{256E}\r\n\
+         \u{2502} Create file    \u{2502}\r\n\
+         \u{2502}                \u{2502}\r\n\
+         \u{2502} \u{276F} 1. Yes       \u{2502}\r\n\
+         \u{2502}   2. No        \u{2502}\r\n\
+         \u{2570}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{256F}";
+    assert_eq!(
+        copilot_readiness_of(screen.as_bytes(), 8, 40),
+        TurnReadiness::NotReady
+    );
+}
+
+/// A human's half-typed draft owns the composer, same as for Claude.
+#[test]
+fn copilot_composer_holding_a_draft_is_not_ready() {
+    assert_eq!(
+        copilot_readiness_of(&copilot_screen(COPILOT_IDLE_FOOTER, "half typed"), 8, 40),
+        TurnReadiness::NotReady
+    );
+}
+
+/// The alternate-screen expectation runs both ways, and both
+/// directions are load-bearing.
+///
+/// A Copilot pane on the *main* screen is one whose TUI is not up, so
+/// it is as unaddressable as a Claude pane that vim has taken over.
+/// Pinning the Claude direction here too is what stops the inverted
+/// check from quietly widening Claude's predicate: before Copilot
+/// existed this was a blanket `alternate_screen()` refusal, and a
+/// regression that dropped it would let renga type into a pager.
+#[test]
+fn the_alternate_screen_expectation_is_per_agent_and_symmetric() {
+    // Copilot's own composer bytes, minus the alt-screen entry.
+    let main_screen: Vec<u8> = copilot_screen(COPILOT_IDLE_FOOTER, "")
+        .strip_prefix(b"\x1b[?1049h".as_slice())
+        .expect("helper emits the alt-screen entry first")
+        .to_vec();
+    assert_eq!(
+        copilot_readiness_of(&main_screen, 8, 40),
+        TurnReadiness::Unsupported,
+        "a Copilot pane on the main screen has no TUI up"
+    );
+
+    // And the reverse: Claude's composer painted on the alternate
+    // screen is some other full-screen program, not Claude.
+    let mut alt = b"\x1b[?1049h".to_vec();
+    alt.extend_from_slice(&claude_idle_screen("auto mode on"));
+    assert_eq!(
+        claude_readiness_of(&alt, 8, 40),
+        TurnReadiness::Unsupported,
+        "Claude never renders on the alternate screen"
+    );
+}
+
+/// The narrow-pane form of `copilot_working_footer_is_busy_not_ready`,
+/// and the reason Copilot's busy marker is the bare word.
+///
+/// Copilot's footer is a responsive column layout. Captured live at 30
+/// columns it lands as two rows with `esc` glued to `KiB` and `Working`
+/// sitting between it and `interrupt`:
+///
+/// ```text
+///  ◉       · 2.7 KiBesc
+///  Working    interrupt
+/// ```
+///
+/// Neither `esc interrupt` nor any whitespace-normalized form of it
+/// appears, so a literal match reports the pane idle and renga types
+/// over a working agent. 30 columns is a four-way split of a 120-column
+/// terminal — the layout this feature exists for.
+#[test]
+fn copilot_working_footer_is_busy_at_narrow_pane_widths() {
+    let footer = " \u{25C9}       \u{00B7} 2.7 KiBesc\r\n Working    interrupt";
+    assert_eq!(
+        copilot_readiness_of(&copilot_screen_cols(footer, "", 30), 9, 30),
+        TurnReadiness::Busy
+    );
+    // And through the production dispatcher, not just the wrapper.
+    assert_eq!(
+        copilot_readiness_via_dispatch(&copilot_screen_cols(footer, "", 30), 9, 30),
+        TurnReadiness::Busy
+    );
+}
+
+/// Copilot's markers are narrower than Claude's for a reason, so pin
+/// that widening them did not make Claude and Codex trigger-happy: an
+/// idle pane must stay idle. `busy_near_composer` scans one row *above*
+/// a Codex composer, which is transcript-adjacent, and a pane wrongly
+/// stuck at `Busy` is unaddressable for as long as the text stays up.
+#[test]
+fn the_bare_interrupt_marker_does_not_leak_into_claude_or_codex() {
+    assert_eq!(
+        claude_readiness_of(&claude_idle_screen("interrupt handling notes"), 8, 40),
+        TurnReadiness::Ready
+    );
+    // A Codex transcript line one row above the composer that merely
+    // uses the word must not pin the pane at busy.
+    let screen = "\x1b[2J\x1b[H\x1b[?25hwe should interrupt the retry loop\r\n\u{203A} \x1b[2;3H";
+    assert_eq!(
+        codex_readiness_of(screen.as_bytes(), 8, 40),
+        TurnReadiness::Ready
+    );
+}
+
+/// Everything real reaches the predicate through this dispatcher, so
+/// an idle Copilot composer has to read `Ready` on this side too.
+#[test]
+fn copilot_readiness_is_wired_through_the_production_dispatcher() {
+    assert_eq!(
+        copilot_readiness_via_dispatch(&copilot_screen(COPILOT_IDLE_FOOTER, ""), 8, 40),
+        TurnReadiness::Ready
+    );
+    // And a Codex screen must NOT read as ready for a Copilot pane —
+    // catches the arm being wired to `codex_turn_readiness`.
+    let codex_screen = "\x1b[2J\x1b[H\x1b[?25hdone\r\n\u{203A} \x1b[2;3H";
+    assert_eq!(
+        copilot_readiness_via_dispatch(codex_screen.as_bytes(), 8, 40),
+        TurnReadiness::Unsupported
+    );
+}
+
+/// Copilot wraps a long draft the way Claude does — continuation rows
+/// indented past column 0, the closing rule directly below the last of
+/// them — which is what lets it share the Claude branch and accept
+/// multi-line bodies. Captured live at 40 columns:
+///
+/// ```text
+/// ❯wrapme wrapme wrapme wrapme wrapme
+///   wrapme wrapme wrapme wrapme wrapme
+///   wrapme wrapme
+/// ────────────────────────────────────────
+/// ```
+#[test]
+fn copilot_wrapped_draft_is_fingerprinted_across_continuation_rows() {
+    let rule = "─".repeat(40);
+    let screen = format!(
+        "\x1b[?1049h\x1b[2J\x1b[H\x1b[?25hctx\r\n{rule}\r\n\
+         \u{276F}wrapme wrapme wrapme wrapme wrapme\r\n\
+         \x20 wrapme wrapme wrapme wrapme wrapme\r\n\
+         \x20 wrapme wrapme\r\n{rule}\r\n @ files\x1b[5;15H"
+    );
+    let mut parser = vt100::Parser::new(9, 40, 0);
+    parser.process(screen.as_bytes());
+    let text = super::super::user_turn::composer_block_text(parser.screen(), TurnAgent::Copilot)
+        .expect("wrapped composer is readable");
+    assert!(
+        text.lines().count() >= 3,
+        "continuation rows should be part of the fingerprint, got {text:?}"
+    );
+    assert!(text.contains("wrapme wrapme"), "{text:?}");
+}
+
+/// The draft fingerprint the delivery state machine compares against.
+#[test]
+fn copilot_composer_block_text_captures_the_draft() {
+    let mut parser = vt100::Parser::new(8, 40, 0);
+    parser.process(&copilot_screen(COPILOT_IDLE_FOOTER, "hello from renga"));
+    let text = super::super::user_turn::composer_block_text(parser.screen(), TurnAgent::Copilot)
+        .expect("composer is readable");
+    assert!(
+        text.contains("hello from renga"),
+        "draft should be fingerprinted, got {text:?}"
+    );
 }
 
 /// The composer as Claude Code 2.x actually draws it: a horizontal
@@ -274,6 +533,60 @@ fn registered_kind_beats_the_window_title() {
 
     app.peer_client_kinds.insert(pane_id, PeerClientKind::Codex);
     assert_eq!(app.user_turn_agent(0, pane_id), Some(TurnAgent::Codex));
+
+    app.peer_client_kinds
+        .insert(pane_id, PeerClientKind::Copilot);
+    assert_eq!(app.user_turn_agent(0, pane_id), Some(TurnAgent::Copilot));
+    app.shutdown();
+}
+
+/// The title fallback, for the window before registration lands.
+/// Copilot CLI sets `GitHub Copilot`, which contains neither "claude"
+/// nor "codex", so the three title checks cannot collide.
+#[test]
+fn a_copilot_window_title_resolves_to_the_copilot_agent() {
+    let mut app = App::new(40, 80).expect("App::new");
+    let pane_id = app.ws().focused_pane_id;
+    if let Some(pane) = app.ws_mut().panes.get_mut(&pane_id) {
+        *pane.title.lock().unwrap() = "GitHub Copilot".to_string();
+    }
+    assert_eq!(app.user_turn_agent(0, pane_id), Some(TurnAgent::Copilot));
+    app.shutdown();
+}
+
+/// The one path in this feature that writes bytes to a pane nobody is
+/// watching, so its refusals need pinning: a Copilot pane that is
+/// working, or showing a modal, must not be nudged.
+#[test]
+fn copilot_nudges_are_withheld_while_working_or_modal() {
+    // App::new sizes the pane at `rows - 5` by `cols - 2`, so ask for
+    // the chrome back to get a 9x40 pane the composer helper fits in.
+    let mut app = App::new(14, 42).expect("App::new");
+    let pane_id = app.ws().focused_pane_id;
+    app.peer_client_kinds
+        .insert(pane_id, PeerClientKind::Copilot);
+
+    let ready = |app: &mut App, bytes: &[u8]| {
+        seed_focused_pane_screen(app, bytes);
+        let pane = app.ws().panes.get(&pane_id).expect("pane");
+        App::pull_peer_delivery_ready(TurnAgent::Copilot, true, pane)
+    };
+
+    assert!(
+        ready(&mut app, &copilot_screen(COPILOT_IDLE_FOOTER, "")),
+        "an idle Copilot composer accepts the nudge"
+    );
+    assert!(
+        !ready(
+            &mut app,
+            &copilot_screen(" \u{25C9} Working \u{00B7} 2.8 KiB   esc interrupt", "")
+        ),
+        "a working Copilot pane must not be typed into"
+    );
+    assert!(
+        !ready(&mut app, &copilot_screen(COPILOT_IDLE_FOOTER, "half typed")),
+        "a human's draft owns the composer"
+    );
     app.shutdown();
 }
 

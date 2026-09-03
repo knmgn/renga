@@ -112,13 +112,85 @@ const FRAME_GLYPHS: &[&str] = &[
 /// above it is what authorizes writing. If a future Claude Code drops
 /// or translates these, the failure is "a turn is delivered to a busy
 /// agent, which queues it", not "a turn is typed into a dialog".
+///
+/// Claude Code and Codex both write `esc to interrupt`.
 const BUSY_MARKERS: &[&str] = &["to interrupt", "tab to queue"];
+
+/// Copilot CLI's busy markers, deliberately narrowed to the single
+/// word.
+///
+/// Copilot writes `esc interrupt` (no "to"), but matching that literal
+/// only works on a wide pane. Its footer is a responsive column layout,
+/// and at narrow pane widths the columns reflow *through* the string.
+/// Measured against a live pane at three widths:
+///
+/// ```text
+/// 120 cols:  ◉ Working · 2.8 KiB   esc interrupt   Auto → gpt-5.6-luna
+///  40 cols:  ● Working · 2.7 KiB esc interrupt
+///  30 cols:  ◉       · 2.7 KiBesc
+///            Working    interrupt
+/// ```
+///
+/// At 30 columns `esc` ends up glued to `KiB` on one row with `Working`
+/// between it and `interrupt` on the next, so neither the literal nor
+/// any whitespace-normalizing variant of it survives — only the bare
+/// word does. A 30-column pane is an ordinary four-way split of a
+/// 120-column terminal, i.e. exactly the orchestration layout renga
+/// exists for, and a missed marker there means renga types into an
+/// agent that is mid-turn.
+///
+/// Kept out of [`BUSY_MARKERS`] rather than merged into it: Codex scans
+/// one row *above* its composer (see [`busy_near_composer`]), which is
+/// transcript-adjacent, so a bare `interrupt` there would let a peer
+/// message that merely uses the word pin an idle Codex pane at busy
+/// forever. Copilot scans only the chrome below its composer, where no
+/// transcript text can reach.
+const COPILOT_BUSY_MARKERS: &[&str] = &["interrupt"];
 
 /// Which agent renga believes owns a pane's input.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TurnAgent {
     Claude,
     Codex,
+    /// GitHub Copilot CLI. Draws a Claude-shaped composer — the same
+    /// `❯` glyph (U+276F) sandwiched between two `─` rules — but on
+    /// the *alternate* screen, so it shares Claude's structural
+    /// predicate and differs only in [`TurnAgent::uses_alternate_screen`].
+    Copilot,
+}
+
+impl TurnAgent {
+    /// Whether this agent paints its UI on the alternate screen.
+    ///
+    /// Load-bearing in both directions. Claude Code and Codex render
+    /// inline on the main screen, so an alternate screen means some
+    /// *other* full-screen program (vim, less, a pager) has taken the
+    /// pane over and whatever composer is on screen is not theirs —
+    /// which is why the check started life as a blanket refusal.
+    /// Copilot CLI enters the alternate screen before it draws
+    /// anything, so for it the same signal inverts: a Copilot pane on
+    /// the *main* screen is one whose TUI is not up. Comparing against
+    /// the expectation rather than refusing outright is what lets one
+    /// predicate serve both.
+    fn uses_alternate_screen(self) -> bool {
+        match self {
+            TurnAgent::Claude | TurnAgent::Codex => false,
+            TurnAgent::Copilot => true,
+        }
+    }
+
+    /// True when `screen` is on the buffer this agent draws its UI on.
+    fn screen_is_agent_ui(self, screen: &vt100::Screen) -> bool {
+        screen.alternate_screen() == self.uses_alternate_screen()
+    }
+
+    /// Strings in this agent's chrome that mean "mid-turn".
+    fn busy_markers(self) -> &'static [&'static str] {
+        match self {
+            TurnAgent::Claude | TurnAgent::Codex => BUSY_MARKERS,
+            TurnAgent::Copilot => COPILOT_BUSY_MARKERS,
+        }
+    }
 }
 
 /// Outcome of the readiness predicate. Every non-`Ready` value
@@ -160,8 +232,8 @@ impl TurnReadiness {
                 ipc::err_code::USER_TURN_UNSUPPORTED_TARGET,
                 format!(
                     "pane {pane_id} is not running an agent that takes user turns (deliver=\
-                     \"user_turn\" needs a Claude or Codex pane). Use deliver=\"channel\", or \
-                     send_keys for raw input."
+                     \"user_turn\" needs a Claude, Codex or Copilot pane). Use \
+                     deliver=\"channel\", or send_keys for raw input."
                 ),
             )),
         }
@@ -515,7 +587,12 @@ fn caret_is_in_composer_block(screen: &vt100::Screen, first: u16, last: u16) -> 
 /// message that merely quotes "esc to interrupt" sits in the transcript
 /// and pins the pane at `user_turn_busy` for as long as it stays
 /// visible, which on an idle pane is forever.
-fn busy_near_composer(screen: &vt100::Screen, prompt_row: u16, rows_above: u16) -> bool {
+fn busy_near_composer(
+    screen: &vt100::Screen,
+    prompt_row: u16,
+    rows_above: u16,
+    markers: &[&str],
+) -> bool {
     let rows = screen.size().0;
     let first = prompt_row.saturating_sub(rows_above);
     let mut haystack = String::new();
@@ -527,7 +604,7 @@ fn busy_near_composer(screen: &vt100::Screen, prompt_row: u16, rows_above: u16) 
         haystack.push_str(&row_text(screen, row).to_lowercase());
         haystack.push('\n');
     }
-    BUSY_MARKERS.iter().any(|m| haystack.contains(m))
+    markers.iter().any(|m| haystack.contains(m))
 }
 
 /// The current contents of the agent's input block, used as the draft
@@ -547,11 +624,11 @@ fn busy_near_composer(screen: &vt100::Screen, prompt_row: u16, rows_above: u16) 
 /// Unlike [`composer_is_empty`] it makes no demand of the *content* — a
 /// draft is exactly what it expects to find.
 pub(crate) fn composer_block_text(screen: &vt100::Screen, agent: TurnAgent) -> Option<String> {
-    if screen.alternate_screen() {
+    if !agent.screen_is_agent_ui(screen) {
         return None;
     }
     match agent {
-        TurnAgent::Claude => {
+        TurnAgent::Claude | TurnAgent::Copilot => {
             let prompt_row = find_prompt_row(screen)?;
             let last = resolve_input_row_last(screen, prompt_row);
             // Same sandwich the readiness predicate requires, but around
@@ -594,7 +671,7 @@ pub(crate) fn composer_block_text(screen: &vt100::Screen, agent: TurnAgent) -> O
 /// Dispatch the agent-specific readiness predicate for one screen.
 pub(crate) fn turn_readiness_on_screen(agent: TurnAgent, screen: &vt100::Screen) -> TurnReadiness {
     match agent {
-        TurnAgent::Claude => claude_turn_readiness(screen),
+        TurnAgent::Claude | TurnAgent::Copilot => framed_turn_readiness(agent, screen),
         TurnAgent::Codex => codex_turn_readiness(screen),
     }
 }
@@ -606,8 +683,34 @@ pub(crate) fn turn_readiness_on_screen(agent: TurnAgent, screen: &vt100::Screen)
 /// keeps that composer on screen while it works, so emptiness alone
 /// does not mean idle — the interrupt affordance below it is what
 /// separates "accepting a turn" from "mid-turn".
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn claude_turn_readiness(screen: &vt100::Screen) -> TurnReadiness {
-    if screen.alternate_screen() {
+    framed_turn_readiness(TurnAgent::Claude, screen)
+}
+
+/// Readiness for a Copilot CLI pane.
+///
+/// Copilot draws the same framed composer Claude Code does — `❯`
+/// (U+276F, already in [`crate::ui::CLAUDE_PROMPT_GLYPHS`]) between two
+/// full-width `─` (U+2500) rules, footer below, hardware cursor visible
+/// and parked on the prompt row — so it reuses the Claude predicate
+/// wholesale. The two differences are carried by [`TurnAgent`]: the
+/// composer lives on the alternate screen, and Copilot's busy footer
+/// reads `esc interrupt` (see [`BUSY_MARKERS`]).
+///
+/// Its modals are refused by the same two guards that refuse Claude's:
+/// a permission dialog replaces the composer entirely, boxes its
+/// `❯ 1. Yes` row in `│ … │` borders that cannot reach
+/// [`COMPOSER_FRAME_MIN_CELLS`], and hides the hardware cursor.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn copilot_turn_readiness(screen: &vt100::Screen) -> TurnReadiness {
+    framed_turn_readiness(TurnAgent::Copilot, screen)
+}
+
+/// Shared body for the agents that frame their composer between two
+/// horizontal rules — Claude Code and Copilot CLI.
+fn framed_turn_readiness(agent: TurnAgent, screen: &vt100::Screen) -> TurnReadiness {
+    if !agent.screen_is_agent_ui(screen) {
         return TurnReadiness::Unsupported;
     }
     if !screen_has_visible_text(screen) {
@@ -631,7 +734,7 @@ pub(crate) fn claude_turn_readiness(screen: &vt100::Screen) -> TurnReadiness {
     if !caret_is_in_composer(screen, prompt_row) {
         return TurnReadiness::NotReady;
     }
-    if busy_near_composer(screen, prompt_row, 0) {
+    if busy_near_composer(screen, prompt_row, 0, agent.busy_markers()) {
         return TurnReadiness::Busy;
     }
     TurnReadiness::Ready
@@ -658,7 +761,7 @@ pub(crate) fn codex_turn_readiness(screen: &vt100::Screen) -> TurnReadiness {
     // Codex paints its working indicator directly above the composer,
     // so the scan reaches one row up — but no further, so transcript
     // text cannot pin the pane at busy.
-    if busy_near_composer(screen, prompt_row, 1) {
+    if busy_near_composer(screen, prompt_row, 1, TurnAgent::Codex.busy_markers()) {
         return TurnReadiness::Busy;
     }
     // `codex_prompt_allows_peer_nudge_on_screen` proves the caret is at
@@ -864,11 +967,18 @@ impl App {
         match self.peer_client_kinds.get(&pane_id) {
             Some(PeerClientKind::Claude) => return Some(TurnAgent::Claude),
             Some(PeerClientKind::Codex) => return Some(TurnAgent::Codex),
+            Some(PeerClientKind::Copilot) => return Some(TurnAgent::Copilot),
             None => {}
         }
         let pane = self.workspaces.get(ws_index)?.panes.get(&pane_id)?;
         if pane.is_codex_running() {
             Some(TurnAgent::Codex)
+        } else if pane.is_copilot_running() {
+            // Checked before Claude: Copilot CLI's OSC title is
+            // `GitHub Copilot`, which does not contain "claude", but
+            // ordering it explicitly keeps the intent obvious if
+            // either product ever widens its title.
+            Some(TurnAgent::Copilot)
         } else if pane.is_claude_running() {
             Some(TurnAgent::Claude)
         } else {
@@ -913,10 +1023,7 @@ impl App {
         let Ok(parser) = pane.parser.lock() else {
             return TurnReadiness::NotReady;
         };
-        match agent {
-            TurnAgent::Claude => claude_turn_readiness(parser.screen()),
-            TurnAgent::Codex => codex_turn_readiness(parser.screen()),
-        }
+        turn_readiness_on_screen(agent, parser.screen())
     }
 
     /// Re-prove the composer and write the body **in one critical

@@ -17,6 +17,10 @@ const ACCENT_GREEN: Color = Color::Rgb(0x3f, 0xb9, 0x50);
 const ACCENT_BLUE: Color = Color::Rgb(0x58, 0xa6, 0xff);
 const ACCENT_CLAUDE: Color = Color::Rgb(0xd9, 0x77, 0x57);
 const ACCENT_CODEX: Color = Color::Rgb(0x10, 0xa3, 0x7f);
+/// GitHub Copilot's purple, kept clear of both the Claude orange and
+/// the Codex green so three agent panes stay distinguishable at a
+/// glance.
+const ACCENT_COPILOT: Color = Color::Rgb(0x8b, 0x5c, 0xf6);
 /// Amber used by the destructive-action confirmation modal, so it
 /// reads as "stop and answer" rather than as another info popup.
 const ACCENT_WARN: Color = Color::Rgb(0xe3, 0xa0, 0x08);
@@ -291,21 +295,17 @@ fn render_codex_peer_notification(app: &mut App, frame: &mut Frame, area: Rect) 
         &notification.message.from_name,
         notification.message.from_kind,
     ) {
-        (Some(name), Some(kind)) => {
-            let kind = match kind {
-                crate::ipc::PeerClientKind::Claude => "claude",
-                crate::ipc::PeerClientKind::Codex => "codex",
-            };
-            format!("from {name} (id={} {kind})", notification.message.from_pane)
-        }
+        (Some(name), Some(kind)) => format!(
+            "from {name} (id={} {})",
+            notification.message.from_pane,
+            kind.label()
+        ),
         (Some(name), None) => format!("from {name} (id={})", notification.message.from_pane),
-        (None, Some(kind)) => {
-            let kind = match kind {
-                crate::ipc::PeerClientKind::Claude => "claude",
-                crate::ipc::PeerClientKind::Codex => "codex",
-            };
-            format!("from id={} {kind}", notification.message.from_pane)
-        }
+        (None, Some(kind)) => format!(
+            "from id={} {}",
+            notification.message.from_pane,
+            kind.label()
+        ),
         (None, None) => format!("from id={}", notification.message.from_pane),
     };
     let noun = if notification.pending_count == 1 {
@@ -730,6 +730,7 @@ fn render_org_sidebar(app: &mut App, frame: &mut Frame, area: Rect, compact: boo
                 let color = match kind {
                     crate::app::org_sidebar::OrgPaneKind::Claude => ACCENT_CLAUDE,
                     crate::app::org_sidebar::OrgPaneKind::Codex => ACCENT_CODEX,
+                    crate::app::org_sidebar::OrgPaneKind::Copilot => ACCENT_COPILOT,
                     crate::app::org_sidebar::OrgPaneKind::Shell => TEXT_DIM,
                 };
                 let focus_mark = if row.is_focused_pane { "*" } else { " " };
@@ -992,10 +993,13 @@ fn render_single_pane(
     // even though the client is still interactive. See issue #209.
     let is_claude = pane.claude_ever_seen();
     let is_codex = pane.codex_ever_seen();
+    let is_copilot = pane.copilot_ever_seen();
     let client_accent = if is_claude {
         Some(ACCENT_CLAUDE)
     } else if is_codex {
         Some(ACCENT_CODEX)
+    } else if is_copilot {
+        Some(ACCENT_COPILOT)
     } else {
         None
     };
@@ -1010,6 +1014,8 @@ fn render_single_pane(
         "claude"
     } else if is_codex {
         "codex"
+    } else if is_copilot {
+        "copilot"
     } else {
         "shell"
     };
