@@ -2,21 +2,21 @@
 
 *Read this in other languages: [日本語](./README.ja.md)*
 
-**An AI-native terminal substrate for orchestrating multiple [Claude Code](https://docs.anthropic.com/en/docs/claude-code) and Codex agents in one TUI — mixed-client peer messaging, Claude-specific UX where it matters, single binary.**
+**An AI-native terminal substrate for orchestrating multiple [Claude Code](https://docs.anthropic.com/en/docs/claude-code), Codex, and GitHub Copilot CLI agents in one TUI — mixed-client peer messaging, Claude-specific UX where it matters, single binary.**
 
 ![renga screenshot](screenshot.png)
 
 ## What renga is
 
-renga is a terminal where the panes know they are AI agents. Splits, tabs, and focus work like any TUI multiplexer, but the substrate underneath treats each pane as a first-class agent endpoint: it detects which panes are running Claude Code, lets Codex panes participate in the same peer network, and exposes pane-control MCP tools (`spawn_claude_pane`, `spawn_codex_pane`, `set_pane_identity`, `new_tab`, …). Peer scope is authoritative at the renga-tab level — panes the user literally put in the same tab — so cross-pane routing never collides across projects.
+renga is a terminal where the panes know they are AI agents. Splits, tabs, and focus work like any TUI multiplexer, but the substrate underneath treats each pane as a first-class agent endpoint: it detects which panes are running Claude Code, lets Codex and GitHub Copilot CLI panes participate in the same peer network, and exposes pane-control MCP tools (`spawn_claude_pane`, `spawn_codex_pane`, `spawn_copilot_pane`, `set_pane_identity`, `new_tab`, …). Peer scope is authoritative at the renga-tab level — panes the user literally put in the same tab — so cross-pane routing never collides across projects.
 
-The target use case is **agent orchestration**: a "secretary" pane dispatching tasks to "worker" panes, sub-agents comparing approaches in parallel, a long-running session reaching out to a sibling for a quick lookup, or a mixed Claude / Codex tab where each client is used for what it is best at. If you only ever run one agent at a time, renga's value over your current terminal is small. If you run several, the peer channel and the AI-aware pane model are the point.
+The target use case is **agent orchestration**: a "secretary" pane dispatching tasks to "worker" panes, sub-agents comparing approaches in parallel, a long-running session reaching out to a sibling for a quick lookup, or a mixed Claude / Codex / Copilot tab where each client is used for what it is best at. If you only ever run one agent at a time, renga's value over your current terminal is small. If you run several, the peer channel and the AI-aware pane model are the point.
 
 ### Standalone or as part of a stack
 
 renga works in two valid modes:
 
-- **Standalone** — use it directly as an AI-native terminal for coordinating multiple Claude Code / Codex panes locally.
+- **Standalone** — use it directly as an AI-native terminal for coordinating multiple Claude Code / Codex / Copilot panes locally.
 - **As Layer 3 under [`claude-org`](https://github.com/suisya-systems/claude-org)** — use it as the execution fabric beneath a higher-level operating model with Lead / Dispatcher / Curator / Worker roles, per-task working-directory boundaries, narrow permission contracts, knowledge curation, and organization suspend / resume.
 
 The right mental model is: **renga is the execution fabric; claude-org is the reference operating system built on top of it.**
@@ -26,8 +26,8 @@ The right mental model is: **renga is the execution fabric; claude-org is the re
 | | tmux / zellij | renga |
 |---|---|---|
 | Pane model | Generic shell sessions | First-class **AI agent endpoints** with stable id, role, focus flag |
-| Inter-pane messaging | Copy-paste, manual `send-keys`, or external glue | Built-in MCP `renga-peers` network; Claude receives channel pushes, Codex gets a pane-local nudge and reads the queued body via `check_messages` |
-| Spawning agent panes | User hand-wires shell commands and client flags | `spawn_claude_pane` / `spawn_codex_pane` MCP tools, plus `Alt+P` for Claude |
+| Inter-pane messaging | Copy-paste, manual `send-keys`, or external glue | Built-in MCP `renga-peers` network; Claude receives channel pushes, Codex and Copilot get a pane-local nudge and read the queued body via `check_messages` |
+| Spawning agent panes | User hand-wires shell commands and client flags | `spawn_claude_pane` / `spawn_codex_pane` / `spawn_copilot_pane` MCP tools, plus `Alt+P` for Claude |
 | IME / CJK | Host terminal handles it; candidate windows often jump as Claude streams | Built-in IME composition overlay with freeze-on-overlay + periodic catch-up so candidates anchor to the caret |
 | Configuration surface | Shell glue, plugins, keytables | A small TUI binary; layout TOMLs declare panes/roles directly |
 
@@ -59,10 +59,10 @@ The full peer-messaging workflow, two-pane example, troubleshooting, and pane-co
 
 - **Multi-pane terminal** — Split vertically/horizontally, run independent PTY shells
 - **Tab workspaces** — Multiple project tabs with click-to-switch
-- **Mixed-client peer messaging** — Same-tab Claude Code and Codex instances talk to each other via `renga-peers`; Claude receives channel pushes, Codex peers are driven through their pane by renga itself. See [`docs/peer-messaging.md`](./docs/peer-messaging.md).
+- **Mixed-client peer messaging** — Claude Code, Codex, and GitHub Copilot CLI instances talk to each other via `renga-peers`; Claude receives channel pushes, Codex and Copilot peers are driven through their pane by renga itself. See [`docs/peer-messaging.md`](./docs/peer-messaging.md).
 - **File tree sidebar** — Browse project files with icons, expand/collapse directories
 - **Syntax-highlighted preview** — View file contents with language-aware coloring
-- **Claude Code detection** — Pane border turns orange when Claude Code is running
+- **Agent detection** — Pane border is color-coded per client: orange for Claude Code, green for Codex, purple for GitHub Copilot CLI
 - **cd tracking** — File tree and tab name auto-update when you change directories
 - **JP / CJK IME overlay** — Centered composition box with freeze-on-overlay + periodic catch-up so candidate windows anchor to the caret. See [`docs/ime.md`](./docs/ime.md).
 - **Mouse support** — Click to focus, double-click a pane's outer edge or a shared border to split, drag borders to resize, scroll history
@@ -112,19 +112,20 @@ renga
 
 Launch from any directory. The file tree shows the current working directory. The most-used flags are `--ime-freeze-panes` / `--ime-overlay-catchup-ms` / `--lang`, plus `--min-pane-width` / `--min-pane-height` for split sizing. Run `renga --help` for the full list; the canonical TOML schema and CLI-vs-config precedence are documented in [`docs/configuration.md`](./docs/configuration.md).
 
-## Peer messaging between Claude Code and Codex panes
+## Peer messaging between Claude Code, Codex, and Copilot panes
 
-Mixed-client peer messaging is renga's headline differentiator: Claude Code and Codex instances in the same tab call `list_peers` / `send_message` / `check_messages` to delegate research, hand off failures, or coordinate without the user relaying every message manually. Claude peers receive `<channel source="renga-peers">` pushes; Codex peers get a pane-local nudge from renga and read the actual queued body with `check_messages`. Peer scope is the renga tab (authoritative, no `cwd` / `PID` heuristics), and `renga-peers` coexists with [`claude-peers-mcp`](https://github.com/happy-ryo/claude-peers-mcp) in the same install — channel names don't collide.
+Mixed-client peer messaging is renga's headline differentiator: Claude Code, Codex, and GitHub Copilot CLI instances in the same tab call `list_peers` / `send_message` / `check_messages` to delegate research, hand off failures, or coordinate without the user relaying every message manually. Claude peers receive `<channel source="renga-peers">` pushes; Codex and Copilot peers get a pane-local nudge from renga and read the actual queued body with `check_messages`. Peer scope is the renga tab (authoritative, no `cwd` / `PID` heuristics), and `renga-peers` coexists with [`claude-peers-mcp`](https://github.com/happy-ryo/claude-peers-mcp) in the same install — channel names don't collide.
 
 The shortest path to try it:
 
 ```bash
 renga mcp install --client claude
 renga mcp install --client codex   # optional, if you want Codex peers
-# then launch Claude in a renga pane with Alt+P, or Codex with a plain `codex` line
+renga mcp install --client copilot # optional, if you want GitHub Copilot CLI peers
+# then launch Claude in a renga pane with Alt+P, or Codex / Copilot with a plain `codex` / `copilot` line
 ```
 
-Full setup, two-pane workflow, pane-control tools (`inspect_pane`, `send_keys`, `poll_events`, `set_pane_identity`, `spawn_claude_pane`, `spawn_codex_pane`, …), and troubleshooting are in [`docs/peer-messaging.md`](./docs/peer-messaging.md). The canonical MCP tool surface — parameter schemas, return shapes, error codes — lives in [`docs/api-surface-v1.0.md`](./docs/api-surface-v1.0.md).
+Full setup, two-pane workflow, pane-control tools (`inspect_pane`, `send_keys`, `poll_events`, `set_pane_identity`, `spawn_claude_pane`, `spawn_codex_pane`, `spawn_copilot_pane`, …), and troubleshooting are in [`docs/peer-messaging.md`](./docs/peer-messaging.md). The canonical MCP tool surface — parameter schemas, return shapes, error codes — lives in [`docs/api-surface-v1.0.md`](./docs/api-surface-v1.0.md).
 
 ## IME composition overlay
 

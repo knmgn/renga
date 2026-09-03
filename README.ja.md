@@ -2,21 +2,21 @@
 
 *Language: [English](./README.md) / 日本語*
 
-**複数の [Claude Code](https://docs.anthropic.com/en/docs/claude-code) と Codex エージェントを 1 つの TUI でオーケストレートするための AI ネイティブ・ターミナル基盤。mixed-client peer メッセージング、必要な部分だけ Claude 特化 UX、単一バイナリ。**
+**複数の [Claude Code](https://docs.anthropic.com/en/docs/claude-code) / Codex / GitHub Copilot CLI エージェントを 1 つの TUI でオーケストレートするための AI ネイティブ・ターミナル基盤。mixed-client peer メッセージング、必要な部分だけ Claude 特化 UX、単一バイナリ。**
 
 ![renga スクリーンショット](screenshot.png)
 
 ## renga とは何か
 
-renga は「ペイン自身が AI エージェントであることを知っている」ターミナルです。分割・タブ・フォーカスといった操作は他の TUI multiplexer と同じですが、内部ではそれぞれのペインを **第一級のエージェント・エンドポイント** として扱います。Claude Code が動いているペインは自動検出し、Codex ペインも同じ peer network に参加できるようにし、`spawn_claude_pane` / `spawn_codex_pane` / `set_pane_identity` / `new_tab` などのペイン制御 MCP ツールを提供します。peer のスコープは renga タブ単位 — ユーザーが文字通り同じタブに並べたペイン群 — で固定されており、cross-pane ルーティングがプロジェクトをまたいで衝突することはありません。
+renga は「ペイン自身が AI エージェントであることを知っている」ターミナルです。分割・タブ・フォーカスといった操作は他の TUI multiplexer と同じですが、内部ではそれぞれのペインを **第一級のエージェント・エンドポイント** として扱います。Claude Code が動いているペインは自動検出し、Codex ペインと GitHub Copilot CLI ペインも同じ peer network に参加できるようにし、`spawn_claude_pane` / `spawn_codex_pane` / `spawn_copilot_pane` / `set_pane_identity` / `new_tab` などのペイン制御 MCP ツールを提供します。peer のスコープは renga タブ単位 — ユーザーが文字通り同じタブに並べたペイン群 — で固定されており、cross-pane ルーティングがプロジェクトをまたいで衝突することはありません。
 
-主なユースケースは **エージェントのオーケストレーション** — 「窓口（secretary）」ペインがタスクを「ワーカー」ペインに振り分ける構成、サブエージェントを別ペインで並走比較する構成、長時間セッションが軽い調べ物だけ別ペインに投げる構成、Claude と Codex を同じタブで役割分担させる構成、などです。エージェントを常に 1 つしか起動しないなら、renga が今のターミナルより優位な点は限られます。複数同時に動かすなら、peer チャネルと AI 認識ペインモデルがそのまま価値になります。
+主なユースケースは **エージェントのオーケストレーション** — 「窓口（secretary）」ペインがタスクを「ワーカー」ペインに振り分ける構成、サブエージェントを別ペインで並走比較する構成、長時間セッションが軽い調べ物だけ別ペインに投げる構成、Claude / Codex / Copilot を同じタブで役割分担させる構成、などです。エージェントを常に 1 つしか起動しないなら、renga が今のターミナルより優位な点は限られます。複数同時に動かすなら、peer チャネルと AI 認識ペインモデルがそのまま価値になります。
 
 ### 単体利用とスタック利用
 
 renga には 2 つの正しい使い方があります。
 
-- **単体利用** — Claude Code / Codex の複数ペインをローカルで協調させる AI ネイティブなターミナルとしてそのまま使う
+- **単体利用** — Claude Code / Codex / Copilot の複数ペインをローカルで協調させる AI ネイティブなターミナルとしてそのまま使う
 - **[`claude-org`](https://github.com/suisya-systems/claude-org) の Layer 3 として使う** — Lead / Dispatcher / Curator / Worker の役割分担、タスクごとの working directory 境界、狭い権限コントラクト、知識のキュレーション、組織全体の suspend / resume を持つ上位運用モデルの下で、実行基盤として使う
 
 考え方としては **renga が execution fabric、claude-org がその上の reference operating system** です。
@@ -26,8 +26,8 @@ renga には 2 つの正しい使い方があります。
 | | tmux / zellij | renga |
 |---|---|---|
 | ペインの抽象 | 汎用シェルセッション | **AI エージェント・エンドポイント**（安定 id / role / フォーカスフラグ付き） |
-| ペイン間メッセージング | コピペ、手動 `send-keys`、外部 glue | 組み込み MCP `renga-peers` network。Claude は channel push、Codex は pane nudge を受けて `check_messages` で本文を読む |
-| エージェントペイン起動 | ユーザーがクライアントごとの起動コマンドやフラグを手で管理 | `spawn_claude_pane` / `spawn_codex_pane` MCP ツール、Claude 用 `Alt+P` |
+| ペイン間メッセージング | コピペ、手動 `send-keys`、外部 glue | 組み込み MCP `renga-peers` network。Claude は channel push、Codex / Copilot は pane nudge を受けて `check_messages` で本文を読む |
+| エージェントペイン起動 | ユーザーがクライアントごとの起動コマンドやフラグを手で管理 | `spawn_claude_pane` / `spawn_codex_pane` / `spawn_copilot_pane` MCP ツール、Claude 用 `Alt+P` |
 | IME / 日本語入力 | ホストターミナル任せ。Claude のストリーミング出力で候補窓が踊りがち | 専用 IME 合成 overlay。freeze-on-overlay + 周期 catch-up でキャレット直下に候補窓を固定 |
 | 設定の表面積 | シェル glue / プラグイン / keytable | 小さな TUI バイナリ 1 本。レイアウト TOML でペイン構成と role を直接宣言 |
 
@@ -59,10 +59,10 @@ peer メッセージングの完全なワークフロー、2 ペイン例、ト�
 
 - **ペイン分割** — 縦横に分割、各ペインは独立したシェル (PTY)
 - **タブ** — プロジェクトごとに独立したワークスペースをタブで切替
-- **mixed-client peer メッセージング** — 同じタブの Claude Code と Codex が `renga-peers` で協調。Claude は channel push、Codex は renga がペイン経由で配送。[`docs/peer-messaging.ja.md`](./docs/peer-messaging.ja.md) 参照
+- **mixed-client peer メッセージング** — Claude Code / Codex / GitHub Copilot CLI が `renga-peers` で協調。Claude は channel push、Codex / Copilot は renga がペイン経由で配送。[`docs/peer-messaging.ja.md`](./docs/peer-messaging.ja.md) 参照
 - **ファイルツリー** — アイコン付きサイドバー、展開/折りたたみ可能
 - **プレビュー** — シンタックスハイライト付き、画像ファイルも表示
-- **Claude Code 自動検出** — Claude Code が動いているペインは枠がオレンジになる
+- **エージェント自動検出** — 動いているクライアントごとにペイン枠を色分け（Claude Code はオレンジ、Codex は緑、GitHub Copilot CLI は紫）
 - **`cd` 追従** — ディレクトリ移動でファイルツリーとタブ名も自動切替
 - **JP / CJK IME overlay** — 中央の合成ボックスと freeze-on-overlay + 周期 catch-up でキャレット直下に候補窓を固定。[`docs/ime.ja.md`](./docs/ime.ja.md) 参照
 - **マウス操作** — クリックでフォーカス、ペイン外周や兄弟ペイン間の共有境界をダブルクリックで分割、境界ドラッグでリサイズ、ホイールで履歴スクロール
@@ -111,19 +111,20 @@ renga
 
 好きなディレクトリで起動してください。ファイルツリーにはそのディレクトリが表示されます。よく使うフラグは `--ime-freeze-panes` / `--ime-overlay-catchup-ms` / `--lang`、加えて分割サイズ制御の `--min-pane-width` / `--min-pane-height` です。完全な一覧は `renga --help`、canonical な TOML スキーマと CLI vs config の優先順位は [`docs/configuration.ja.md`](./docs/configuration.ja.md) に集約しています。
 
-## Claude Code と Codex ペイン間のメッセージング
+## Claude Code / Codex / Copilot ペイン間のメッセージング
 
-mixed-client peer メッセージングは renga の中心的な差別化ポイントです: 同じタブの Claude Code / Codex が `list_peers` / `send_message` / `check_messages` を呼び合って、調査の委譲、失敗の引き継ぎ、協調作業を、ユーザーが手で中継せずに進められます。Claude は `<channel source="renga-peers">` タグで push 受信、Codex は renga からペイン nudge を受けて `check_messages` で実本文を読みます。peer スコープは renga タブ単位 (権威的に、`cwd` / `PID` ヒューリスティックは無し) で、同じ Claude install 内で [`claude-peers-mcp`](https://github.com/happy-ryo/claude-peers-mcp) と共存できます — チャンネル名が衝突しません。
+mixed-client peer メッセージングは renga の中心的な差別化ポイントです: 同じタブの Claude Code / Codex / GitHub Copilot CLI が `list_peers` / `send_message` / `check_messages` を呼び合って、調査の委譲、失敗の引き継ぎ、協調作業を、ユーザーが手で中継せずに進められます。Claude は `<channel source="renga-peers">` タグで push 受信、Codex / Copilot は renga からペイン nudge を受けて `check_messages` で実本文を読みます。peer スコープは renga タブ単位 (権威的に、`cwd` / `PID` ヒューリスティックは無し) で、同じ Claude install 内で [`claude-peers-mcp`](https://github.com/happy-ryo/claude-peers-mcp) と共存できます — チャンネル名が衝突しません。
 
 最短で試す手順:
 
 ```bash
 renga mcp install --client claude
 renga mcp install --client codex   # Codex peer も使う場合
-# その後、renga のペイン内で Alt+P から Claude を起動、または plain `codex` で Codex を起動
+renga mcp install --client copilot # GitHub Copilot CLI peer も使う場合
+# その後、renga のペイン内で Alt+P から Claude を起動、または plain `codex` / `copilot` で Codex / Copilot を起動
 ```
 
-完全なセットアップ、2 ペイン例、ペイン操作ツール (`inspect_pane`, `send_keys`, `poll_events`, `set_pane_identity`, `spawn_claude_pane`, `spawn_codex_pane` など)、トラブルシュートは [`docs/peer-messaging.ja.md`](./docs/peer-messaging.ja.md) を参照。canonical な MCP ツール表面 (パラメータ・返り値・エラーコード) は [`docs/api-surface-v1.0.md`](./docs/api-surface-v1.0.md) (英語のみ)。
+完全なセットアップ、2 ペイン例、ペイン操作ツール (`inspect_pane`, `send_keys`, `poll_events`, `set_pane_identity`, `spawn_claude_pane`, `spawn_codex_pane`, `spawn_copilot_pane` など)、トラブルシュートは [`docs/peer-messaging.ja.md`](./docs/peer-messaging.ja.md) を参照。canonical な MCP ツール表面 (パラメータ・返り値・エラーコード) は [`docs/api-surface-v1.0.md`](./docs/api-surface-v1.0.md) (英語のみ)。
 
 ## IME 合成 overlay
 

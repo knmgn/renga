@@ -9,6 +9,39 @@ rules in [`docs/semver-policy-2.0.md`](./docs/semver-policy-2.0.md).
 
 ## [Unreleased]
 
+### Added
+
+- **GitHub Copilot CLI joins the peer network as a third client.**
+  `renga mcp install --client copilot` registers `renga-peers` with
+  Copilot CLI, `spawn_copilot_pane` launches a Copilot worker in-band,
+  and a pane running `copilot` is detected, colored purple in the pane
+  border and org sidebar, and addressable by `send_message` /
+  `check_messages` like any other peer.
+
+  Copilot receives by **pull**, as Codex does. Push rides
+  `notifications/claude/channel`, a Claude-only JSON-RPC method Copilot
+  does not implement, so a pushed message would be dropped with no error
+  on either side; `check_messages` is a plain MCP tool and is present in
+  Copilot's tool list. Two behaviors of the real client shaped the
+  implementation, both measured against Copilot CLI 1.0.82 driven
+  through a PTY: it draws its UI on the **alternate screen** — where the
+  other two render inline, so the blanket "alternate screen means some
+  other program owns this pane" refusal became a per-agent expectation —
+  and its busy footer reads `esc interrupt`, which reflows *through*
+  itself on a 30-column pane, leaving the bare word as the only marker
+  that survives an ordinary four-way split.
+
+  Like `spawn_codex_pane`, `spawn_copilot_pane` refuses up front with
+  `[copilot_not_installed]` when Copilot's MCP entry lacks
+  `RENGA_PEER_CLIENT_KIND=copilot`, and `renga mcp status --client
+  copilot` reports that same mismatch rather than calling the
+  registration fine — without the env var the pane registers as a push
+  client and its mail vanishes silently. Note that Copilot CLI may print
+  "Third-party MCP servers are disabled by your organization's Copilot
+  policy" on a personal account where no such policy applies; that is a
+  known upstream false warning (github/copilot-cli#1707, #1976, #2236)
+  and does not stop the server loading.
+
 ## [3.0.0] — 2026-08-29
 
 > **Major release.** Governed by
