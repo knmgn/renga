@@ -39,6 +39,7 @@ impl OrgSidebarTarget {
 pub(crate) enum OrgPaneKind {
     Claude,
     Codex,
+    Copilot,
     Shell,
 }
 
@@ -157,6 +158,8 @@ impl App {
                     OrgPaneKind::Claude
                 } else if pane.codex_ever_seen() {
                     OrgPaneKind::Codex
+                } else if pane.copilot_ever_seen() {
+                    OrgPaneKind::Copilot
                 } else {
                     OrgPaneKind::Shell
                 };

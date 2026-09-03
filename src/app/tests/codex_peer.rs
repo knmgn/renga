@@ -1,3 +1,4 @@
+use super::super::user_turn::TurnAgent;
 use super::super::*;
 
 fn seed_focused_pane_screen(app: &mut App, bytes: &[u8]) -> usize {
@@ -649,15 +650,93 @@ fn pane_expects_codex_peer_delivery_accepts_registered_codex_without_title() {
         *pane.title.lock().unwrap() = String::new();
     }
     assert!(
-        !app.pane_expects_codex_peer_delivery(app.active_tab, pane_id),
+        !app.pane_expects_pull_peer_delivery(app.active_tab, pane_id),
         "blank title with no registration should not look like Codex"
     );
 
     app.peer_client_kinds.insert(pane_id, PeerClientKind::Codex);
     assert!(
-        app.pane_expects_codex_peer_delivery(app.active_tab, pane_id),
+        app.pane_expects_pull_peer_delivery(app.active_tab, pane_id),
         "registered Codex peer must count even when OSC title detection never fired"
     );
+    app.shutdown();
+}
+
+/// A pane matched only by its *queued* startup command has not run it
+/// yet, so the screen still belongs to the shell — and a shell theme
+/// whose prompt char is `›` (starship and friends) satisfies the only
+/// structural check the Codex nudge gate has. Without the registration
+/// flag, renga types a `check_messages` nudge into that shell and
+/// presses Enter a second later.
+#[test]
+fn an_unregistered_pending_codex_startup_is_not_nudge_ready() {
+    let mut app = App::new(14, 42).expect("App::new");
+    let pane_id = app.ws().focused_pane_id;
+    if let Some(pane) = app.ws_mut().panes.get_mut(&pane_id) {
+        *pane.title.lock().unwrap() = String::new();
+        pane.pending_startup = Some(b"codex\n".to_vec());
+        let mut parser = pane.parser.lock().unwrap_or_else(|e| e.into_inner());
+        // A shell prompt that happens to use Codex's glyph.
+        parser.process(b"\x1b[2J\x1b[H\x1b[?25h\xe2\x80\xba \x1b[1;3H");
+    }
+    let pane = app.ws().panes.get(&pane_id).expect("pane");
+    assert!(
+        !App::pull_peer_delivery_ready(TurnAgent::Codex, false, pane),
+        "an unregistered pane whose codex has not started must not be typed into"
+    );
+    app.shutdown();
+}
+
+/// The two predicates answer different questions and must not be
+/// collapsed back together.
+///
+/// `pane_expects_pull_peer_delivery` asks "does this pane need a PTY
+/// nudge because no channel push reaches it" — true for Copilot.
+/// `pane_looks_like_codex` asks "does this pane have Codex's
+/// main-screen mouse quirks" — false for Copilot, which renders on the
+/// alternate screen. Answering the mouse question with the delivery
+/// predicate makes `should_use_arrow_wheel_fallback` (`!is_codex`) and
+/// `should_use_codex_main_screen_wheel_fallback` (`!alt_screen`) both
+/// fall through, and the Copilot pane's wheel stops responding
+/// entirely.
+#[test]
+fn copilot_pulls_peer_mail_but_is_not_codex_for_mouse_purposes() {
+    let mut app = App::new(40, 80).expect("App::new");
+    let pane_id = app.ws().focused_pane_id;
+    if let Some(pane) = app.ws_mut().panes.get_mut(&pane_id) {
+        *pane.title.lock().unwrap() = String::new();
+    }
+    app.peer_client_kinds
+        .insert(pane_id, PeerClientKind::Copilot);
+
+    assert!(
+        app.pane_expects_pull_peer_delivery(app.active_tab, pane_id),
+        "Copilot receives peer mail by pulling it, so it needs the nudge"
+    );
+    assert!(
+        !app.pane_looks_like_codex(app.active_tab, pane_id),
+        "Copilot has none of Codex's main-screen wheel quirks"
+    );
+
+    // The Codex registration must still answer both with `true`.
+    app.peer_client_kinds.insert(pane_id, PeerClientKind::Codex);
+    assert!(app.pane_expects_pull_peer_delivery(app.active_tab, pane_id));
+    assert!(app.pane_looks_like_codex(app.active_tab, pane_id));
+    app.shutdown();
+}
+
+/// A `GitHub Copilot` OSC title is enough on its own, the same way a
+/// codex title is — registration has not necessarily landed yet when
+/// the first peer message arrives.
+#[test]
+fn a_copilot_title_alone_expects_pull_delivery() {
+    let mut app = App::new(40, 80).expect("App::new");
+    let pane_id = app.ws().focused_pane_id;
+    if let Some(pane) = app.ws_mut().panes.get_mut(&pane_id) {
+        *pane.title.lock().unwrap() = "GitHub Copilot".to_string();
+    }
+    assert!(app.pane_expects_pull_peer_delivery(app.active_tab, pane_id));
+    assert!(!app.pane_looks_like_codex(app.active_tab, pane_id));
     app.shutdown();
 }
 
@@ -671,7 +750,7 @@ fn pane_expects_codex_peer_delivery_accepts_pending_codex_startup() {
     }
 
     assert!(
-        app.pane_expects_codex_peer_delivery(app.active_tab, pane_id),
+        app.pane_expects_pull_peer_delivery(app.active_tab, pane_id),
         "queued codex startup should count before MCP registration lands"
     );
     app.shutdown();

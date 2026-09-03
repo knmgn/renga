@@ -1,3 +1,4 @@
+use super::user_turn::{turn_readiness_on_screen, TurnAgent, TurnReadiness};
 use super::*;
 
 pub(crate) const CODEX_APPEND_ENTER_DELAY: Duration = Duration::from_millis(75);
@@ -165,11 +166,49 @@ fn codex_peer_screen_tail(pane: &Pane) -> Option<String> {
     )
 }
 
-fn pending_startup_looks_like_codex(pane: &Pane) -> bool {
+fn pending_startup_starts_with(pane: &Pane, prefix: &str) -> bool {
     pane.pending_startup
         .as_ref()
         .and_then(|bytes| std::str::from_utf8(bytes).ok())
-        .is_some_and(|text| text.trim_start().starts_with("codex"))
+        .is_some_and(|text| text.trim_start().starts_with(prefix))
+}
+
+fn pending_startup_looks_like_codex(pane: &Pane) -> bool {
+    pending_startup_starts_with(pane, "codex")
+}
+
+/// Startup command for one of the pull-mode clients, before its title
+/// has been observed. Copilot CLI launches as bare `copilot`.
+fn pending_startup_looks_like_pull_client(pane: &Pane) -> bool {
+    pending_startup_looks_like_codex(pane) || pending_startup_starts_with(pane, "copilot")
+}
+
+/// Which pull-mode agent owns `pane`, for nudge purposes.
+///
+/// A free function rather than a method because the flush loop holds a
+/// mutable borrow of `self.workspaces` while it calls this, and only
+/// disjoint *field* borrows survive that — a `&self` method would take
+/// the whole struct and conflict.
+fn pull_agent_for(kind: Option<&PeerClientKind>, pane: &Pane) -> Option<TurnAgent> {
+    match kind {
+        Some(PeerClientKind::Codex) => return Some(TurnAgent::Codex),
+        Some(PeerClientKind::Copilot) => return Some(TurnAgent::Copilot),
+        // Registration is authoritative: a Claude pane never gets a
+        // PTY nudge, whatever its title happens to say right now.
+        Some(PeerClientKind::Claude) => return None,
+        None => {}
+    }
+    if pane.is_codex_running() {
+        Some(TurnAgent::Codex)
+    } else if pane.is_copilot_running() {
+        Some(TurnAgent::Copilot)
+    } else if pending_startup_looks_like_codex(pane) {
+        Some(TurnAgent::Codex)
+    } else if pending_startup_starts_with(pane, "copilot") {
+        Some(TurnAgent::Copilot)
+    } else {
+        None
+    }
 }
 
 pub(crate) fn format_codex_peer_message(msg: &PendingCodexPeerMessage) -> String {
@@ -183,11 +222,7 @@ pub(crate) fn format_codex_peer_message(msg: &PendingCodexPeerMessage) -> String
         header.push_str(&format!(" name={}", ipc::sanitized_label(name)));
     }
     if let Some(kind) = msg.from_kind {
-        let kind = match kind {
-            PeerClientKind::Claude => "claude",
-            PeerClientKind::Codex => "codex",
-        };
-        header.push_str(&format!(" kind={kind}"));
+        header.push_str(&format!(" kind={}", kind.label()));
     }
     let guidance = "Run check_messages now. Treat each returned message as a direct coworker request: do the requested work, and use send_message only when a reply or status update is needed.";
     format!("{header}. {guidance}")
@@ -263,7 +298,7 @@ impl App {
             .find(|(_, id)| **id == from_pane)
             .map(|(n, _)| n.clone());
         let from_kind = self.peer_client_kinds.get(&from_pane).copied();
-        if self.pane_expects_codex_peer_delivery(target_ws, target_id) {
+        if self.pane_expects_pull_peer_delivery(target_ws, target_id) {
             let message = PendingCodexPeerMessage {
                 from_pane,
                 from_name: from_name.clone(),
@@ -419,23 +454,91 @@ impl App {
         Ok(true)
     }
 
-    pub(crate) fn pane_expects_codex_peer_delivery(&self, ws_index: usize, pane_id: usize) -> bool {
+    /// Whether `pane_id` receives peer mail by *pulling* it — i.e. it
+    /// needs a PTY nudge telling it to run `check_messages`, because
+    /// no channel push will reach it. True for Codex and Copilot.
+    ///
+    /// Deliberately keyed on [`PeerClientKind::receive_mode`] rather
+    /// than on a per-client list, so a future client's mode is decided
+    /// in exactly one place.
+    ///
+    /// Note this is **not** the same question as "does this pane
+    /// behave like Codex for mouse purposes" — see
+    /// [`Self::pane_looks_like_codex`], which the pointer code uses and
+    /// which must stay Codex-only.
+    pub(crate) fn pane_expects_pull_peer_delivery(&self, ws_index: usize, pane_id: usize) -> bool {
         // Registration is authoritative when present. Without this
         // short-circuit a Claude-registered pane whose current OSC
         // title transiently contains the substring "codex" (very
         // common for orchestration workers debugging Codex-related
         // issues) would fall through to the title heuristic and be
-        // mis-classified as a Codex recipient — see issue #209's
+        // mis-classified as a pull recipient — see issue #209's
         // discussion of the related #208 regression.
-        match self.peer_client_kinds.get(&pane_id) {
-            Some(PeerClientKind::Codex) => return true,
-            Some(PeerClientKind::Claude) => return false,
-            None => {}
+        if let Some(kind) = self.peer_client_kinds.get(&pane_id) {
+            return kind.receive_mode() == ipc::PeerReceiveMode::Pull;
+        }
+        self.workspaces[ws_index]
+            .panes
+            .get(&pane_id)
+            .is_some_and(|pane| {
+                pane.is_codex_running()
+                    || pane.is_copilot_running()
+                    || pending_startup_looks_like_pull_client(pane)
+            })
+    }
+
+    /// Whether `pane_id` should be treated as a Codex pane for the
+    /// mouse-protocol quirks in [`crate::pane`] (alternate-scroll
+    /// fallback, transcript-overlay wheel handling).
+    ///
+    /// Split out of the delivery predicate when Copilot joined: Copilot
+    /// pulls its peer mail exactly like Codex, but it renders on the
+    /// alternate screen and has none of Codex's main-screen wheel
+    /// quirks, so answering "yes" here for it would suppress the arrow
+    /// fallback it actually wants.
+    pub(crate) fn pane_looks_like_codex(&self, ws_index: usize, pane_id: usize) -> bool {
+        if let Some(kind) = self.peer_client_kinds.get(&pane_id) {
+            return *kind == PeerClientKind::Codex;
         }
         self.workspaces[ws_index]
             .panes
             .get(&pane_id)
             .is_some_and(|pane| pane.is_codex_running() || pending_startup_looks_like_codex(pane))
+    }
+
+    /// Whether a pull-mode pane is in a state where renga may type a
+    /// `check_messages` nudge into its composer.
+    ///
+    /// Dispatches per agent because the two have very different amounts
+    /// of evidence available. Codex gets the historical string-and-glyph
+    /// heuristic below; Copilot gets the *strict* user-turn predicate,
+    /// which is affordable precisely because Copilot frames its composer
+    /// the way Claude does and so can be proven rather than guessed.
+    ///
+    /// `registered` must say whether the pane's kind came from an MCP
+    /// registration rather than from a title or startup-command guess.
+    /// Passing a blanket `true` would disarm
+    /// [`Self::codex_peer_delivery_ready`]'s opening guard: a pane
+    /// matched only by `pending_startup_looks_like_codex` has not run
+    /// its startup command yet, so the screen still belongs to the
+    /// *shell*, and a shell theme whose prompt char is `›` would satisfy
+    /// the remaining glyph check and get the nudge typed into it.
+    pub(crate) fn pull_peer_delivery_ready(
+        agent: TurnAgent,
+        registered: bool,
+        pane: &Pane,
+    ) -> bool {
+        match agent {
+            TurnAgent::Codex => Self::codex_peer_delivery_ready(registered, pane),
+            TurnAgent::Copilot => {
+                let Ok(parser) = pane.parser.lock() else {
+                    return false;
+                };
+                turn_readiness_on_screen(agent, parser.screen()) == TurnReadiness::Ready
+            }
+            // Claude is push-mode and never reaches the nudge path.
+            TurnAgent::Claude => false,
+        }
     }
 
     pub(crate) fn codex_peer_delivery_ready(registered_codex: bool, pane: &Pane) -> bool {
@@ -547,9 +650,12 @@ impl App {
                 if let Some(pane) = ws.panes.get_mut(&pane_id) {
                     match delivery {
                         PendingCodexPeerDelivery::Draft(message) => {
-                            let registered_codex = self.peer_client_kinds.get(&pane_id)
-                                == Some(&PeerClientKind::Codex);
-                            if !Self::codex_peer_delivery_ready(registered_codex, pane) {
+                            let registration = self.peer_client_kinds.get(&pane_id);
+                            let Some(agent) = pull_agent_for(registration, pane) else {
+                                continue;
+                            };
+                            if !Self::pull_peer_delivery_ready(agent, registration.is_some(), pane)
+                            {
                                 continue;
                             }
                             let payload = crate::mcp_peer::build_send_keys_payload(

@@ -906,6 +906,7 @@ impl PeerDelivery {
 pub enum PeerClientKind {
     Claude,
     Codex,
+    Copilot,
 }
 
 impl PeerClientKind {
@@ -913,6 +914,35 @@ impl PeerClientKind {
         match self {
             PeerClientKind::Claude => PeerReceiveMode::Push,
             PeerClientKind::Codex => PeerReceiveMode::Pull,
+            // Push rides `notifications/claude/channel`, a Claude-only
+            // JSON-RPC method that Copilot CLI does not implement — a
+            // pushed message would be dropped on the floor with no
+            // error anywhere. `check_messages` is a plain MCP tool and
+            // is confirmed present in Copilot's tool list, so Pull
+            // trades a little latency for delivery that can be proven.
+            PeerClientKind::Copilot => PeerReceiveMode::Pull,
+        }
+    }
+
+    /// Lowercase wire/display label. Matches the `serde` rename so the
+    /// same spelling round-trips through `PeerRegisterClient`, the
+    /// `RENGA_PEER_CLIENT_KIND` env var and every human-facing surface.
+    pub fn label(self) -> &'static str {
+        match self {
+            PeerClientKind::Claude => "claude",
+            PeerClientKind::Codex => "codex",
+            PeerClientKind::Copilot => "copilot",
+        }
+    }
+
+    /// Parse a label produced by [`Self::label`]. Case-insensitive and
+    /// whitespace-tolerant because it also backs the env-var path.
+    pub fn parse_label(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "claude" => Some(PeerClientKind::Claude),
+            "codex" => Some(PeerClientKind::Codex),
+            "copilot" => Some(PeerClientKind::Copilot),
+            _ => None,
         }
     }
 }

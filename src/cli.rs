@@ -348,6 +348,7 @@ pub enum McpClient {
     #[default]
     Claude,
     Codex,
+    Copilot,
 }
 
 impl fmt::Display for McpClient {
@@ -355,6 +356,7 @@ impl fmt::Display for McpClient {
         match self {
             Self::Claude => write!(f, "claude"),
             Self::Codex => write!(f, "codex"),
+            Self::Copilot => write!(f, "copilot"),
         }
     }
 }
