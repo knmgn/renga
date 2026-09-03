@@ -6,7 +6,7 @@
     <title>renga — AI ネイティブなエージェント用ターミナル</title>
     <meta
       name="description"
-      content="Claude Code と Codex を含む複数エージェントを 1 つのワークスペースで協調させる AI ネイティブなターミナル。mixed-client peer messaging、ペインオーケストレーション、IME 対応 overlay、単一 Rust バイナリ。"
+      content="Claude Code / Codex / GitHub Copilot CLI を含む複数エージェントを 1 つのワークスペースで協調させる AI ネイティブなターミナル。mixed-client peer messaging、ペインオーケストレーション、IME 対応 overlay、単一 Rust バイナリ。"
     />
     <link rel="alternate" hreflang="en" href="./index.html" />
     <link rel="alternate" hreflang="ja" href="./ja.html" />
@@ -180,7 +180,7 @@
       <h1>renga</h1>
       <p class="tagline">
         <a href="https://docs.anthropic.com/en/docs/claude-code">Claude Code</a>
-        と Codex を含む複数のコーディングエージェントを 1 つの
+        / Codex / GitHub Copilot CLI を含む複数のコーディングエージェントを 1 つの
         ワークスペースで協調させる、AI ネイティブなターミナル。
         mixed-client peer messaging、MCP によるペイン
         オーケストレーション、日本語 / CJK 入力に対応した IME
@@ -317,9 +317,9 @@ $ npm install -g @suisya-systems/renga</code></pre>
         <tbody>
           <tr>
             <td>
-              同じタブに並べた Claude Code / Codex 間の mixed-client メッセージング
+              同じタブに並べた Claude Code / Codex / GitHub Copilot CLI 間の mixed-client メッセージング
               <br /><span style="color: var(--muted); font-size: 0.85em;">
-                <code>renga mcp install --client ...</code> で Claude Code と Codex に MCP サーバを登録できる。Claude 側は push 型の <code>&lt;channel source="renga-peers"&gt;</code> で受け取り、Codex 側は pane-local nudge を受けて <code>check_messages</code> で本文を読む。peer のスコープは cwd 推定ではなく renga タブそのもの。
+                <code>renga mcp install --client ...</code> で Claude Code / Codex / Copilot に MCP サーバを登録できる。Claude 側は push 型の <code>&lt;channel source="renga-peers"&gt;</code> で受け取り、Codex / Copilot 側は pane-local nudge を受けて <code>check_messages</code> で本文を読む。peer のスコープは cwd 推定ではなく renga タブそのもの。
               </span>
             </td>
             <td class="mark">—</td>
@@ -329,7 +329,7 @@ $ npm install -g @suisya-systems/renga</code></pre>
             <td>
               エージェント会話の中から MCP 経由でペイン操作 + オーケストレーション
               <br /><span style="color: var(--muted); font-size: 0.85em;">
-                同じ MCP 面で <code>list_panes</code> / <code>spawn_pane</code> / <code>spawn_claude_pane</code> / <code>spawn_codex_pane</code> / <code>close_pane</code> / <code>focus_pane</code> / <code>new_tab</code> / <code>inspect_pane</code> / <code>send_keys</code> / <code>set_pane_identity</code> / <code>poll_events</code> が使える。これによりオーケストレーター役の agent が、会話から離れずにワーカー起動、別ペイン画面の確認、対話プロンプト応答、ワーカー名付け、寿命監視まで進められる。
+                同じ MCP 面で <code>list_panes</code> / <code>spawn_pane</code> / <code>spawn_claude_pane</code> / <code>spawn_codex_pane</code> / <code>spawn_copilot_pane</code> / <code>close_pane</code> / <code>focus_pane</code> / <code>new_tab</code> / <code>inspect_pane</code> / <code>send_keys</code> / <code>set_pane_identity</code> / <code>poll_events</code> が使える。これによりオーケストレーター役の agent が、会話から離れずにワーカー起動、別ペイン画面の確認、対話プロンプト応答、ワーカー名付け、寿命監視まで進められる。
               </span>
             </td>
             <td class="mark">—</td>

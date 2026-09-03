@@ -6,7 +6,7 @@
     <title>renga — AI-Native Terminal for Agent Teams</title>
     <meta
       name="description"
-      content="An AI-native terminal for orchestrating multiple Claude Code and Codex agents in one workspace. Mixed-client peer messaging, pane orchestration, IME-aware composition overlay, single Rust binary."
+      content="An AI-native terminal for orchestrating multiple Claude Code, Codex, and GitHub Copilot CLI agents in one workspace. Mixed-client peer messaging, pane orchestration, IME-aware composition overlay, single Rust binary."
     />
     <link rel="alternate" hreflang="en" href="./index.html" />
     <link rel="alternate" hreflang="ja" href="./ja.html" />
@@ -184,8 +184,8 @@
       <h1>renga</h1>
       <p class="tagline">
         An AI-native terminal for orchestrating multiple
-        <a href="https://docs.anthropic.com/en/docs/claude-code">Claude Code</a>
-        and Codex agents in one workspace. Mixed-client peer messaging,
+        <a href="https://docs.anthropic.com/en/docs/claude-code">Claude Code</a>,
+        Codex, and GitHub Copilot CLI agents in one workspace. Mixed-client peer messaging,
         pane orchestration via MCP, an IME-aware composition overlay for
         JP/CJK input, and a single Rust binary. Built for developers who
         already work with 2+ coding agents in parallel.
@@ -329,9 +329,9 @@ $ npm install -g @suisya-systems/renga</code></pre>
         <tbody>
           <tr>
             <td>
-              Mixed-client peer messaging between Claude Code and Codex panes in the same tab
+              Mixed-client peer messaging between Claude Code, Codex, and GitHub Copilot CLI panes in the same tab
               <br /><span style="color: var(--muted); font-size: 0.85em;">
-                <code>renga mcp install --client ...</code> registers the MCP server for Claude Code and Codex. Claude peers receive push-style <code>&lt;channel source="renga-peers"&gt;</code> messages; Codex peers get pane-local nudges and read the queued body with <code>check_messages</code>. The peer scope is the renga tab itself, not a guessed cwd / PID heuristic.
+                <code>renga mcp install --client ...</code> registers the MCP server for Claude Code, Codex, and Copilot. Claude peers receive push-style <code>&lt;channel source="renga-peers"&gt;</code> messages; Codex and Copilot peers get pane-local nudges and read the queued body with <code>check_messages</code>. The peer scope is the renga tab itself, not a guessed cwd / PID heuristic.
               </span>
             </td>
             <td class="mark">—</td>
@@ -341,7 +341,7 @@ $ npm install -g @suisya-systems/renga</code></pre>
             <td>
               MCP pane control + orchestration from inside agent conversations
               <br /><span style="color: var(--muted); font-size: 0.85em;">
-                The same MCP surface exposes <code>list_panes</code>, <code>spawn_pane</code>, <code>spawn_claude_pane</code>, <code>spawn_codex_pane</code>, <code>close_pane</code>, <code>focus_pane</code>, <code>new_tab</code>, <code>inspect_pane</code>, <code>send_keys</code>, <code>set_pane_identity</code>, and <code>poll_events</code> so an orchestrator agent can grow the team, inspect another pane's screen, answer an interactive prompt, rename workers, and track lifecycle changes without dropping to manual shell glue.
+                The same MCP surface exposes <code>list_panes</code>, <code>spawn_pane</code>, <code>spawn_claude_pane</code>, <code>spawn_codex_pane</code>, <code>spawn_copilot_pane</code>, <code>close_pane</code>, <code>focus_pane</code>, <code>new_tab</code>, <code>inspect_pane</code>, <code>send_keys</code>, <code>set_pane_identity</code>, and <code>poll_events</code> so an orchestrator agent can grow the team, inspect another pane's screen, answer an interactive prompt, rename workers, and track lifecycle changes without dropping to manual shell glue.
               </span>
             </td>
             <td class="mark">—</td>

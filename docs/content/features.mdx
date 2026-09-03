@@ -77,14 +77,14 @@ import { Callout } from 'nextra/components'
   10MB を超えるファイルはプレビューされません。バイナリファイルはプレースホルダーメッセージが表示されます。
 </Callout>
 
-## Claude 検出
+## エージェント検出
 
-ターミナルペインで `claude`（Claude Code）を実行すると、renga が自動検出します：
+ターミナルペインで `claude`（Claude Code）/ `codex` / `copilot`（GitHub Copilot CLI）を実行すると、renga が自動検出します：
 
-- **ペイン枠がオレンジに変化**（Claude ブランドカラー `#D97757`）
-- **ペインタイトルが変化** — `shell [N]` → `claude [N]`
+- **ペイン枠と ORG サイドバーの行が client ごとに色分け** — Claude Code はオレンジ（ブランドカラー `#D97757`）、Codex は緑、Copilot は紫
+- **ペインタイトルが変化** — `shell [N]` → `claude [N]` / `codex [N]` / `copilot [N]`
 
-ターミナルのウィンドウタイトル（OSC 0/2 エスケープシーケンス）を監視して検出します。
+判定はペインの `renga-peers` MCP 登録を優先します（client の MCP サブプロセスが自ら報告した事実のため）。その MCP サーバ無しで起動された client については、ターミナルのウィンドウタイトル（OSC 0/2 エスケープシーケンス）へフォールバックします。タイトルだけでは足りません — いずれの client も実行中タスクの要約でタイトルを書き換えるため、自分の client 名が消えることも、他の client 名が紛れ込むこともあるからです。
 
 ## cd 追従
 
