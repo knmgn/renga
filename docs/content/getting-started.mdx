@@ -11,34 +11,32 @@
 
 ## インストール
 
-### npm 経由（推奨）
+### バイナリを直接ダウンロード（推奨）
 
-```bash
-npm install -g @suisya-systems/renga
-```
+[Releases](https://github.com/knmgn/renga/releases) から自分のプラットフォーム向けバイナリを取得し、`PATH` の通った場所に置いてください。コマンド名は `renga-cp` です。
 
-Node.js が必要です。インストール後、どこからでも `renga` コマンドで起動できます。
+このフォークは npm パッケージを publish しません。本家の `@suisya-systems/renga` は `renga` として入るため影響を受けず、両方を並存できます。
 
 Claude Code / Codex / Copilot のペイン同士の会話、client 内からのペイン操作を使いたい場合は、renga の MCP サーバを client ごとに一度登録してください。
 
 ```bash
-renga mcp install --client claude
-renga mcp install --client codex   # Codex peer も使う場合
-renga mcp install --client copilot # GitHub Copilot CLI peer も使う場合
+renga-cp mcp install --client claude
+renga-cp mcp install --client codex   # Codex peer も使う場合
+renga-cp mcp install --client copilot # GitHub Copilot CLI peer も使う場合
 ```
 
 これで選択した client 内から、組み込みの `renga-peers` network と `list_panes` / `spawn_claude_pane` / `spawn_codex_pane` / `spawn_copilot_pane` / `inspect_pane` / `send_keys` などのペイン制御ツールが使えるようになります。
 
 ### バイナリをダウンロード
 
-[Releases](https://github.com/suisya-systems/renga/releases) から最新バイナリをダウンロード：
+[Releases](https://github.com/knmgn/renga/releases) から最新バイナリをダウンロード：
 
 | プラットフォーム | ファイル |
 |-----------------|---------|
-| Windows (x64) | `renga-windows-x64.exe` |
-| macOS (Apple Silicon) | `renga-macos-arm64` |
-| macOS (Intel) | `renga-macos-x64` |
-| Linux (x64) | `renga-linux-x64` |
+| Windows (x64) | `renga-cp-windows-x64.exe` |
+| macOS (Apple Silicon) | `renga-cp-macos-arm64` |
+| macOS (Intel) | `renga-cp-macos-x64` |
+| Linux (x64) | `renga-cp-linux-x64` |
 
 import { Callout } from 'nextra/components'
 
@@ -47,18 +45,18 @@ import { Callout } from 'nextra/components'
 </Callout>
 
 <Callout type="info">
-  **macOS / Linux の場合:** ダウンロード後に実行権限を付与してください: `chmod +x renga-*`
+  **macOS / Linux の場合:** ダウンロード後に実行権限を付与してください: `chmod +x renga-cp-*`
 </Callout>
 
 ### ソースからビルド
 
 ```bash
-git clone https://github.com/suisya-systems/renga.git
+git clone https://github.com/knmgn/renga.git
 cd renga
 cargo build --release
 ```
 
-バイナリは `target/release/renga`（Windows は `renga.exe`）に生成されます。
+バイナリは `target/release/renga-cp`（Windows は `renga.exe`）に生成されます。
 
 ## 初回起動
 
@@ -74,11 +72,11 @@ renga
 
 ターミナルペインで `Alt+P` を押します。renga が peer 対応済みの Claude 起動コマンドを自動で入力するので、内容を確認して必要なら引数を足し、そのまま `Enter` で起動します。
 
-CLI から起動する場合は `renga split --role claude` / `renga new-tab --role claude` でも同じ peer 配線付きで新ペインに Claude Code が立ち上がります。
+CLI から起動する場合は `renga-cp split --role claude` / `renga-cp new-tab --role claude` でも同じ peer 配線付きで新ペインに Claude Code が立ち上がります。
 
 Claude Code が起動するとペインの枠がオレンジに変わります（Codex は緑、GitHub Copilot CLI は紫）。
 
-Codex ワーカーを使いたい場合は、先に `renga mcp install --client codex` を済ませたうえで、ペイン内で plain `codex` を起動するか、オーケストレータに `spawn_codex_pane` を呼ばせます。GitHub Copilot CLI ワーカーも client が 1 つ変わるだけで同じ形です: `renga mcp install --client copilot` のあと plain `copilot` か `spawn_copilot_pane`。ただし Copilot は composer が出る前にフォルダ信頼を尋ね、過去に開いたディレクトリではさらにセッション復元ピッカーを表示します。renga はこれらのダイアログに入力しないので、`send_keys` か手動で一度解除してください。
+Codex ワーカーを使いたい場合は、先に `renga-cp mcp install --client codex` を済ませたうえで、ペイン内で plain `codex` を起動するか、オーケストレータに `spawn_codex_pane` を呼ばせます。GitHub Copilot CLI ワーカーも client が 1 つ変わるだけで同じ形です: `renga-cp mcp install --client copilot` のあと plain `copilot` か `spawn_copilot_pane`。ただし Copilot は composer が出る前にフォルダ信頼を尋ね、過去に開いたディレクトリではさらにセッション復元ピッカーを表示します。renga はこれらのダイアログに入力しないので、`send_keys` か手動で一度解除してください。
 
 ### 2. ペインを分割
 

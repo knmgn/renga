@@ -453,7 +453,7 @@ mod tests {
     #[test]
     fn an_unscoped_subscriber_still_receives_every_peer_inbox_as_before_306() {
         // The compatibility guarantee, and the reason #306 ships as a
-        // minor: `renga events` and every pre-#306 client declare no
+        // minor: `renga-cp events` and every pre-#306 client declare no
         // pane, land on the default scope, and must see exactly the
         // stream they saw before — every `PeerInbox`, for every pane,
         // in order. Scoping is opt-in; this is what declining costs.

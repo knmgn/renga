@@ -4,7 +4,7 @@ import { getPageMap } from 'nextra/page-map'
 import 'nextra-theme-docs/style.css'
 import './globals.css'
 
-const siteUrl = 'https://suisya-systems.github.io/renga/docs'
+const siteUrl = 'https://knmgn.github.io/renga/docs'
 
 export const metadata = {
   title: 'renga — AI-Native Terminal for Agent Teams',
@@ -39,12 +39,12 @@ export default async function RootLayout({ children }: { children: React.ReactNo
           navbar={
             <Navbar
               logo={logo}
-              projectLink="https://github.com/suisya-systems/renga"
+              projectLink="https://github.com/knmgn/renga"
             />
           }
           pageMap={await getPageMap()}
-          docsRepositoryBase="https://github.com/suisya-systems/renga/tree/main/docs"
-          footer={<Footer>MIT License · <a href="https://github.com/suisya-systems/renga" target="_blank" rel="noopener" style={{color: '#d97757'}}>renga</a> · originally derived from <a href="https://github.com/Shin-sibainu/ccmux" target="_blank" rel="noopener" style={{color: '#d97757'}}>ccmux</a></Footer>}
+          docsRepositoryBase="https://github.com/knmgn/renga/tree/main/docs"
+          footer={<Footer>MIT License · <a href="https://github.com/knmgn/renga" target="_blank" rel="noopener" style={{color: '#d97757'}}>renga</a> · originally derived from <a href="https://github.com/Shin-sibainu/ccmux" target="_blank" rel="noopener" style={{color: '#d97757'}}>ccmux</a></Footer>}
         >
           {children}
         </Layout>

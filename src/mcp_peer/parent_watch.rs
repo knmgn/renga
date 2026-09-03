@@ -1,10 +1,10 @@
-//! Parent-process watchdog for `renga mcp-peer` (renga-9fs).
+//! Parent-process watchdog for `renga-cp mcp-peer` (renga-9fs).
 //!
 //! The stdio loop's "exit on stdin EOF" contract is unreliable on
 //! Windows: handle inheritance can leak the write end of our stdin
 //! pipe into sibling children of the spawning client (Claude / Codex),
 //! and any survivor holding that handle keeps EOF from ever arriving.
-//! Observed in the wild as `renga mcp-peer` processes outliving their
+//! Observed in the wild as `renga-cp mcp-peer` processes outliving their
 //! parent by days once a `--bg-pty-host` daemon inherited the pipe.
 //!
 //! The watchdog makes parent death authoritative instead: when the

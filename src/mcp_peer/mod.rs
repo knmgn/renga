@@ -1,4 +1,4 @@
-//! `renga mcp-peer` — the stdio MCP server Claude Code spawns per pane.
+//! `renga-cp mcp-peer` — the stdio MCP server Claude Code spawns per pane.
 //!
 //! Stage 3 of issue #97: the real implementation that replaces
 //! `src/bin/renga-mcp-peer-spike.rs`. Where the spike looped messages
@@ -9,7 +9,7 @@
 //!
 //! # Lifecycle
 //!
-//! 1. Claude Code spawns `renga mcp-peer` as a stdio subprocess. The
+//! 1. Claude Code spawns `renga-cp mcp-peer` as a stdio subprocess. The
 //!    PTY env published by renga (`RENGA_PANE_ID`, `RENGA_SOCKET`,
 //!    `RENGA_TOKEN`) is inherited all the way down.
 //! 2. [`run`] negotiates the MCP `initialize` handshake, declares the
@@ -78,7 +78,7 @@ fn log_stderr(msg: &str) {
     eprintln!("[renga-mcp-peer] {msg}");
 }
 
-/// Entry point called by `renga mcp-peer`. Blocks on stdin until EOF
+/// Entry point called by `renga-cp mcp-peer`. Blocks on stdin until EOF
 /// or an unrecoverable error — with a parent-process watchdog as the
 /// authoritative backstop, because stdin EOF is not guaranteed to
 /// arrive on Windows when the pipe's write end leaked into sibling
@@ -491,8 +491,8 @@ strings. For arbitrary shell commands (non-Claude), use spawn_pane / new_tab. Wh
 are asked to run a bare `claude` invocation the MCP still auto-upgrades it to the \
 peer-enabled form (`claude --dangerously-load-development-channels server:renga-peers`), but \
 spawn_claude_pane is the recommended API for agent harnesses. For Codex launches, prefer \
-spawn_codex_pane once `renga mcp install --client codex` has been run for that user, and \
-spawn_copilot_pane once `renga mcp install --client copilot` has been run.\n\n\
+spawn_codex_pane once `renga-cp mcp install --client codex` has been run for that user, and \
+spawn_copilot_pane once `renga-cp mcp install --client copilot` has been run.\n\n\
 IMPORTANT about pane control: these tools affect the user's live layout. Use them with \
 restraint — don't close or focus panes you don't own unless the user asked you to. When in \
 doubt, ask first."
@@ -675,7 +675,7 @@ fn tools_spec() -> Value {
         },
         {
             "name": "spawn_codex_pane",
-            "description": "Higher-level convenience over `spawn_pane`: splits a pane and launches Codex without the orchestrating caller having to synthesize a shell-quoted `codex ...` command string. This helper assumes the user has already run `renga mcp install --client codex`; that registration injects the `RENGA_PEER_CLIENT_KIND=codex` env into Codex's MCP server subprocess, so a plain `codex` launch is enough for the new pane to register as a pull-based peer. Extra `args[]` are appended after the `codex` token using the same POSIX-style shell quoting as spawn_claude_pane. Pane creation semantics (split refusal, cwd validation, name / role attachment) match `spawn_pane`.",
+            "description": "Higher-level convenience over `spawn_pane`: splits a pane and launches Codex without the orchestrating caller having to synthesize a shell-quoted `codex ...` command string. This helper assumes the user has already run `renga-cp mcp install --client codex`; that registration injects the `RENGA_PEER_CLIENT_KIND=codex` env into Codex's MCP server subprocess, so a plain `codex` launch is enough for the new pane to register as a pull-based peer. Extra `args[]` are appended after the `codex` token using the same POSIX-style shell quoting as spawn_claude_pane. Pane creation semantics (split refusal, cwd validation, name / role attachment) match `spawn_pane`.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -723,7 +723,7 @@ fn tools_spec() -> Value {
         },
         {
             "name": "spawn_copilot_pane",
-            "description": "Higher-level convenience over `spawn_pane`: splits a pane and launches GitHub Copilot CLI without the orchestrating caller having to synthesize a shell-quoted `copilot ...` command string. This helper assumes the user has already run `renga mcp install --client copilot`; that registration injects the `RENGA_PEER_CLIENT_KIND=copilot` env into Copilot's MCP server subprocess, so a plain `copilot` launch is enough for the new pane to register as a pull-based peer. Extra `args[]` are appended after the `copilot` token using the same POSIX-style shell quoting as spawn_claude_pane. Pane creation semantics (split refusal, cwd validation, name / role attachment) match `spawn_pane`. Note that Copilot prompts for folder trust on first launch in a directory and for each tool use unless the pane was launched with `--allow-tool`/`--allow-all-tools`; renga refuses to type into those dialogs, so an unattended worker pane usually wants those flags in `args[]`.",
+            "description": "Higher-level convenience over `spawn_pane`: splits a pane and launches GitHub Copilot CLI without the orchestrating caller having to synthesize a shell-quoted `copilot ...` command string. This helper assumes the user has already run `renga-cp mcp install --client copilot`; that registration injects the `RENGA_PEER_CLIENT_KIND=copilot` env into Copilot's MCP server subprocess, so a plain `copilot` launch is enough for the new pane to register as a pull-based peer. Extra `args[]` are appended after the `copilot` token using the same POSIX-style shell quoting as spawn_claude_pane. Pane creation semantics (split refusal, cwd validation, name / role attachment) match `spawn_pane`. Note that Copilot prompts for folder trust on first launch in a directory and for each tool use unless the pane was launched with `--allow-tool`/`--allow-all-tools`; renga refuses to type into those dialogs, so an unattended worker pane usually wants those flags in `args[]`.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -904,7 +904,7 @@ fn tools_spec() -> Value {
         },
         {
             "name": "poll_events",
-            "description": "Long-poll for pane lifecycle events (pane_started, pane_exited, events_dropped, and any forward-compatible variants). Events are process-wide: pane lifecycle from every renga tab is delivered, not just the caller's tab. Returns events accumulated since the given cursor; if none are buffered, blocks up to `timeout_ms` for the next one. The first call (omit `since`) starts at \"right now\" — no historical replay, matching `renga events --timeout` semantics. Each response body is a JSON object with `next_since` (an opaque cursor string to pass back) and `events` (an array of event objects in renga's wire format).",
+            "description": "Long-poll for pane lifecycle events (pane_started, pane_exited, events_dropped, and any forward-compatible variants). Events are process-wide: pane lifecycle from every renga tab is delivered, not just the caller's tab. Returns events accumulated since the given cursor; if none are buffered, blocks up to `timeout_ms` for the next one. The first call (omit `since`) starts at \"right now\" — no historical replay, matching `renga-cp events --timeout` semantics. Each response body is a JSON object with `next_since` (an opaque cursor string to pass back) and `events` (an array of event objects in renga's wire format).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1281,7 +1281,7 @@ fn known_capability_tokens() -> Vec<String> {
 /// **and** understood by this mcp-peer build.
 ///
 /// Both halves are required and the pair can genuinely differ, because
-/// renga registers `renga mcp-peer` by absolute path — upgrading the
+/// renga registers `renga-cp mcp-peer` by absolute path — upgrading the
 /// binary on disk leaves the old server process running, and a *newer*
 /// server can likewise advertise tokens an older mcp-peer has no code
 /// to send. Gating on the server's list alone would over-promise in
@@ -2657,7 +2657,7 @@ fn handle_spawn_codex_pane_with(
             -32603,
             &format!(
                 "renga refused spawn_codex_pane: [codex_not_installed] {reason} \
-                 (run `renga mcp install --client codex` to register Codex \
+                 (run `renga-cp mcp install --client codex` to register Codex \
                  with `RENGA_PEER_CLIENT_KIND=codex`)"
             ),
         );
@@ -2786,7 +2786,7 @@ fn handle_spawn_copilot_pane_with(
             -32603,
             &format!(
                 "renga refused spawn_copilot_pane: [copilot_not_installed] {reason} \
-                 (run `renga mcp install --client copilot` to register \
+                 (run `renga-cp mcp install --client copilot` to register \
                  Copilot with `RENGA_PEER_CLIENT_KIND=copilot`)"
             ),
         );
@@ -3138,7 +3138,7 @@ fn handle_set_summary(id: &Value, args: &Value, ctx: &PeerCtx) -> Value {
 /// beyond the pane's visible height continues into scrollback
 /// history, so the cap bounds the total payload (not just sanitizes
 /// input). Values above it are clamped silently, matching how
-/// `renga inspect --lines` treats oversized requests.
+/// `renga-cp inspect --lines` treats oversized requests.
 const INSPECT_MAX_LINES: u64 = crate::ipc::INSPECT_MAX_LINES as u64;
 
 fn parse_inspect_format(raw: Option<&str>) -> std::result::Result<InspectFormat, String> {
@@ -3618,7 +3618,7 @@ fn stdio_loop(ctx: &PeerCtx) -> Result<()> {
 /// `target_pane` is ours. That is the whole payoff of opting in: this
 /// thread's bounded queue never carries another pane's mail, and the
 /// bus never has to copy it there. Subscribing without a pane id — what
-/// `renga events` does — still yields the full pre-#306 stream, so the
+/// `renga-cp events` does — still yields the full pre-#306 stream, so the
 /// narrowing is ours alone and costs no other consumer anything.
 /// [`classify_inbox_event`] still checks `target_pane` itself; against a
 /// pre-#306 server — which ignores the binding and broadcasts every peer
@@ -5141,7 +5141,7 @@ Commands:
         // the spawned codex pane would otherwise register as a `claude`
         // (push) client. The handler must short-circuit with the
         // `[codex_not_installed]` marker pointing at
-        // `renga mcp install --client codex`.
+        // `renga-cp mcp install --client codex`.
         let ctx = connected_ctx_with(Arc::new((
             Mutex::new(EventBuffer::default()),
             Condvar::new(),
@@ -5167,7 +5167,7 @@ Commands:
             "message missing error code: {msg}"
         );
         assert!(
-            msg.contains("renga mcp install --client codex"),
+            msg.contains("renga-cp mcp install --client codex"),
             "message missing remediation hint: {msg}"
         );
     }

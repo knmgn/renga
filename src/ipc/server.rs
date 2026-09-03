@@ -291,7 +291,7 @@ fn handle_connection(
         // No field ⇒ the caller did not opt in, so it stays
         // `EventScope::Unscoped` and keeps the full pre-#306 broadcast:
         // every event, including every `PeerInbox` whatever its
-        // `target_pane`. Every pre-#306 client and `renga events` land
+        // `target_pane`. Every pre-#306 client and `renga-cp events` land
         // here and see exactly the stream they always saw — that is
         // deliberate, and it is what keeps #306 a minor rather than a
         // break (`docs/semver-policy-2.0.md` §3: a new optional input
@@ -1701,7 +1701,7 @@ mod tests {
             "pane B must see the lifecycle event but not pane A's inbox"
         );
         // (c) The wire-level proof that #306 is **non-breaking**: a
-        // subscription that sent no `from_pane` — `renga events` and
+        // subscription that sent no `from_pane` — `renga-cp events` and
         // every pre-#306 client — still receives pane A's `PeerInbox`,
         // in the same order, exactly as it did before the change. If
         // this ever flips to lifecycle-only the change has silently
@@ -1745,7 +1745,7 @@ mod tests {
         const PANE: usize = 8;
 
         // Two clients can legitimately watch one pane at the same
-        // moment — e.g. a restarted `renga mcp-peer` subprocess whose
+        // moment — e.g. a restarted `renga-cp mcp-peer` subprocess whose
         // predecessor has not been reaped yet. Routing must fan out to
         // both; picking one would silently drop peer messages for the
         // duration of the overlap.

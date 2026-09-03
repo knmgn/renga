@@ -513,7 +513,7 @@ fn list_command_includes_rect_from_last_pane_rects() {
 fn relayout_panes_caches_rect_origin_accounting_for_sidebar() {
     // Before #80, relayout_panes() used Rect::new(0, tab_h, ...)
     // because only width/height mattered for PTY sizing. Now that
-    // `renga list` also exposes x/y from the same cache, the
+    // `renga-cp list` also exposes x/y from the same cache, the
     // origin must match ui::render_main_area's chunk order (tree
     // on the left, preview on the swapped side) — otherwise a
     // List call between a layout change and the next draw would

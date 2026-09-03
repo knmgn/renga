@@ -1,11 +1,11 @@
 ---
 name: upstream-sync
-description: Use when the user explicitly asks to cherry-pick a specific commit from the Shin-sibainu/ccmux upstream into renga's main, or to send a one-off PR from renga back to that upstream. This is an ad-hoc, per-commit workflow — renga is an independent project and does not do periodic upstream merges. Triggers on phrases like "cherry-pick from upstream", "上流から cherry-pick", "send PR to upstream ccmux", "上流に PR を返す", "pull commit X from Shin-sibainu/ccmux", "upstream の <commit> を取り込む".
+description: Use when the user explicitly asks to cherry-pick a specific commit from the suisya-systems/renga upstream (or the older Shin-sibainu/ccmux) into this fork's main, or to send a one-off PR from this fork back to that upstream. This is an ad-hoc, per-commit workflow — this fork is an independent line and does not do periodic upstream merges. Triggers on phrases like "cherry-pick from upstream", "上流から cherry-pick", "send PR to upstream renga", "上流に PR を返す", "pull commit X from suisya-systems/renga", "upstream の <commit> を取り込む".
 ---
 
 # Upstream Cherry-pick Skill
 
-renga (`suisya-systems/renga`) was forked from [`Shin-sibainu/ccmux`](https://github.com/Shin-sibainu/ccmux), but is now developed as an independent main line. `BRANCHING.md` is the source of truth for branch policy; this skill only assists with the two ad-hoc workflows that need an actual procedure: pulling a single upstream commit into `main`, and sending a one-off reverse PR back to upstream.
+This fork (`knmgn/renga`) was forked from [`suisya-systems/renga`](https://github.com/suisya-systems/renga), which was itself forked from [`Shin-sibainu/ccmux`](https://github.com/Shin-sibainu/ccmux). It is developed as an independent main line. `upstream` in the commands below is `suisya-systems/renga`. `BRANCHING.md` is the source of truth for branch policy; this skill only assists with the two ad-hoc workflows that need an actual procedure: pulling a single upstream commit into `main`, and sending a one-off reverse PR back to upstream.
 
 ## When this skill should fire — and when it should NOT
 
@@ -16,7 +16,7 @@ renga (`suisya-systems/renga`) was forked from [`Shin-sibainu/ccmux`](https://gi
 
 ❌ Do NOT fire — and instead push back to the user — when the request is generic or periodic:
 - "Sync the fork with upstream", "merge in the latest upstream", "do the weekly upstream sync", anything implying a blanket merge.
-  - renga has no scheduled or periodic sync. Tell the user that, and ask which specific upstream commit(s) they actually want.
+  - This fork has no scheduled or periodic sync. Tell the user that, and ask which specific upstream commit(s) they actually want.
 - "Open a PR to upstream for our recent improvements" without an explicit go-ahead.
   - Per root `CLAUDE.md`, do not propose or open reverse PRs unless the user explicitly asks for one.
 
@@ -35,7 +35,7 @@ renga's normal development does not need the upstream remote. Add it only when t
 
 ```bash
 git remote -v | grep upstream || \
-  git remote add upstream https://github.com/Shin-sibainu/ccmux.git
+  git remote add upstream https://github.com/suisya-systems/renga.git
 git fetch upstream
 ```
 
@@ -72,7 +72,7 @@ git cherry-pick <upstream-sha> [<upstream-sha> ...]
 # If conflicts are large, abort and reimplement in renga's own style instead.
 cargo build --release && cargo test
 git push -u origin HEAD
-gh pr create --base main --title "chore: cherry-pick <topic> from upstream ccmux"
+gh pr create --base main --title "chore: cherry-pick <topic> from upstream renga"
 ```
 
 Notes:
@@ -90,10 +90,10 @@ git checkout master
 git merge --ff-only upstream/master    # or the force-with-lease recovery above if upstream rebased
 git checkout -b upstream-pr/<topic>
 git cherry-pick <main-side-sha> [<main-side-sha> ...]
-# Audit the diff for renga-specific identifiers (renga, @suisya-systems/renga, renga-only files, etc.)
+# Audit the diff for fork-specific identifiers (renga-cp, knmgn/renga, Copilot-only code paths, etc.)
 # and remove or rewrite them before pushing.
 git push -u origin HEAD
-gh pr create --repo Shin-sibainu/ccmux --base master
+gh pr create --repo suisya-systems/renga --base main
 ```
 
 ## Forbidden

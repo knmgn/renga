@@ -2,6 +2,8 @@
 
 *Read this in other languages: [日本語](./README.ja.md)*
 
+> **This is a fork.** [`suisya-systems/renga`](https://github.com/suisya-systems/renga) is upstream; this repository adds **GitHub Copilot CLI** as a third peer client alongside Claude Code and Codex. The command it installs is **`renga-cp`**, so it coexists with an upstream `renga` on the same machine. Everything else — the product name, the `renga-peers` MCP server, `RENGA_*` env vars, `~/.config/renga/` — is deliberately unchanged, which does mean the two share one MCP registration. See [`BRANCHING.md`](./BRANCHING.md).
+
 **An AI-native terminal substrate for orchestrating multiple [Claude Code](https://docs.anthropic.com/en/docs/claude-code), Codex, and GitHub Copilot CLI agents in one TUI — mixed-client peer messaging, Claude-specific UX where it matters, single binary.**
 
 ![renga screenshot](screenshot.png)
@@ -73,31 +75,23 @@ The full peer-messaging workflow, two-pane example, troubleshooting, and pane-co
 
 ## Install
 
-### Via npm (recommended)
+### Download binary (recommended)
 
-```bash
-npm install -g @suisya-systems/renga
-```
+Download the latest binary from [Releases](https://github.com/knmgn/renga/releases): `renga-cp-windows-x64.exe`, `renga-cp-macos-arm64`, `renga-cp-macos-x64`, `renga-cp-linux-x64`. Verify with `renga-cp --version` against the [latest release](https://github.com/knmgn/renga/releases/latest).
 
-Update with `npm update -g @suisya-systems/renga`; if that no-ops because of a pinned cache, force-pull the newest version with `npm install -g @suisya-systems/renga@latest`. Verify with `renga --version` against the [latest release](https://github.com/suisya-systems/renga/releases/latest).
-
-> Previously installed `ccmux-fork`? Migrate with: `npm uninstall -g ccmux-fork && npm install -g @suisya-systems/renga`. The same pattern works for the upstream `ccmux-cli`.
-
-### Download binary
-
-Download the latest binary from [Releases](https://github.com/suisya-systems/renga/releases): `renga-windows-x64.exe`, `renga-macos-arm64`, `renga-macos-x64`, `renga-linux-x64`.
+> **No npm package.** Upstream publishes `@suisya-systems/renga` to npm; this fork does not publish anything. If you have upstream installed that way it stays as `renga` and is untouched by anything here — this fork's command is `renga-cp`, so the two coexist.
 
 > **Windows:** Microsoft Defender SmartScreen may show a warning because the binary is not code-signed. Click "More info" → "Run anyway" to proceed.
 >
-> **macOS/Linux:** `chmod +x renga-*` after downloading.
+> **macOS/Linux:** `chmod +x renga-cp-*` after downloading.
 
 ### From source
 
 ```bash
-git clone https://github.com/suisya-systems/renga.git
+git clone https://github.com/knmgn/renga.git
 cd renga
 cargo build --release
-# Binary at target/release/renga (or renga.exe on Windows)
+# Binary at target/release/renga-cp (or renga-cp.exe on Windows)
 ```
 
 Requires the [Rust](https://rustup.rs/) toolchain. If you plan to send PRs, enable the repo's git hooks once after cloning with `git config core.hooksPath .githooks` so a `cargo fmt --all -- --check` miss fails locally instead of on CI.
@@ -110,7 +104,7 @@ Requires the [Rust](https://rustup.rs/) toolchain. If you plan to send PRs, enab
 renga
 ```
 
-Launch from any directory. The file tree shows the current working directory. The most-used flags are `--ime-freeze-panes` / `--ime-overlay-catchup-ms` / `--lang`, plus `--min-pane-width` / `--min-pane-height` for split sizing. Run `renga --help` for the full list; the canonical TOML schema and CLI-vs-config precedence are documented in [`docs/configuration.md`](./docs/configuration.md).
+Launch from any directory. The file tree shows the current working directory. The most-used flags are `--ime-freeze-panes` / `--ime-overlay-catchup-ms` / `--lang`, plus `--min-pane-width` / `--min-pane-height` for split sizing. Run `renga-cp --help` for the full list; the canonical TOML schema and CLI-vs-config precedence are documented in [`docs/configuration.md`](./docs/configuration.md).
 
 ## Peer messaging between Claude Code, Codex, and Copilot panes
 
@@ -119,9 +113,9 @@ Mixed-client peer messaging is renga's headline differentiator: Claude Code, Cod
 The shortest path to try it:
 
 ```bash
-renga mcp install --client claude
-renga mcp install --client codex   # optional, if you want Codex peers
-renga mcp install --client copilot # optional, if you want GitHub Copilot CLI peers
+renga-cp mcp install --client claude
+renga-cp mcp install --client codex   # optional, if you want Codex peers
+renga-cp mcp install --client copilot # optional, if you want GitHub Copilot CLI peers
 # then launch Claude in a renga pane with Alt+P, or Codex / Copilot with a plain `codex` / `copilot` line
 ```
 
@@ -190,9 +184,9 @@ New to Claude Code? Check out [Claude Code Academy](https://claude-code-academy.
 
 ## History & Acknowledgments
 
-renga was originally derived from [Shin-sibainu/ccmux](https://github.com/Shin-sibainu/ccmux) in early 2026 and has since evolved independently — the peer-messaging MCP channel, Claude-aware pane detection, the IME composition overlay, layout TOMLs, and the bilingual UX layer are all renga-specific work. The two projects no longer track version-for-version; renga ships its own semver line on its own cadence (see [`BRANCHING.md`](./BRANCHING.md) for the divergence policy).
+This repository is a fork of [suisya-systems/renga](https://github.com/suisya-systems/renga), adding GitHub Copilot CLI support. renga itself was originally derived from [Shin-sibainu/ccmux](https://github.com/Shin-sibainu/ccmux) in early 2026 and has since evolved independently — the peer-messaging MCP channel, Claude-aware pane detection, the IME composition overlay, layout TOMLs, and the bilingual UX layer are all renga-specific work. The two projects no longer track version-for-version; renga ships its own semver line on its own cadence (see [`BRANCHING.md`](./BRANCHING.md) for the divergence policy).
 
-Many thanks to [Shin-sibainu](https://github.com/Shin-sibainu) for the original ccmux foundation, which gave renga its starting point for the ratatui pane tree, vt100-based terminal emulation, and the cross-platform PTY layer. The full upstream commit history is preserved in the repo's git log, and the `Shin-sibainu` MIT copyright is retained in [`LICENSE`](./LICENSE) per the license terms.
+Many thanks to [suisya-systems](https://github.com/suisya-systems) for renga itself — the peer network this fork extends — and to [Shin-sibainu](https://github.com/Shin-sibainu) for the original ccmux foundation, which gave renga its starting point for the ratatui pane tree, vt100-based terminal emulation, and the cross-platform PTY layer. The full upstream commit history is preserved in the repo's git log, and the `Shin-sibainu` MIT copyright is retained in [`LICENSE`](./LICENSE) per the license terms.
 
 ## License
 

@@ -36,7 +36,7 @@ use std::time::Duration;
 pub(crate) const APP_REPLY_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Client margin for connect + JSON write/read + scheduling on top of
-/// the server's [`APP_REPLY_TIMEOUT`]. Kept small so `renga send` in
+/// the server's [`APP_REPLY_TIMEOUT`]. Kept small so `renga-cp send` in
 /// a shell script aborts within a few seconds if something is wrong.
 pub(crate) const CLIENT_MARGIN: Duration = Duration::from_secs(5);
 
@@ -123,7 +123,7 @@ pub const INSPECT_MAX_LINES: usize = 2000;
 /// A server that omits this token resolves those requests against the
 /// **active** tab — whichever tab the human is looking at — regardless
 /// of any `from_pane` the client sent. Clients that depend on
-/// caller-tab scoping (the bundled `renga mcp-peer`) must therefore
+/// caller-tab scoping (the bundled `renga-cp mcp-peer`) must therefore
 /// **fail closed** when the token is absent rather than silently
 /// operating on the wrong tab: a renga binary can be upgraded on disk
 /// while the old server process keeps running, so a new mcp-peer
@@ -286,7 +286,7 @@ pub const SERVER_CAPABILITIES: &[&str] = &[
 /// `docs/semver-policy.md` §3.
 ///
 /// - `from_pane: None` — legacy semantics: everything resolves inside
-///   the **active** workspace. This is what `renga send` / `renga
+///   the **active** workspace. This is what `renga-cp send` / `renga
 ///   split` and any pre-#288 client send, and what they keep getting.
 /// - `from_pane: Some(id)` — resolution is scoped to the workspace that
 ///   *owns* `id`. `PaneRef::Focused` and `PaneRef::Name` never leave
@@ -299,7 +299,7 @@ pub const SERVER_CAPABILITIES: &[&str] = &[
 /// in Issue #296 and gate on their own [`CAP_CALLER_SCOPE_CLOSE_IDENTITY`]
 /// token. They differ from the five above in their **legacy** branch
 /// only: with `from_pane: None` they keep searching every workspace
-/// (`renga close --id`/`--name` has always been cross-tab), whereas the
+/// (`renga-cp close --id`/`--name` has always been cross-tab), whereas the
 /// five resolve strictly inside the active tab.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "cmd", rename_all = "snake_case")]
@@ -413,7 +413,7 @@ pub enum Request {
     /// pre-#296 behavior — `Focused` meaning "whatever pane the human
     /// is looking at" — was the worst place for the #288 bug to
     /// survive. `None` keeps the pre-#296 cross-tab search for the
-    /// `renga close` CLI. Send `Some(_)` only through
+    /// `renga-cp close` CLI. Send `Some(_)` only through
     /// [`client::send_request_requiring`] with
     /// [`CAP_CALLER_SCOPE_CLOSE_IDENTITY`].
     Close {
@@ -506,11 +506,11 @@ pub enum Request {
     /// - `from_pane: Some(id)` — lifecycle events, plus **only** the
     ///   [`Event::PeerInbox`] whose `target_pane` is `id`; peer traffic
     ///   for other panes is never enqueued on this connection. This is
-    ///   what the bundled `renga mcp-peer` sends, naming the pane it
+    ///   what the bundled `renga-cp mcp-peer` sends, naming the pane it
     ///   runs in.
     /// - `from_pane: None` — unchanged pre-#306 behavior: every event,
     ///   including every `PeerInbox` whatever its `target_pane`. Every
-    ///   pre-#306 client and `renga events` land here and see exactly
+    ///   pre-#306 client and `renga-cp events` land here and see exactly
     ///   the stream they always saw. Omitting the field costs nothing
     ///   and changes nothing, which is what makes #306 a minor rather
     ///   than a break (`docs/semver-policy-2.0.md` §3: a new optional
@@ -523,7 +523,7 @@ pub enum Request {
     /// panes' peer traffic stops being copied into this connection's
     /// bounded queue, which removes both unintended delivery to other
     /// panes and the queue pressure those copies caused. A client that
-    /// genuinely wants the whole firehose (`renga events`) simply does
+    /// genuinely wants the whole firehose (`renga-cp events`) simply does
     /// not send the field.
     ///
     /// Wire note: this was a unit variant before #306. With
@@ -611,7 +611,7 @@ pub enum Request {
         deliver: PeerDelivery,
     },
     /// Publish the MCP client kind currently attached to a pane.
-    /// Sent by `renga mcp-peer` after startup so pane/peer listings can
+    /// Sent by `renga-cp mcp-peer` after startup so pane/peer listings can
     /// expose whether the recipient supports push or pull delivery.
     PeerRegisterClient {
         pane_id: usize,
@@ -1006,8 +1006,8 @@ pub struct PaneInfo {
     pub id: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
-    /// Free-form label. Set via layout TOML `role = ...`, `renga split
-    /// --role ...`, or `renga new-tab --role ...`. Unlike `name`, not
+    /// Free-form label. Set via layout TOML `role = ...`, `renga-cp split
+    /// --role ...`, or `renga-cp new-tab --role ...`. Unlike `name`, not
     /// unique.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
@@ -1215,7 +1215,7 @@ pub mod err_code {
     /// client so it can distinguish "setup broken" from "request
     /// invalid".
     pub const IO_ERROR: &str = "io_error";
-    /// `renga close` was asked to remove the only pane of the only
+    /// `renga-cp close` was asked to remove the only pane of the only
     /// remaining tab. Refused so the TUI doesn't end up with an empty
     /// layout; the caller should shut down renga instead.
     pub const LAST_PANE: &str = "last_pane";
@@ -1383,7 +1383,7 @@ impl From<&str> for CodedError {
 pub enum Event {
     /// Emitted when a pane has been added to the active workspace.
     /// `name` is populated if the pane was given a stable IPC name
-    /// (layout `id` or `renga split --id`). `role` is the free-form
+    /// (layout `id` or `renga-cp split --id`). `role` is the free-form
     /// label set via Phase 1 mechanisms.
     PaneStarted {
         id: usize,
@@ -1430,7 +1430,7 @@ pub enum Event {
     ///   subscription bound to that pane gets it, not just one.
     /// - To a subscription that did not — broadcast, exactly as
     ///   before #306: it receives every `PeerInbox` whatever the
-    ///   `target_pane`. `renga events` is such a subscription.
+    ///   `target_pane`. `renga-cp events` is such a subscription.
     ///
     /// Pane ids are unique across the whole session, so the routing
     /// needs no tab awareness. Clients retain their own `target_pane`

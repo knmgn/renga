@@ -754,7 +754,7 @@ fn the_file_tree_border_drag_recovers_after_the_tree_degrades_away() {
 fn relayout_places_panes_past_the_sidebar_and_the_tree() {
     // `render_main_area` and `relayout_panes` now resolve geometry
     // through the same helper; this pins the observable half of that
-    // contract — the origin `renga list` and mouse hit-testing read
+    // contract — the origin `renga-cp list` and mouse hit-testing read
     // out of `last_pane_rects`.
     let mut app = app_with_sidebar(40, 160);
     app.ws_mut().file_tree_visible = true;

@@ -33,7 +33,7 @@ pub fn send_request(endpoint: &EndpointName, request: &Request) -> Result<Respon
 /// [`super::CAP_CALLER_SCOPE`]).
 ///
 /// This is the **fail-closed** path for version skew. renga registers
-/// `renga mcp-peer` by absolute path, so upgrading the binary on disk
+/// `renga-cp mcp-peer` by absolute path, so upgrading the binary on disk
 /// leaves the *old* server process running while every newly spawned
 /// mcp-peer is the *new* one. An old server parses `from_pane` as an
 /// unknown field, drops it, and happily operates on whatever tab the
@@ -242,7 +242,7 @@ fn converse(
 /// Subscribe to the **whole** event stream: every lifecycle event
 /// (`pane_started`, `pane_exited`, `events_dropped`, `heartbeat`) *and*
 /// every [`Event::PeerInbox`], whatever pane it is addressed to. This is
-/// the tap behind `renga events` and it behaves exactly as it did before
+/// the tap behind `renga-cp events` and it behaves exactly as it did before
 /// Issue #306 — the request it puts on the wire declares no pane, so the
 /// server applies no routing to it.
 ///
@@ -659,7 +659,7 @@ mod tests {
 
     /// The split API only helps if the two entry points really do put
     /// different things on the wire. Pin both directions, plus the byte
-    /// shape of the unscoped one: `renga events` and every pre-#306
+    /// shape of the unscoped one: `renga-cp events` and every pre-#306
     /// client send exactly `{"cmd":"subscribe"}`, and a new client must
     /// keep doing so — both so old servers never see an unfamiliar line,
     /// and so that declining the #306 opt-in really is a no-op on the

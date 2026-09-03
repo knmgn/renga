@@ -10,7 +10,7 @@ import { Callout } from 'nextra/components'
 
 ## Basic subcommands
 
-### `renga list`
+### `renga-cp list`
 
 List every pane in the active tab:
 
@@ -22,7 +22,7 @@ List every pane in the active tab:
 
 
 ```bash
-$ renga list
+$ renga-cp list
 [
   { "id": 1, "name": "secretary", "role": "leader", "focused": true,
     "tab": 0, "tab_name": "renga",
@@ -56,7 +56,7 @@ unresolvable one are the same too (`tab_not_found` / `tab_ambiguous` /
 `pane_not_found`) — or the bare string `"all"` for every tab, the
 caller's own first and the rest in index order. Omitting it preserves
 the prior behavior exactly, and `{"cmd":"list"}` is byte-identical on
-the wire to what pre-#329 clients sent. `renga list` never sends it —
+the wire to what pre-#329 clients sent. `renga-cp list` never sends it —
 the CLI has no tab flag and still lists the active tab — but the MCP
 `list_panes` tool exposes it (spelled `{"all": true}` there); see
 [Peer messaging](/peer-messaging). When a request carries both `tab`
@@ -71,52 +71,52 @@ from a correct one, which would make an orchestrator retire live panes
 and under-count its capacity. A `list` without `tab` is unchanged on
 every server and gates on `caller_scope` as before.
 
-### `renga send`
+### `renga-cp send`
 
 Write text to the target pane's PTY. Add `--enter` to append a newline so the shell executes the line.
 
 ```bash
-renga send --name worker-foo --enter "git status"
-renga send --id 2 "Hello"
-renga send --focused $'\x1b'  # send Esc
+renga-cp send --name worker-foo --enter "git status"
+renga-cp send --id 2 "Hello"
+renga-cp send --focused $'\x1b'  # send Esc
 ```
 
 Target selector: `--name <NAME>` / `--id <N>` / `--focused`. When omitted the focused pane is used.
 
-### `renga focus`
+### `renga-cp focus`
 
 Move keyboard focus.
 
 ```bash
-renga focus --name secretary
+renga-cp focus --name secretary
 ```
 
-### `renga split`
+### `renga-cp split`
 
 Split a pane. You can seed the new pane with a startup command, a stable name (`--id`), or a free-form role (`--role`).
 
 ```bash
-renga split --direction vertical --command "claude" --id worker-a --role worker
+renga-cp split --direction vertical --command "claude" --id worker-a --role worker
 ```
 
 Target the pane to split with `--target-name <NAME>` / `--target-id <N>` / `--target-focused`. When omitted, the focused pane is split. `--direction vertical | horizontal` is required.
 
-### `renga new-tab`
+### `renga-cp new-tab`
 
 Open a new tab with a fresh single pane.
 
 ```bash
-renga new-tab --command "claude --permission-mode plan" --id worker-plan --role worker --label "plan-session"
+renga-cp new-tab --command "claude --permission-mode plan" --id worker-plan --role worker --label "plan-session"
 ```
 
 ## Lifecycle monitoring
 
-### `renga events`
+### `renga-cp events`
 
 Subscribe to pane lifecycle events as JSON Lines.
 
 ```bash
-renga events --timeout 5s --count 10
+renga-cp events --timeout 5s --count 10
 ```
 
 | Flag | Meaning |
@@ -136,7 +136,7 @@ If neither flag is set the stream runs until the server closes the connection �
 ```
 
 - `pane_started` / `pane_exited`: pane lifecycle transitions.
-- `events_dropped`: number of events the server had to drop for this subscriber (slow consumer signal; reconcile with `renga list` if you see these).
+- `events_dropped`: number of events the server had to drop for this subscriber (slow consumer signal; reconcile with `renga-cp list` if you see these).
 - `heartbeat`: emitted every 30 s as a keep-alive. Consumers can safely ignore it.
 
 #### Subscription scope and `peer_inbox`
@@ -152,7 +152,7 @@ The IPC request behind this command, `subscribe`, takes an optional `from_pane` 
 { "type": "peer_inbox", "target_pane": 3, "from_pane": 2, "from_name": "secretary", "from_kind": "claude", "body": "please run the tests", "ts_ms": 1700000014000 }
 ```
 
-`renga events` sends no `from_pane`, so the CLI stream is unchanged — it still carries `peer_inbox` lines for every pane, as it always has. `from_pane` is an opt-in for the other kind of consumer: an integration that speaks IPC on behalf of a single pane, like the bundled `renga mcp-peer`, which only ever acts on the messages addressed to the pane it serves. Declining costs nothing, and the server never guesses a pane for a subscription that named none — neither the `hello` pid nor an earlier peer registration belongs to the connection doing the subscribing, so a guess would eventually bind the wrong pane. Peer messaging itself is untouched either way: messages reach the recipient pane the usual way (a `<channel>` tag for Claude, a `check_messages` nudge for Codex and Copilot).
+`renga-cp events` sends no `from_pane`, so the CLI stream is unchanged — it still carries `peer_inbox` lines for every pane, as it always has. `from_pane` is an opt-in for the other kind of consumer: an integration that speaks IPC on behalf of a single pane, like the bundled `renga-cp mcp-peer`, which only ever acts on the messages addressed to the pane it serves. Declining costs nothing, and the server never guesses a pane for a subscription that named none — neither the `hello` pid nor an earlier peer registration belongs to the connection doing the subscribing, so a guess would eventually bind the wrong pane. Peer messaging itself is untouched either way: messages reach the recipient pane the usual way (a `<channel>` tag for Claude, a `check_messages` nudge for Codex and Copilot).
 
 `peer_inbox` is the **only** event type that is routed at all, and only for the subscriptions that named a pane; every other type still goes to every subscriber. If several subscriptions name the same pane, they all receive that pane's messages. What naming a pane buys is queue pressure: an event a scope declines is never offered to that subscription's channel, so it can neither fill the bounded 256-event queue nor count toward that subscriber's `events_dropped`.
 
@@ -165,16 +165,16 @@ Scoping a subscription is defense in depth, not a boundary of any kind: any proc
 Watch worker pane exits only:
 
 ```bash
-renga events --timeout 5s \
+renga-cp events --timeout 5s \
   | jq -c 'select(.type == "pane_exited" and .role == "worker")'
 ```
 
-### `renga inspect`
+### `renga-cp inspect`
 
 Snapshot the visible screen of a pane. Useful for agents that need to detect approval prompts, error banners, mode indicators, etc. without a human in the loop.
 
 ```bash
-renga inspect --name worker-foo --lines 10 --cursor
+renga-cp inspect --name worker-foo --lines 10 --cursor
 ```
 
 | Flag | Meaning |
@@ -223,7 +223,7 @@ IPC failures surface as `Error: [<code>] <message>` on stderr (renga 0.5.7+). Th
 Shell-side dispatch example:
 
 ```bash
-out=$(renga send --name worker-foo --enter "ping" 2>&1)
+out=$(renga-cp send --name worker-foo --enter "ping" 2>&1)
 case "$out" in
   *"[pane_not_found]"*|*"[pane_vanished]"*)
     echo "worker closed" ;;
@@ -238,7 +238,7 @@ Treat **unknown** codes as non-fatal — new codes may be added in future renga 
 
 ## Subscriber teardown
 
-`renga events` subscribers are released promptly when the client half-closes the connection. The server emits a heartbeat every 30 seconds, so the next write into a dead socket fails and unsubscribes the slot — even on quiet workspaces that otherwise go minutes without an event.
+`renga-cp events` subscribers are released promptly when the client half-closes the connection. The server emits a heartbeat every 30 seconds, so the next write into a dead socket fails and unsubscribes the slot — even on quiet workspaces that otherwise go minutes without an event.
 
 ## Security model
 

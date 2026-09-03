@@ -35,7 +35,7 @@ forward-compat rules are in §5.
 
 ## 1. MCP tools (`renga-peers` stdio MCP server)
 
-Launched per pane as `renga mcp-peer`. Speaks MCP over stdio. Routes peer
+Launched per pane as `renga-cp mcp-peer`. Speaks MCP over stdio. Routes peer
 traffic through the renga IPC server.
 
 **Frozen contract — `serverInfo`**:
@@ -234,14 +234,14 @@ restrict structured-field values to `[A-Za-z0-9_./:@+%=-]` for safety.
 Same envelope as `spawn_claude_pane` minus `permission_mode` / `model`. `args`
 is appended after the literal `codex` token.
 
-**Pre-condition**: the user must have run `renga mcp install --client codex`
+**Pre-condition**: the user must have run `renga-cp mcp install --client codex`
 so `RENGA_PEER_CLIENT_KIND=codex` is injected into Codex's MCP subprocess env.
 The handler verifies this up front by inspecting `~/.codex/config.toml` for
 `[mcp_servers.renga-peers.env] RENGA_PEER_CLIENT_KIND = "codex"`. If the file
 is missing/unreadable, the renga-peers entry is absent, or the value differs
 from `"codex"`, the call returns a JSON-RPC `-32603` whose message carries the
 `[codex_not_installed]` marker and the remediation hint
-`renga mcp install --client codex`. Issue #203 — replaces the prior
+`renga-cp mcp install --client codex`. Issue #203 — replaces the prior
 silent-bifurcation behavior recorded in v1.0.
 
 ### 1.9 `close_pane` — stable
@@ -344,7 +344,7 @@ Buffer cap: 4096 events per process; older entries evicted on overflow with an
 
 **Contract note (Q2)**: `poll_events` is the **MCP-side, opaque-cursor**
 event interface — the right tool when a peer wants pull-style polling with
-filters. The CLI `renga events` command (§2.2) is the **subscribe-stream**
+filters. The CLI `renga-cp events` command (§2.2) is the **subscribe-stream**
 counterpart for shell pipelines. Both are first-class in v1.0 and serve
 different use cases; neither is deprecated.
 
@@ -409,7 +409,7 @@ and sends no `Request` beyond it, so it answers against every renga server
 that has ever shipped, including pre-#288 ones that advertise nothing.
 
 **Version skew, and why `client.version` is not the server's version**: renga
-registers `renga mcp-peer` by absolute path, so upgrading the binary on disk
+registers `renga-cp mcp-peer` by absolute path, so upgrading the binary on disk
 leaves the *old* server process running while newly spawned mcp-peers are the
 *new* one. The two halves are reported separately and must not be conflated;
 `client.version` describes the on-disk binary, never the process serving the
@@ -433,7 +433,7 @@ empty `capabilities` list.
 Same envelope as `spawn_codex_pane`. `args` is appended after the literal
 `copilot` token, with the same POSIX shell quoting as §1.7.
 
-**Pre-condition**: the user must have run `renga mcp install --client copilot`
+**Pre-condition**: the user must have run `renga-cp mcp install --client copilot`
 so `RENGA_PEER_CLIENT_KIND=copilot` is injected into Copilot's MCP subprocess
 env. The handler verifies this up front by reading
 `~/.copilot/mcp-config.json` — or `$COPILOT_HOME/mcp-config.json` when that
@@ -442,7 +442,7 @@ override is set — and requiring that
 the file is missing/unreadable, the entry is absent, or the value differs, the
 call returns a JSON-RPC `-32603` carrying the `[copilot_not_installed]` marker
 and the remediation hint
-`renga mcp install --client copilot`. Same rationale as §1.8: without the env
+`renga-cp mcp install --client copilot`. Same rationale as §1.8: without the env
 var the new pane registers as a **push** client, and push rides
 `notifications/claude/channel`, which Copilot CLI does not implement — every
 peer message to that pane would be dropped with no error on either side.
@@ -512,36 +512,36 @@ command (clap `conflicts_with_all`). When no selector is given, the default is
 
 | Command | Args | Maps to IPC |
 |---|---|---|
-| `renga list` | — | `Request::List` |
-| `renga send` | `--name\|--id\|--focused`, `--enter`, `<TEXT>` (positional) | `Request::Send { append_enter }` |
-| `renga focus` | `--name\|--id` | `Request::Focus` |
-| `renga close` | `--name\|--id` | `Request::Close` |
-| `renga new-tab` | `--command`, `--id`, `--label`, `--role`, `--cwd` | `Request::NewTab` |
-| `renga split` | `--target-name\|--target-id\|--target-focused`, `--direction <vertical\|horizontal>`, `--command`, `--id`, `--role`, `--cwd` | `Request::Split` |
-| `renga inspect` | `--name\|--id\|--focused`, `--lines`, `--cursor` | `Request::Inspect` |
-| `renga events` | `--timeout <humantime::Duration>`, `--count <usize>` | `Request::Subscribe { from_pane: None }` + stream |
-| `renga rename` | `--name\|--id\|--focused`, `--to-name`/`--clear-name` (mutex), `--to-role`/`--clear-role` (mutex) | `Request::SetPaneIdentity` |
-| `renga mcp-peer` | — | (not IPC) handed off to `mcp_peer::run` for the stdio MCP loop |
-| `renga mcp install` | `--client <claude\|codex\|copilot>` (default `claude`), `--force`, `--codex-auto-approve-peer-tools` | (writes Claude/Codex/Copilot MCP config; not an IPC call) |
-| `renga mcp uninstall` | `--client <claude\|codex\|copilot>` | (config write) |
-| `renga mcp status` | `--client <claude\|codex\|copilot>` | (config read; for `copilot` also warns when the entry lacks `RENGA_PEER_CLIENT_KIND=copilot`) |
+| `renga-cp list` | — | `Request::List` |
+| `renga-cp send` | `--name\|--id\|--focused`, `--enter`, `<TEXT>` (positional) | `Request::Send { append_enter }` |
+| `renga-cp focus` | `--name\|--id` | `Request::Focus` |
+| `renga-cp close` | `--name\|--id` | `Request::Close` |
+| `renga-cp new-tab` | `--command`, `--id`, `--label`, `--role`, `--cwd` | `Request::NewTab` |
+| `renga-cp split` | `--target-name\|--target-id\|--target-focused`, `--direction <vertical\|horizontal>`, `--command`, `--id`, `--role`, `--cwd` | `Request::Split` |
+| `renga-cp inspect` | `--name\|--id\|--focused`, `--lines`, `--cursor` | `Request::Inspect` |
+| `renga-cp events` | `--timeout <humantime::Duration>`, `--count <usize>` | `Request::Subscribe { from_pane: None }` + stream |
+| `renga-cp rename` | `--name\|--id\|--focused`, `--to-name`/`--clear-name` (mutex), `--to-role`/`--clear-role` (mutex) | `Request::SetPaneIdentity` |
+| `renga-cp mcp-peer` | — | (not IPC) handed off to `mcp_peer::run` for the stdio MCP loop |
+| `renga-cp mcp install` | `--client <claude\|codex\|copilot>` (default `claude`), `--force`, `--codex-auto-approve-peer-tools` | (writes Claude/Codex/Copilot MCP config; not an IPC call) |
+| `renga-cp mcp uninstall` | `--client <claude\|codex\|copilot>` | (config write) |
+| `renga-cp mcp status` | `--client <claude\|codex\|copilot>` | (config read; for `copilot` also warns when the entry lacks `RENGA_PEER_CLIENT_KIND=copilot`) |
 
-**`renga list` and cross-tab enumeration (#329)**: the CLI sends `Request::List`
+**`renga-cp list` and cross-tab enumeration (#329)**: the CLI sends `Request::List`
 with neither `from_pane` nor `tab`, so its scope is unchanged — the active tab,
 exactly as before. Its records do pick up the new display-only `tab` / `tab_name`
 fields (§3.4); `same_tab` stays omitted, because a call with no caller pane has no
 tab for a record to share. No new flags: a CLI selector for the `tab` scope is
 deferred (§6.2), and the cross-tab surface is the `list_panes` MCP tool (§1.5).
 
-**`renga rename` (Q6)**: same semantics as `set_pane_identity` (§1.14) —
+**`renga-cp rename` (Q6)**: same semantics as `set_pane_identity` (§1.14) —
 three-state via `--to-X` / `--clear-X` flags. Frozen in v1.0.
 
-**`renga events` vs `poll_events` (Q2)**: see §1.15. The CLI form streams a
+**`renga-cp events` vs `poll_events` (Q2)**: see §1.15. The CLI form streams a
 connection (good for shell pipelines and `tail -F`-style tooling); the MCP
 form cursor-paginates (good for cooperative pull from peer agents). Both are
 frozen.
 
-**`renga events` is an unscoped subscriber (#306)**: it sends no `from_pane`,
+**`renga-cp events` is an unscoped subscriber (#306)**: it sends no `from_pane`,
 so its stream is the full one it has always been — every event, `peer_inbox`
 lines included, whatever pane they are addressed to (§3.3, §3.5). The
 `from_pane` added in #306 is there for the *other* kind of consumer, one that
@@ -558,8 +558,8 @@ These were de-facto stable; v1.0 makes them part of the formal contract.
 |---|---|---|
 | `RENGA_SOCKET` | published by parent renga, read by children | Path to the IPC endpoint (Unix socket on Unix; Named Pipe path on Windows). |
 | `RENGA_TOKEN` | published by parent, read by children | Per-instance session token. Not a secret (same-user trust model); used as a PID-reuse defense. |
-| `RENGA_PANE_ID` | published per-PTY by renga, read by `renga mcp-peer` | Numeric pane id the MCP subprocess belongs to. Absent → MCP runs in **detached mode**. |
-| `RENGA_PEER_CLIENT_KIND` | injected by `renga mcp install --client <codex\|copilot>` into that client's MCP subprocess env | `"claude"`, `"codex"` or `"copilot"`. Defaults to `claude`. Selects the receive mode: `claude` → `push`, `codex` / `copilot` → `pull`. |
+| `RENGA_PANE_ID` | published per-PTY by renga, read by `renga-cp mcp-peer` | Numeric pane id the MCP subprocess belongs to. Absent → MCP runs in **detached mode**. |
+| `RENGA_PEER_CLIENT_KIND` | injected by `renga-cp mcp install --client <codex\|copilot>` into that client's MCP subprocess env | `"claude"`, `"codex"` or `"copilot"`. Defaults to `claude`. Selects the receive mode: `claude` → `push`, `codex` / `copilot` → `pull`. |
 | `RENGA_LAYOUTS_DIR` | read by CLI | Override layout search root. |
 | `RENGA_NO_MACOS_TIP` | read by `macos_tip` | Set non-empty → suppress macOS first-launch banner. macOS-only. |
 
@@ -614,14 +614,14 @@ Server budgets: 5 s `APP_REPLY_TIMEOUT` (server → app event loop) +
 | `send` | `target: PaneRef`, `data: string`, `append_enter: bool` (default false), `from_pane?: usize` | |
 | `split` | `target: PaneRef`, `direction: vertical\|horizontal`, `command?`, `id?`, `role?`, `cwd?`, `from_pane?: usize`, `tab?: TabSelector` | Relative `cwd` resolves against the **target** pane, not `from_pane`. `tab` (#290) is omitted on the wire when absent; senders must gate it on `spawn_tab` (§3.4). `{new: …}` is not valid here — that is `spawn_tab`'s job. |
 | `focus` | `target: PaneRef`, `from_pane?: usize` | Resolving outside the visible tab switches the visible tab. |
-| `close` | `target: PaneRef`, `from_pane?: usize` | `from_pane` added in #296; optional and omitted on the wire when absent, so `{"cmd":"close","target":"focused"}` is unchanged. Unlike the #288 five, the **legacy** (`from_pane` absent) branch searches every workspace — `renga close --id/--name` has always been cross-tab. Senders must gate `from_pane` on `caller_scope_close_identity` (§3.4). |
+| `close` | `target: PaneRef`, `from_pane?: usize` | `from_pane` added in #296; optional and omitted on the wire when absent, so `{"cmd":"close","target":"focused"}` is unchanged. Unlike the #288 five, the **legacy** (`from_pane` absent) branch searches every workspace — `renga-cp close --id/--name` has always been cross-tab. Senders must gate `from_pane` on `caller_scope_close_identity` (§3.4). |
 | `new_tab` | `command?`, `id?`, `label?`, `role?`, `cwd?` | Creates **and focuses** — unchanged by #290. |
 | `spawn_tab` | `command?`, `id?`, `label?`, `role?`, `cwd?`, `from_pane?: usize` | #290. Creates a single-pane tab **in the background**: the active tab is untouched, geometry (rects + PTY size) is finalized before the reply, exactly one `pane_started` is emitted after name/role attach. Relative / omitted `cwd` follows the **caller pane** (falls back to the server cwd without `from_pane`). Replies `{ id, tab }` with the new pane id and 0-based tab index. Senders must gate on `spawn_tab` (§3.4). |
 | `subscribe` | `from_pane?: usize` | Switches to event-stream mode after ack. `from_pane` (#306) scopes the subscription to a pane **inbox** — note this is not the caller-tab scoping the same-named field means on the requests above. Present → lifecycle events plus only the `peer_inbox` whose `target_pane` is that pane; **absent → unchanged pre-#306 behavior**: every event, including every `peer_inbox` whatever its `target_pane`. Optional and omitted on the wire when absent, so `{"cmd":"subscribe"}` is unchanged and so is what that request yields — a new optional input whose default preserves prior behavior, not a break (`docs/semver-policy-2.0.md` §3). Needs no capability gate (see `subscribe_pane_scope` in §3.4). |
 | `inspect` | `target: PaneRef`, `lines?`, `include_cursor: bool` (default false) | `lines` beyond the visible height reads scrollback since v1.4 (#278) — see §1.12. |
 | `peer_list` | `from_pane: usize` | |
 | `peer_send` | `from_pane: usize`, `target: PaneRef`, `body: string`, `deliver?: channel\|user_turn` | Cross-tab ids deliver since #289; names resolve in the sender's tab only; unresolvable targets fail `pane_not_found`. `deliver` (#323) is `skip_serializing_if = "is_channel"`, so a channel send is byte-identical on the wire to a pre-#323 one; senders must gate `user_turn` on `peer_user_turn` (§3.4). |
-| `peer_register_client` | `pane_id: usize`, `kind: claude\|codex\|copilot` | Posted by `renga mcp-peer` on startup. |
+| `peer_register_client` | `pane_id: usize`, `kind: claude\|codex\|copilot` | Posted by `renga-cp mcp-peer` on startup. |
 | `set_pane_identity` | `target: PaneRef`, `name?`, `role?` (three-state: missing / null / value), `from_pane?: usize` | Uses serde `double_option`. `from_pane` (#296) behaves exactly as on `close`. |
 | `set_summary` | `from_pane: usize`, `summary: string` | Empty `summary` clears. >256 `chars` rejected with `summary_too_long`. |
 
@@ -769,10 +769,10 @@ residual direction is why this is a major-release change.
 | `pane_exited` | `id`, `name?`, `role?`, `ts_ms` | Exactly once per pane id. |
 | `events_dropped` | `count: u64`, `ts_ms` | Synthesized when a slow subscriber missed events. Per-subscriber. |
 | `heartbeat` | `ts_ms` | Periodic; only purpose is to detect half-closed connections. Buffer cap 256/subscriber. |
-| `peer_inbox` | `target_pane: usize`, `from_pane: usize`, `from_name?`, `from_kind?`, `body`, `ts_ms` | May originate from any tab since #289 (previously intra-tab by construction). **The only variant whose delivery depends on who is listening**: since #306 a subscription that sent `subscribe.from_pane` (§3.3) receives only the ones matching its pane — all such subscriptions, if several named it — while a subscription that sent no `from_pane`, `renga events` among them, still receives every one of them as before. Pane ids are session-unique, so the routing needs no tab awareness. Clients keep their own `target_pane` check as a backstop, which is what keeps them correct against a pre-#306 server that broadcasts to scoped subscriptions too. |
+| `peer_inbox` | `target_pane: usize`, `from_pane: usize`, `from_name?`, `from_kind?`, `body`, `ts_ms` | May originate from any tab since #289 (previously intra-tab by construction). **The only variant whose delivery depends on who is listening**: since #306 a subscription that sent `subscribe.from_pane` (§3.3) receives only the ones matching its pane — all such subscriptions, if several named it — while a subscription that sent no `from_pane`, `renga-cp events` among them, still receives every one of them as before. Pane ids are session-unique, so the routing needs no tab awareness. Clients keep their own `target_pane` check as a backstop, which is what keeps them correct against a pre-#306 server that broadcasts to scoped subscriptions too. |
 
 **`heartbeat` audience (Q10)**: emitted into the subscribe-stream
-(`renga events` / `Request::Subscribe`). The MCP-side `poll_events` consumes
+(`renga-cp events` / `Request::Subscribe`). The MCP-side `poll_events` consumes
 heartbeats internally as a half-close detector and does **not** surface them
 to callers. v1.0 freezes this asymmetry.
 
@@ -877,8 +877,8 @@ these as `[<code>] <human message>` in JSON-RPC error message strings.
 | `user_turn_unsupported_target` | `peer_send` with `deliver: user_turn`, `send_message` (#323) | The target pane is not running an agent that takes turns (a plain shell, another full-screen TUI, or a pane whose startup command has not run yet). Distinct from `user_turn_not_ready`: retrying will not help until what the pane runs changes. **Nothing was written.** |
 | `user_turn_invalid_body` | `peer_send` with `deliver: user_turn`, `send_message` (#323) | The body cannot be typed as a turn: empty/whitespace, carries control characters, or is multi-line against a target that has not enabled bracketed paste (raw newlines would submit the first line and drive the UI with the rest). Retryable only with a different body; **nothing was written**. |
 | `user_turn_stalled` | `peer_send` with `deliver: user_turn`, `send_message` (#323) | Body bytes reached the composer but submission was never observed. **The outcome is uncertain and bytes were written** — the only user-turn code for which that is true. Inspect the pane before retrying; an immediate identical retry is suppressed by the 5s user-turn dedupe window rather than firing a second `/clear`. |
-| `codex_not_installed` | `spawn_codex_pane` | Codex's `~/.codex/config.toml` is missing the renga-peers entry, the file is unreadable, or the `RENGA_PEER_CLIENT_KIND=codex` env-var passthrough is absent. Surfaced from the MCP layer (not `renga::ipc::err_code`); branch on the `[code]` token same as the others. Run `renga mcp install --client codex` to remediate. |
-| `copilot_not_installed` | `spawn_copilot_pane` | Copilot's `~/.copilot/mcp-config.json` (or `$COPILOT_HOME/mcp-config.json`) is missing, unreadable, has no renga-peers entry, or that entry's `env` lacks `RENGA_PEER_CLIENT_KIND=copilot`. Surfaced from the MCP layer (not `renga::ipc::err_code`), same as `codex_not_installed`. Run `renga mcp install --client copilot` to remediate. |
+| `codex_not_installed` | `spawn_codex_pane` | Codex's `~/.codex/config.toml` is missing the renga-peers entry, the file is unreadable, or the `RENGA_PEER_CLIENT_KIND=codex` env-var passthrough is absent. Surfaced from the MCP layer (not `renga::ipc::err_code`); branch on the `[code]` token same as the others. Run `renga-cp mcp install --client codex` to remediate. |
+| `copilot_not_installed` | `spawn_copilot_pane` | Copilot's `~/.copilot/mcp-config.json` (or `$COPILOT_HOME/mcp-config.json`) is missing, unreadable, has no renga-peers entry, or that entry's `env` lacks `RENGA_PEER_CLIENT_KIND=copilot`. Surfaced from the MCP layer (not `renga::ipc::err_code`), same as `codex_not_installed`. Run `renga-cp mcp install --client copilot` to remediate. |
 | `server_too_old` | any capability-gated call (§3.4) | The connected server did not advertise the capability the call needs, so the client refused to send it. Raised **client-side** by `require_capability` and surfaced from the MCP layer (not `renga::ipc::err_code`); branch on the `[code]` token same as the others. The message names the advertised set and the remedy: the running renga *process* predates the feature even when the binary on disk does not, so restart renga. |
 
 ### 5.2 JSON-RPC numeric codes (Q9)
@@ -969,7 +969,7 @@ minor release.
 - **Cross-tab selectors** for `focus_pane` etc. (Q4 → v1.1+).
   `send_message` gained cross-tab delivery by numeric id in #289, and
   `list_panes` gained a `tab` selector — including `{"all": true}` — in #329
-  (§1.5), so both are now delivered rather than deferred; a `renga list`
+  (§1.5), so both are now delivered rather than deferred; a `renga-cp list`
   equivalent on the CLI is still deferred (§2.2). For the remaining tab-scoped
   tools, workers needing cross-tab coordination continue to use numeric-id
   escape hatches or the "all workers in one tab" pattern.

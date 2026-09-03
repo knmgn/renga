@@ -1,13 +1,11 @@
 name: Deploy Docs + LP
 
+# Manual-only in this fork. The push trigger deployed to GitHub Pages,
+# which is not enabled here, so it failed on every docs commit — and
+# the README no longer links a hosted site: the docs are the Markdown
+# and MDX in this repository. The job is kept rather than deleted so
+# enabling Pages later is one `workflow_dispatch` away.
 on:
-  push:
-    branches:
-      - main
-    paths:
-      - 'docs/**'
-      - 'lp/**'
-      - '.github/workflows/docs.yml'
   workflow_dispatch:
 
 permissions:

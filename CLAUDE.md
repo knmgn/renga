@@ -5,6 +5,15 @@
 ## Overview
 Rust TUI tool for managing multiple Claude Code instances in split panes.
 
+## Fork Identity — read before touching names
+The installed command is **`renga-cp`**, not `renga`, so this fork can sit next to upstream on one machine. Only the command is renamed. The following stay identical to upstream **on purpose** — do not "fix" them:
+
+- **`renga-peers`** — the MCP server name. Claude derives `<channel source="renga-peers">` from this string, and `docs/api-surface-v1.0.md` freezes renaming it as a breaking change.
+- **`RENGA_*`** env vars, **`~/.config/renga/`**, the IPC socket directory, and layout-TOML keys.
+- The product name **renga** in prose. This is a fork of renga, not a different product.
+
+Known consequence: `renga mcp install` (upstream) and `renga-cp mcp install` (this fork) write the same `renga-peers` registration and overwrite each other. Register whichever one you actually drive agents with.
+
 ## Tech Stack
 - Rust (stable), ratatui + crossterm, portable-pty, vt100
 
@@ -35,29 +44,38 @@ cargo run            # Run the app
 - Unix: $SHELL → /bin/sh
 
 ## Release Process
-1. `Cargo.toml` と `npm/package.json` のバージョンを同じ値に揃えて上げる
-2. PR で `main` に merge (main は PR 必須)
+配布は **GitHub Release のみ**。npm には publish しない (`npm/` ディレクトリごと削除済み。上流の Trusted Publishing は上流のパッケージとリポジトリに紐付いておりフォークに引き継げないため)。
+
+1. `Cargo.toml` のバージョンを上げる (揃える相手だった `npm/package.json` は無い)
+2. PR で `main` に merge (ブランチ保護は無いので直 push もできるが、CI を通すため PR 推奨)
 3. `git tag vX.Y.Z && git push origin vX.Y.Z`
 4. CI (`.github/workflows/release.yml`) が自動で実行:
    - 4プラットフォーム (Windows x64, macOS x64/arm64, Linux x64) のリリースビルド
    - GitHub Release 作成 + checksums.txt 生成
-   - npm publish (Trusted Publishing)
+   - 成果物名は `renga-cp-*` (バイナリ名に合わせている)
 
 ### タグ命名
-- 通常は **`vX.Y.Z` (plain semver)** を使う。これで GitHub Release が stable、npm dist-tag が `latest` になる。
-- 先行公開したい場合だけ `vX.Y.Z-rc.N` / `-beta.N` / `-alpha.N` 等を使う。workflow が `ref_name` に `-` を含むかで自動的に prerelease + npm `next` に振り分ける。
-- 過去に `vX.Y.Z-fork.N` suffix で全リリースを prerelease 扱いしていたが、フォーク識別子はパッケージ名 (現在 `@suisya-systems/renga`、旧 `ccmux-fork`) とリポジトリ名で既に確保されており、実運用中のバージョンを "pre" として出す意味がなかったため v0.5.7-fork.3 以降廃止。
+- 通常は **`vX.Y.Z` (plain semver)**。これで GitHub Release が stable になる。
+- 先行公開したい場合だけ `vX.Y.Z-rc.N` / `-beta.N` / `-alpha.N` 等を使う。workflow が `ref_name` に `-` を含むかで自動的に prerelease に振り分ける。
+- 上流 renga のバージョン番号とは同期させない。
 
 ### やってはいけない
-- **手動で `npm publish` や `gh release create` しないこと** — バージョン衝突の原因になる
+- **手動で `gh release create` しないこと** — タグ push で workflow が作るものと衝突する
 
 ## Fork & Branching (Divergence Policy)
-renga was forked from `Shin-sibainu/ccmux` but is now developed as an **independent main line**. There is no periodic / weekly upstream sync; useful upstream changes are pulled in only as ad-hoc, per-commit cherry-picks when explicitly requested. `BRANCHING.md` is the source of truth — see it for the full policy.
+This repository (`knmgn/renga`) is a fork of `suisya-systems/renga`, which is itself a fork of `Shin-sibainu/ccmux` — three levels:
+
+```
+Shin-sibainu/ccmux  →  suisya-systems/renga  →  knmgn/renga (here)
+```
+
+It adds GitHub Copilot CLI support and is developed as an **independent main line**. There is no periodic upstream sync; useful upstream changes are pulled in only as ad-hoc, per-commit cherry-picks when explicitly requested. `BRANCHING.md` is the source of truth — see it for the full policy.
 
 Key points:
-- `main` — renga's mainline (default branch, release target). Evolves independently of upstream.
-- `master` — snapshot mirror of `upstream/master`, FF-updated only when needed as a base for cherry-picks. Never carries renga-specific commits.
-- Upstream changes enter renga only via cherry-pick of specific commits the user has named. No blanket sync.
+- `origin` is `knmgn/renga`; `upstream` is `suisya-systems/renga`. The original ccmux is not a configured remote by default.
+- `main` — this fork's mainline (default branch, release target). Evolves independently of upstream.
+- `master` — snapshot mirror kept only as a base for cherry-picks. Never carries fork-specific commits.
+- Upstream changes enter this fork only via cherry-pick of specific commits the user has named. No blanket sync.
 - `.claude/skills/upstream-sync/` skill assists with those ad-hoc cherry-pick and reverse-PR procedures. It must NOT fire on generic "sync the fork" / "merge in upstream" requests — push back to the user instead.
 
 **Do not propose or open reverse PRs against upstream unless the user explicitly asks for one.** It is fine to label individual features as "potentially generalizable upstream" on an umbrella issue, but do not queue "open an upstream PR" as a follow-up task on your own — renga's progress should not be gated on upstream's review cadence.
@@ -65,7 +83,7 @@ Key points:
 ## Intentional `ccmux` References (post-rename)
 Issue #102 renamed the project from `ccmux` to `renga`. The following residual references to `ccmux` are intentional and should NOT be swept:
 
-- **Upstream attribution** — the project is a fork of upstream `Shin-sibainu/ccmux`. Mentions of upstream by its name in `BRANCHING.md`, `README*`, `lp/*.html`, and `docs/content/` are preserved.
+- **Upstream attribution** — the project descends from `Shin-sibainu/ccmux` via `suisya-systems/renga`. Mentions of either upstream by name in `BRANCHING.md`, `README*`, `lp/*.html`, and `docs/content/` are preserved.
 - **Version-history comments in `Cargo.toml`** — pre-rename release notes describe past versions accurately; rewriting them would falsify history.
 - **`.claude/` agent and skill files** — worker tooling, not user-facing product surface; outside the rename scope.
 - **`.github/workflows/release.yml` historical mention** — none deliberately retained; if any remain they should be flagged.

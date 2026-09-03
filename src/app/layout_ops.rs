@@ -883,7 +883,7 @@ impl App {
         match from_pane {
             // Legacy: everything — including `Id` — resolves inside the
             // active tab, exactly as before #288. Widening `Id` here
-            // would be a silent semantic change for `renga send --id`.
+            // would be a silent semantic change for `renga-cp send --id`.
             None => self.workspaces[ws_idx]
                 .resolve_pane_ref(target)
                 .map(|id| (ws_idx, id))
@@ -900,7 +900,7 @@ impl App {
     /// tab, `Id` still crosses tabs — but a *different legacy branch*.
     ///
     /// These two requests predate `from_pane` with an all-workspace
-    /// search (`renga close --id 7` closes pane 7 wherever it lives,
+    /// search (`renga-cp close --id 7` closes pane 7 wherever it lives,
     /// and `--name worker` falls back to other tabs when the visible
     /// one has no such pane). Narrowing that to the active tab would
     /// break the CLI, so `None` keeps

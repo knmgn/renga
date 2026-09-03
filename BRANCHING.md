@@ -1,6 +1,13 @@
 # Branching & Divergence Policy
 
-renga (`suisya-systems/renga`) は [`Shin-sibainu/ccmux`](https://github.com/Shin-sibainu/ccmux) から派生したプロジェクトですが、現在は **独立した本流として開発しています**。
+このリポジトリ (`knmgn/renga`) は [`suisya-systems/renga`](https://github.com/suisya-systems/renga) のフォークで、GitHub Copilot CLI 対応を独自に足したラインです。上流の renga 自体も [`Shin-sibainu/ccmux`](https://github.com/Shin-sibainu/ccmux) から派生しているため、系譜は 3 段になります。
+
+```
+Shin-sibainu/ccmux  →  suisya-systems/renga  →  knmgn/renga (このリポジトリ)
+```
+
+インストールされるコマンドは `renga-cp` で、上流の `renga` と同じマシンに共存できます。ただし共存には 1 つ制約があります: MCP サーバ名 `renga-peers`・環境変数 `RENGA_*`・設定ディレクトリ `~/.config/renga/` は上流と共有したままなので、`renga mcp install` と `renga-cp mcp install` は同じ登録エントリを奪い合います。名前空間を分けなかったのは、`renga-peers` が Claude の `<channel source="renga-peers">` の導出元であり、`docs/api-surface-v1.0.md` が改名を破壊的変更として凍結しているためです。
+
 バージョン同期や定期的な上流取り込みは行っておらず、上流から有用な変更があれば必要に応じて cherry-pick する程度です。
 
 ## ブランチ構成
@@ -8,9 +15,9 @@ renga (`suisya-systems/renga`) は [`Shin-sibainu/ccmux`](https://github.com/Shi
 | ブランチ | 役割 | push 権限 |
 |---|---|---|
 | `main` | **renga の本流** (default branch、リリース対象) | PR のみ。force-push 禁止 |
-| `master` | **上流ミラー (任意保守)**。`upstream/master` を必要なときだけ FF 追従するスナップショット用 | force-push 許可 (上流が rebase する場合に備え) |
+| `master` | **上流ミラー (任意保守)**。必要なときだけ FF 追従するスナップショット用 | force-push 許可 (上流が rebase する場合に備え) |
 | `feat/*`, `fix/*`, `chore/*` | 通常の機能ブランチ。`main` から切る | PR で `main` にマージ |
-| `upstream-pr/*` | 上流に還元したい変更があれば `master` から切る (基本は使わない) | `Shin-sibainu/ccmux` へ PR |
+| `upstream-pr/*` | 上流に還元したい変更があれば切る (基本は使わない) | `suisya-systems/renga` へ PR |
 
 ### `master` を残しておく理由
 
@@ -21,11 +28,19 @@ renga (`suisya-systems/renga`) は [`Shin-sibainu/ccmux`](https://github.com/Shi
 ## Remote
 
 ```bash
-git remote add upstream https://github.com/Shin-sibainu/ccmux.git
-git fetch upstream
+git remote -v
+# origin    git@github.com:knmgn/renga.git          ← このフォーク (主開発ライン)
+# upstream  https://github.com/suisya-systems/renga ← 直上の分岐元
 ```
 
-`upstream` remote の追加は任意です。renga の通常開発には不要で、上流の変更を覗きたい / cherry-pick したいときにだけ使います。
+さらに元の ccmux を見たいときだけ、3 つ目を足します。
+
+```bash
+git remote add ccmux https://github.com/Shin-sibainu/ccmux.git
+git fetch ccmux
+```
+
+通常開発には `origin` だけあれば足ります。
 
 ## 日常運用
 
@@ -59,7 +74,7 @@ git checkout main
 git pull
 git checkout -b chore/cherry-pick-<topic>
 git cherry-pick <upstream commit>
-gh pr create --base main --title "chore: cherry-pick <topic> from upstream ccmux"
+gh pr create --base main --title "chore: cherry-pick <topic> from upstream renga"
 ```
 
 renga 側の実装と衝突することが多いので、コンフリクトが大きい場合は cherry-pick せず renga 流で書き直すのが基本方針です。
@@ -76,24 +91,26 @@ git merge --ff-only upstream/master
 git checkout -b upstream-pr/foo
 git cherry-pick <main の commit>
 git push origin upstream-pr/foo
-gh pr create --repo Shin-sibainu/ccmux --base master
+gh pr create --repo suisya-systems/renga --base main
 ```
 
 ユーザーから明示の指示がない限り、上流 PR は提案・実行しません — 上流の受け入れタイミングに renga の進捗が縛られないようにするための方針です。
 
-## リリース・npm パッケージ
+## リリース
 
-- **Git tag**: 通常の semver (`vX.Y.Z`)。renga は ccmux のバージョン番号と同期せず、独自に進めます。
-- **Prerelease が必要な場合** (大規模変更の先行公開など): `vX.Y.Z-rc.N` / `-beta.N` 等を使用。`contains(github.ref_name, '-')` で workflow が自動的に prerelease 扱い + npm dist-tag `next` に振り分け (`.github/workflows/release.yml`)。
-- **npm パッケージ名**: `@suisya-systems/renga` (scoped)。元々 `ccmux-fork` で publish しており、Issue #102 / PR #152・#153 の流れで `@suisya-systems/renga` に rename しました (PR #152 で一旦 `renga-fork` に書き換えたが publish 前に PR #153 で scope 付き名に再変更したため、npm 上に存在する旧名は `ccmux-fork` のみ)。`renga` (unscoped) は他者が先行 publish 済みのため scope 付きで確保しています。
-- 過去の `v0.5.7-fork.1〜3` では `-fork.N` 接尾辞で全リリースを prerelease 扱いしていましたが、フォーク識別子はパッケージ名とリポジトリ名で既に確保されており suffix は誤った "pre" 信号にしかならなかったため v0.5.7-fork.3 以降廃止しました。
+- **配布は GitHub Release のみ。** npm には publish しません。上流の publish は npm Trusted Publishing に依存しており、これは上流のパッケージとリポジトリに紐付いているためフォークに引き継げません。毎タグ失敗するジョブを残すより外すほうが良いので、`publish-npm` ジョブは `.github/workflows/release.yml` から削除してあります。
+- **Git tag**: 通常の semver (`vX.Y.Z`)。上流 renga のバージョン番号とは同期させません。
+- **Prerelease が必要な場合**: `vX.Y.Z-rc.N` / `-beta.N` 等を使用。`contains(github.ref_name, '-')` で workflow が自動的に prerelease 扱いにします。
+- **成果物名**: `renga-cp-windows-x64.exe` / `renga-cp-macos-x64` / `renga-cp-macos-arm64` / `renga-cp-linux-x64` + `checksums.txt`。
+- **アップデート確認**: `src/version_check.rs` が GitHub Releases API (`repos/knmgn/renga/releases/latest`) の `tag_name` を読みます。上流は npm registry を見ていました。
 
 ## ブランチ保護
 
-GitHub 側で以下を設定:
+**このフォークには現在ブランチ保護を設定していません。** 保護設定やルールセットはフォークに継承されないため、上流の「main は PR 必須」はここには効いていません。単独メンテナのリポジトリなので `main` へ直接 push できます。
+
+とはいえ運用としては PR 経由を推奨します。CI (`.github/workflows/ci.yml`) は `pull_request` と `main` への push の両方で走るので、PR にすればマージ前に rustfmt / clippy / 3 プラットフォームの test を通せます。強制したくなったら上流と同じ設定を入れてください:
 
 - `main`: PR 必須 / CI 必須 / force-push 禁止 / 直 push 禁止
-- `master`: 管理者のみ push 可 (上流スナップショット専用)
 
 ## 関連
 

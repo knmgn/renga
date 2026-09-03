@@ -19,7 +19,7 @@ Top MCP Servers:
 ## Your Setup Checklist
 
 ### Codebases
-- [ ] renga — https://github.com/suisya-systems/renga
+- [ ] renga — https://github.com/knmgn/renga
 
 ### MCP Servers to Activate
   (none configured yet — add servers here as the team adopts them)

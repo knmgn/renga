@@ -290,7 +290,7 @@ Rules:
    precisely the wrong-tab accident these tokens exist to prevent.
 4. **Version skew is a live scenario, not a theoretical one.** A renga binary
    can be upgraded on disk while the old server process keeps running, so a
-   newly spawned `renga mcp-peer` can talk to an old server within one user
+   newly spawned `renga-cp mcp-peer` can talk to an old server within one user
    session. `[server_too_old] … restart renga` is the expected, correct
    outcome in that window.
 5. **The protection is one-directional.** Because the gate lives in the

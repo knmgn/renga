@@ -24,9 +24,9 @@ renga は、複数のコーディングエージェントを並列で動かし�
 ## クイックスタート
 
 ```bash
-npm install -g @suisya-systems/renga
-renga mcp install
-renga
+# Releases から renga-cp を取得して PATH に置いたあと:
+renga-cp mcp install
+renga-cp
 ```
 
 起動後、ペインで `Alt+P` を押すと peer 対応済みの Claude 起動コマンドが入力されます。Codex / Copilot は [メッセージングの説明](/ja/peer-messaging) にある登録経路から起動できます。同じタブで sibling agent を立ち上げると、各ペインは同じ `renga-peers` ネットワークに参加して、そのまま協調できます。

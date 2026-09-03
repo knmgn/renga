@@ -177,7 +177,7 @@ pub enum AppEvent {
     CwdChanged(usize, PathBuf),
 }
 
-/// Flag-preloaded launch command for `renga split --role claude` and
+/// Flag-preloaded launch command for `renga-cp split --role claude` and
 /// Alt+P. Also consumed by `crate::mcp_peer` so `spawn_pane` /
 /// `new_tab` upgrade a bare `claude` invocation to the peer-enabled
 /// form, mirroring what Alt+P types into the focused pane.

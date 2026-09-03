@@ -232,19 +232,21 @@
         <strong>renga is the execution fabric; claude-org is the reference operating system built on top of it.</strong>
       </p>
 
-      <pre><code>$ npm install -g @suisya-systems/renga</code></pre>
+      <p>
+        Download the binary for your platform from
+        <a href="https://github.com/knmgn/renga/releases">Releases</a>
+        and put it on your <code>PATH</code>. The command is
+        <code>renga-cp</code>.
+      </p>
+      <pre><code>$ chmod +x renga-cp-linux-x64
+$ mv renga-cp-linux-x64 ~/.local/bin/renga-cp
+$ renga-cp --version</code></pre>
 
       <p>
-        Migrating from previous <code>ccmux-fork</code>:
+        This fork publishes no npm package. Upstream's
+        <code>@suisya-systems/renga</code> installs as <code>renga</code>
+        and is untouched, so both can sit on the same machine.
       </p>
-      <pre><code>$ npm uninstall -g ccmux-fork
-$ npm install -g @suisya-systems/renga</code></pre>
-
-      <p>
-        Migrating from upstream <code>ccmux-cli</code>:
-      </p>
-      <pre><code>$ npm uninstall -g ccmux-cli
-$ npm install -g @suisya-systems/renga</code></pre>
 
       <h2>macOS setup: Option as Meta</h2>
       <p style="color: var(--muted); font-size: 0.9rem; margin-top: -4px;">
@@ -331,7 +333,7 @@ $ npm install -g @suisya-systems/renga</code></pre>
             <td>
               Mixed-client peer messaging between Claude Code, Codex, and GitHub Copilot CLI panes in the same tab
               <br /><span style="color: var(--muted); font-size: 0.85em;">
-                <code>renga mcp install --client ...</code> registers the MCP server for Claude Code, Codex, and Copilot. Claude peers receive push-style <code>&lt;channel source="renga-peers"&gt;</code> messages; Codex and Copilot peers get pane-local nudges and read the queued body with <code>check_messages</code>. The peer scope is the renga tab itself, not a guessed cwd / PID heuristic.
+                <code>renga-cp mcp install --client ...</code> registers the MCP server for Claude Code, Codex, and Copilot. Claude peers receive push-style <code>&lt;channel source="renga-peers"&gt;</code> messages; Codex and Copilot peers get pane-local nudges and read the queued body with <code>check_messages</code>. The peer scope is the renga tab itself, not a guessed cwd / PID heuristic.
               </span>
             </td>
             <td class="mark">—</td>
@@ -372,7 +374,7 @@ $ npm install -g @suisya-systems/renga</code></pre>
           </tr>
           <tr>
             <td>
-              Pane lifecycle events (<code>renga events --timeout / --count</code>)
+              Pane lifecycle events (<code>renga-cp events --timeout / --count</code>)
               <br /><span style="color: var(--muted); font-size: 0.85em;">
                 subscribe to <code>PaneStarted</code> / <code>PaneExited</code> as
                 newline-delimited JSON, with heartbeat-based half-close detection
@@ -386,8 +388,8 @@ $ npm install -g @suisya-systems/renga</code></pre>
             <td>
               Screen snapshot + layout inspection
               <br /><span style="color: var(--muted); font-size: 0.85em;">
-                <code>renga inspect</code> returns a row-by-row JSON snapshot;
-                <code>renga list</code> now includes each pane's rect so external
+                <code>renga-cp inspect</code> returns a row-by-row JSON snapshot;
+                <code>renga-cp list</code> now includes each pane's rect so external
                 tools can match by on-screen position
               </span>
             </td>
@@ -408,7 +410,7 @@ $ npm install -g @suisya-systems/renga</code></pre>
           </tr>
           <tr>
             <td>
-              <code>renga close</code> subcommand
+              <code>renga-cp close</code> subcommand
               <br /><span style="color: var(--muted); font-size: 0.85em;">
                 terminate a pane from a script; refuses on the last pane of
                 the last tab so you can't accidentally kill the session
@@ -455,7 +457,7 @@ $ npm install -g @suisya-systems/renga</code></pre>
       <ul class="links">
         <li>→ <a href="./docs/">Documentation</a></li>
         <li>
-          → <a href="https://github.com/suisya-systems/renga">GitHub</a>
+          → <a href="https://github.com/knmgn/renga">GitHub</a>
         </li>
         <li>
           → <a href="https://github.com/Shin-sibainu/ccmux">Shin-sibainu/ccmux (original project renga was derived from)</a>

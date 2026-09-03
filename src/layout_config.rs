@@ -30,7 +30,7 @@ pub enum LayoutNodeSpec {
         role: Option<String>,
         /// Optional working directory for the pane. Absolute paths
         /// are used as-is; relative paths are resolved against the
-        /// directory from which `renga --layout` was invoked. When
+        /// directory from which `renga-cp --layout` was invoked. When
         /// omitted, the pane inherits the parent pane's cwd (root
         /// leaf falls back to the renga process cwd).
         #[serde(default)]

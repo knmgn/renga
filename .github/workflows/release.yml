@@ -1,5 +1,11 @@
 name: Release
 
+# This fork distributes through GitHub Releases only. Upstream also
+# publishes an npm package via Trusted Publishing; that job is
+# deliberately absent here, because Trusted Publishing is bound to
+# upstream's package and repository and cannot be inherited by a fork.
+# Removing it beats leaving a job that fails on every tag.
+
 on:
   push:
     tags:
@@ -15,16 +21,16 @@ jobs:
         include:
           - target: x86_64-pc-windows-msvc
             os: windows-latest
-            artifact: renga-windows-x64.exe
+            artifact: renga-cp-windows-x64.exe
           - target: x86_64-apple-darwin
             os: macos-latest
-            artifact: renga-macos-x64
+            artifact: renga-cp-macos-x64
           - target: aarch64-apple-darwin
             os: macos-latest
-            artifact: renga-macos-arm64
+            artifact: renga-cp-macos-arm64
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
-            artifact: renga-linux-x64
+            artifact: renga-cp-linux-x64
 
     runs-on: ${{ matrix.os }}
 
@@ -45,11 +51,11 @@ jobs:
 
       - name: Rename binary (Unix)
         if: runner.os != 'Windows'
-        run: cp target/${{ matrix.target }}/release/renga ${{ matrix.artifact }}
+        run: cp target/${{ matrix.target }}/release/renga-cp ${{ matrix.artifact }}
 
       - name: Rename binary (Windows)
         if: runner.os == 'Windows'
-        run: cp target/${{ matrix.target }}/release/renga.exe ${{ matrix.artifact }}
+        run: cp target/${{ matrix.target }}/release/renga-cp.exe ${{ matrix.artifact }}
 
       - name: Upload artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -72,10 +78,10 @@ jobs:
       - name: Generate checksums
         run: |
           cd artifacts
-          sha256sum renga-windows-x64.exe/renga-windows-x64.exe \
-                    renga-macos-x64/renga-macos-x64 \
-                    renga-macos-arm64/renga-macos-arm64 \
-                    renga-linux-x64/renga-linux-x64 \
+          sha256sum renga-cp-windows-x64.exe/renga-cp-windows-x64.exe \
+                    renga-cp-macos-x64/renga-cp-macos-x64 \
+                    renga-cp-macos-arm64/renga-cp-macos-arm64 \
+                    renga-cp-linux-x64/renga-cp-linux-x64 \
             | sed 's|[^ ]*/||' > ../checksums.txt
 
       - name: Create Release
@@ -84,38 +90,8 @@ jobs:
           generate_release_notes: true
           prerelease: ${{ contains(github.ref_name, '-') }}
           files: |
-            artifacts/renga-windows-x64.exe/renga-windows-x64.exe
-            artifacts/renga-macos-x64/renga-macos-x64
-            artifacts/renga-macos-arm64/renga-macos-arm64
-            artifacts/renga-linux-x64/renga-linux-x64
+            artifacts/renga-cp-windows-x64.exe/renga-cp-windows-x64.exe
+            artifacts/renga-cp-macos-x64/renga-cp-macos-x64
+            artifacts/renga-cp-macos-arm64/renga-cp-macos-arm64
+            artifacts/renga-cp-linux-x64/renga-cp-linux-x64
             checksums.txt
-
-  publish-npm:
-    needs: release
-    runs-on: ubuntu-latest
-    permissions:
-      id-token: write
-      contents: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Setup Node.js 24 (includes npm 11)
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: 24
-
-      - name: Verify npm version
-        run: npm --version
-
-      - name: Determine npm dist-tag
-        id: disttag
-        run: |
-          if [[ "${{ github.ref_name }}" == *-* ]]; then
-            echo "tag=next" >> "$GITHUB_OUTPUT"
-          else
-            echo "tag=latest" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Publish to npm via Trusted Publishing
-        working-directory: npm
-        run: npm publish --access public --tag ${{ steps.disttag.outputs.tag }}

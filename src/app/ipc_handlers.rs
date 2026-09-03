@@ -182,7 +182,7 @@ impl App {
         }
     }
 
-    /// `list_panes` / `renga list`: the panes of the caller's tab, or
+    /// `list_panes` / `renga-cp list`: the panes of the caller's tab, or
     /// of the tab(s) a `tab` selector names (Issue #329).
     ///
     /// Before #288 this always read the active workspace, which made

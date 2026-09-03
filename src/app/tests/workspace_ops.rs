@@ -207,7 +207,7 @@ fn handle_close_removes_pane_and_returns_id() {
 fn handle_close_in_background_tab_marks_dirty_and_updates_list() {
     // Cover the Codex review bug: closing a pane that lives in a
     // non-active workspace must still schedule a render and make
-    // the pane disappear from subsequent `renga list` snapshots on
+    // the pane disappear from subsequent `renga-cp list` snapshots on
     // the freshly-touched tab. Prior to the fix the dirty flag
     // stayed low because `mark_layout_change` was gated on the
     // active tab.
@@ -264,7 +264,7 @@ fn handle_close_in_background_tab_marks_dirty_and_updates_list() {
 #[test]
 fn close_releases_pane_name_for_reuse() {
     // After close, the stable name must be available again so a
-    // subsequent `renga split --id same-name` doesn't collide with
+    // subsequent `renga-cp split --id same-name` doesn't collide with
     // a dangling entry.
     let cfg = crate::layout_config::LayoutConfig {
         version: 1,
@@ -367,7 +367,7 @@ fn close_after_natural_exit_does_not_double_emit() {
 #[test]
 
 fn default_command_for_role_returns_claude_launch_for_claude_role() {
-    // Strategy C from #97: `renga split --role claude` must pre-fill
+    // Strategy C from #97: `renga-cp split --role claude` must pre-fill
     // the peer-channel flag so the user doesn't need to know the
     // incantation. `default_command_for_role` is the single seam
     // mapping role names to preloaded commands — regress this and

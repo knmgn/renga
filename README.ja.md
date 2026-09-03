@@ -2,6 +2,8 @@
 
 *Language: [English](./README.md) / 日本語*
 
+> **これはフォークです。** 上流は [`suisya-systems/renga`](https://github.com/suisya-systems/renga) で、このリポジトリは Claude Code / Codex に続く 3 つ目の peer クライアントとして **GitHub Copilot CLI** を足したものです。インストールされるコマンドは **`renga-cp`** なので、上流の `renga` と同じマシンに共存できます。それ以外 — 製品名、`renga-peers` という MCP サーバ名、`RENGA_*` 環境変数、`~/.config/renga/` — は意図的にそのままです。その結果、MCP 登録エントリだけは上流と共有になります。詳細は [`BRANCHING.md`](./BRANCHING.md)。
+
 **複数の [Claude Code](https://docs.anthropic.com/en/docs/claude-code) / Codex / GitHub Copilot CLI エージェントを 1 つの TUI でオーケストレートするための AI ネイティブ・ターミナル基盤。mixed-client peer メッセージング、必要な部分だけ Claude 特化 UX、単一バイナリ。**
 
 ![renga スクリーンショット](screenshot.png)
@@ -72,31 +74,23 @@ peer メッセージングの完全なワークフロー、2 ペイン例、ト�
 
 ## インストール
 
-### npm (おすすめ)
+### バイナリを直接ダウンロード (おすすめ)
 
-```bash
-npm install -g @suisya-systems/renga
-```
+[Releases](https://github.com/knmgn/renga/releases) から取得: `renga-cp-windows-x64.exe` / `renga-cp-macos-arm64` / `renga-cp-macos-x64` / `renga-cp-linux-x64`。`renga-cp --version` で確認し、[最新リリース](https://github.com/knmgn/renga/releases/latest) と照合できます。
 
-`npm update -g @suisya-systems/renga` でアップデート、キャッシュ pinning でスキップされる場合は `npm install -g @suisya-systems/renga@latest` で `@latest` を強制取得してください。`renga --version` で確認、[最新リリース](https://github.com/suisya-systems/renga/releases/latest) と照合できます。
-
-> 旧 `ccmux-fork` を入れている場合は: `npm uninstall -g ccmux-fork && npm install -g @suisya-systems/renga`。上流 `ccmux-cli` も同じパターンです。
-
-### バイナリを直接ダウンロード
-
-[Releases](https://github.com/suisya-systems/renga/releases) から取得: `renga-windows-x64.exe` / `renga-macos-arm64` / `renga-macos-x64` / `renga-linux-x64`。
+> **npm パッケージはありません。** 本家は `@suisya-systems/renga` を npm に publish していますが、このフォークは何も publish しません。本家を npm で入れている場合、そちらは `renga` のまま影響を受けません — このフォークのコマンドは `renga-cp` なので両方を並存できます。
 
 > **Windows:** コード署名していないため Microsoft Defender SmartScreen が警告を出すことがあります。「詳細情報」→「実行」で開いてください。
 >
-> **macOS / Linux:** ダウンロード後に `chmod +x renga-*` で実行権限を付けてください。
+> **macOS / Linux:** ダウンロード後に `chmod +x renga-cp-*` で実行権限を付けてください。
 
 ### ソースからビルド
 
 ```bash
-git clone https://github.com/suisya-systems/renga.git
+git clone https://github.com/knmgn/renga.git
 cd renga
 cargo build --release
-# 出来上がり: target/release/renga (Windows なら renga.exe)
+# 出来上がり: target/release/renga-cp (Windows なら renga-cp.exe)
 ```
 
 [Rust](https://rustup.rs/) のツールチェインが必要です。PR を送る場合はクローン後に一度だけ `git config core.hooksPath .githooks` を実行しておくと、`cargo fmt --all -- --check` の整形漏れが CI ではなく手元で落ちます。
@@ -109,7 +103,7 @@ cargo build --release
 renga
 ```
 
-好きなディレクトリで起動してください。ファイルツリーにはそのディレクトリが表示されます。よく使うフラグは `--ime-freeze-panes` / `--ime-overlay-catchup-ms` / `--lang`、加えて分割サイズ制御の `--min-pane-width` / `--min-pane-height` です。完全な一覧は `renga --help`、canonical な TOML スキーマと CLI vs config の優先順位は [`docs/configuration.ja.md`](./docs/configuration.ja.md) に集約しています。
+好きなディレクトリで起動してください。ファイルツリーにはそのディレクトリが表示されます。よく使うフラグは `--ime-freeze-panes` / `--ime-overlay-catchup-ms` / `--lang`、加えて分割サイズ制御の `--min-pane-width` / `--min-pane-height` です。完全な一覧は `renga-cp --help`、canonical な TOML スキーマと CLI vs config の優先順位は [`docs/configuration.ja.md`](./docs/configuration.ja.md) に集約しています。
 
 ## Claude Code / Codex / Copilot ペイン間のメッセージング
 
@@ -118,9 +112,9 @@ mixed-client peer メッセージングは renga の中心的な差別化ポイ�
 最短で試す手順:
 
 ```bash
-renga mcp install --client claude
-renga mcp install --client codex   # Codex peer も使う場合
-renga mcp install --client copilot # GitHub Copilot CLI peer も使う場合
+renga-cp mcp install --client claude
+renga-cp mcp install --client codex   # Codex peer も使う場合
+renga-cp mcp install --client copilot # GitHub Copilot CLI peer も使う場合
 # その後、renga のペイン内で Alt+P から Claude を起動、または plain `codex` / `copilot` で Codex / Copilot を起動
 ```
 
@@ -189,9 +183,9 @@ Claude Code が初めてなら [Claude Code Academy](https://claude-code-academy
 
 ## 経緯と謝辞
 
-renga は 2026 年初頭に [Shin-sibainu/ccmux](https://github.com/Shin-sibainu/ccmux) から派生して始まり、その後は独立して進化してきました。peer メッセージング用の MCP チャネル、Claude 認識付きのペイン枠表示、IME 合成 overlay、layout TOML、日英バイリンガル UX といった機能はすべて renga 独自の実装です。両プロジェクトはもはやバージョンごとに追従する関係ではなく、renga は独自の semver 系列を独自のペースでリリースしています (詳細は [`BRANCHING.md`](./BRANCHING.md) の divergence policy を参照)。
+このリポジトリは [suisya-systems/renga](https://github.com/suisya-systems/renga) のフォークで、GitHub Copilot CLI 対応を足したものです。renga 自体は 2026 年初頭に [Shin-sibainu/ccmux](https://github.com/Shin-sibainu/ccmux) から派生して始まり、その後は独立して進化してきました。peer メッセージング用の MCP チャネル、Claude 認識付きのペイン枠表示、IME 合成 overlay、layout TOML、日英バイリンガル UX といった機能はすべて renga 独自の実装です。両プロジェクトはもはやバージョンごとに追従する関係ではなく、renga は独自の semver 系列を独自のペースでリリースしています (詳細は [`BRANCHING.md`](./BRANCHING.md) の divergence policy を参照)。
 
-ratatui ベースのペインツリー、vt100 を使ったターミナルエミュレーション、クロスプラットフォーム PTY レイヤーといった出発点を提供してくれた [Shin-sibainu](https://github.com/Shin-sibainu) 氏と上流 ccmux の作者陣に感謝します。上流由来のコミット履歴はリポジトリの git log にそのまま保存されており、`Shin-sibainu` の MIT 著作権表示はライセンス義務として [`LICENSE`](./LICENSE) に保持しています。
+このフォークが拡張している peer ネットワークそのものを作った [suisya-systems](https://github.com/suisya-systems) 氏、および ratatui ベースのペインツリー、vt100 を使ったターミナルエミュレーション、クロスプラットフォーム PTY レイヤーといった出発点を提供してくれた [Shin-sibainu](https://github.com/Shin-sibainu) 氏と上流 ccmux の作者陣に感謝します。上流由来のコミット履歴はリポジトリの git log にそのまま保存されており、`Shin-sibainu` の MIT 著作権表示はライセンス義務として [`LICENSE`](./LICENSE) に保持しています。
 
 ## ライセンス
 

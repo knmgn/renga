@@ -827,7 +827,7 @@ fn close_focused_without_from_pane_still_targets_the_visible_tab() {
 
     assert_eq!(
         closed, visible_focus,
-        "`renga close --focused` is unchanged"
+        "`renga-cp close --focused` is unchanged"
     );
     assert!(
         app.workspaces[0].panes.contains_key(&caller)
@@ -866,7 +866,7 @@ fn close_by_name_stays_inside_the_callers_tab() {
         "a refused close must not have closed anything"
     );
 
-    // `renga close --name bg-sibling` still finds a pane in a
+    // `renga-cp close --name bg-sibling` still finds a pane in a
     // non-visible tab, exactly as before #296.
     let closed = app
         .handle_close(&ipc::PaneRef::Name("bg-sibling".into()), None)
@@ -965,7 +965,10 @@ fn set_identity_focused_without_from_pane_still_targets_the_visible_tab() {
         )
         .expect("legacy rename");
 
-    assert_eq!(info.id, visible_focus, "`renga rename --focused` unchanged");
+    assert_eq!(
+        info.id, visible_focus,
+        "`renga-cp rename --focused` unchanged"
+    );
     assert!(app.workspaces[1].pane_names.contains_key("renamed"));
     app.shutdown();
 }
@@ -1080,7 +1083,7 @@ fn set_identity_through_the_app_command_boundary_is_caller_scoped() {
 #[test]
 fn without_from_pane_an_id_stays_inside_the_active_tab() {
     let (mut app, caller, _active) = two_tabs();
-    // `renga send --id <caller>` from a shell must keep behaving the
+    // `renga-cp send --id <caller>` from a shell must keep behaving the
     // way it did before #288: active tab only, no cross-tab widening.
     let err = app
         .resolve_request_target(None, &ipc::PaneRef::Id(caller))

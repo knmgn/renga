@@ -237,7 +237,7 @@ fn default_list_omits_same_tab_and_still_reports_its_tab() {
     app.shutdown();
 }
 
-/// The `renga list` CLI path has no caller pane, so there is nothing
+/// The `renga-cp list` CLI path has no caller pane, so there is nothing
 /// for `same_tab` to be true *of*.
 #[test]
 fn legacy_cli_list_omits_same_tab() {

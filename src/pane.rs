@@ -89,7 +89,7 @@ pub struct Pane {
     codex_transcript_overlay_hint: Arc<AtomicBool>,
     /// Free-form label for tools/humans. Unlike the name (registered in
     /// `Workspace.pane_names` as the unique IPC key), `role` may repeat
-    /// and may be absent. Surfaced via `renga list`.
+    /// and may be absent. Surfaced via `renga-cp list`.
     pub role: Option<String>,
     /// Optional 1-2 sentence per-pane summary set by the pane's MCP
     /// `set_summary` tool. In-memory only; cleared when the pane exits.

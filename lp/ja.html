@@ -226,19 +226,20 @@
         です。
       </p>
 
-      <pre><code>$ npm install -g @suisya-systems/renga</code></pre>
+      <p>
+        <a href="https://github.com/knmgn/renga/releases">Releases</a>
+        から自分のプラットフォーム向けバイナリを取得し、<code>PATH</code>
+        の通った場所に置いてください。コマンド名は <code>renga-cp</code> です。
+      </p>
+      <pre><code>$ chmod +x renga-cp-linux-x64
+$ mv renga-cp-linux-x64 ~/.local/bin/renga-cp
+$ renga-cp --version</code></pre>
 
       <p>
-        旧 <code>ccmux-fork</code> から移行する場合:
+        このフォークは npm パッケージを publish しません。本家の
+        <code>@suisya-systems/renga</code> は <code>renga</code>
+        として入るため、同じマシンに両方を置けます。
       </p>
-      <pre><code>$ npm uninstall -g ccmux-fork
-$ npm install -g @suisya-systems/renga</code></pre>
-
-      <p>
-        上流の <code>ccmux-cli</code> から移行する場合:
-      </p>
-      <pre><code>$ npm uninstall -g ccmux-cli
-$ npm install -g @suisya-systems/renga</code></pre>
 
       <h2>macOS の設定: Option をメタキーにする</h2>
       <p style="color: var(--muted); font-size: 0.9rem; margin-top: -4px;">
@@ -319,7 +320,7 @@ $ npm install -g @suisya-systems/renga</code></pre>
             <td>
               同じタブに並べた Claude Code / Codex / GitHub Copilot CLI 間の mixed-client メッセージング
               <br /><span style="color: var(--muted); font-size: 0.85em;">
-                <code>renga mcp install --client ...</code> で Claude Code / Codex / Copilot に MCP サーバを登録できる。Claude 側は push 型の <code>&lt;channel source="renga-peers"&gt;</code> で受け取り、Codex / Copilot 側は pane-local nudge を受けて <code>check_messages</code> で本文を読む。peer のスコープは cwd 推定ではなく renga タブそのもの。
+                <code>renga-cp mcp install --client ...</code> で Claude Code / Codex / Copilot に MCP サーバを登録できる。Claude 側は push 型の <code>&lt;channel source="renga-peers"&gt;</code> で受け取り、Codex / Copilot 側は pane-local nudge を受けて <code>check_messages</code> で本文を読む。peer のスコープは cwd 推定ではなく renga タブそのもの。
               </span>
             </td>
             <td class="mark">—</td>
@@ -360,7 +361,7 @@ $ npm install -g @suisya-systems/renga</code></pre>
           </tr>
           <tr>
             <td>
-              ペインのライフサイクルイベント (<code>renga events --timeout / --count</code>)
+              ペインのライフサイクルイベント (<code>renga-cp events --timeout / --count</code>)
               <br /><span style="color: var(--muted); font-size: 0.85em;">
                 <code>PaneStarted</code> / <code>PaneExited</code> を JSON Lines で購読できる。
                 heartbeat で half-close を検知、エラーコードは安定
@@ -373,8 +374,8 @@ $ npm install -g @suisya-systems/renga</code></pre>
             <td>
               画面のスナップショット取得とレイアウト情報
               <br /><span style="color: var(--muted); font-size: 0.85em;">
-                <code>renga inspect</code> で 1 行ずつ JSON 化したペイン画面が取れる。
-                <code>renga list</code> は各ペインの画面矩形も返すので、
+                <code>renga-cp inspect</code> で 1 行ずつ JSON 化したペイン画面が取れる。
+                <code>renga-cp list</code> は各ペインの画面矩形も返すので、
                 外部ツールから座標ベースでマッチさせられる
               </span>
             </td>
@@ -395,7 +396,7 @@ $ npm install -g @suisya-systems/renga</code></pre>
           </tr>
           <tr>
             <td>
-              <code>renga close</code> サブコマンド
+              <code>renga-cp close</code> サブコマンド
               <br /><span style="color: var(--muted); font-size: 0.85em;">
                 スクリプトからペインを終了できる。最後のタブの最後のペインは拒否するので、
                 誤ってセッションごと吹き飛ばす心配なし
@@ -442,7 +443,7 @@ $ npm install -g @suisya-systems/renga</code></pre>
       <ul class="links">
         <li>→ <a href="./docs/">ドキュメント</a></li>
         <li>
-          → <a href="https://github.com/suisya-systems/renga">GitHub</a>
+          → <a href="https://github.com/knmgn/renga">GitHub</a>
         </li>
         <li>
           → <a href="https://github.com/Shin-sibainu/ccmux">Shin-sibainu/ccmux (派生元のオリジナルプロジェクト)</a>

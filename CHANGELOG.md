@@ -9,10 +9,45 @@ rules in [`docs/semver-policy-2.0.md`](./docs/semver-policy-2.0.md).
 
 ## [Unreleased]
 
+### Changed
+
+- **This repository is now its own line, not a branch of upstream's.**
+  It was forked from `suisya-systems/renga` to add Copilot support and
+  had been carrying upstream's identity wholesale — upstream's npm
+  package name, upstream's repository URLs, upstream's release process
+  — which made it impossible to tell, from an installed binary or from
+  the docs, which of the two you were looking at.
+
+  The command is now **`renga-cp`** (`Cargo.toml` package name, clap
+  command name, release artifacts, and every invocation in the docs).
+  Only the command is renamed. `renga-peers`, `RENGA_*`, and
+  `~/.config/renga/` stay identical to upstream on purpose: the first
+  is the string Claude derives `<channel source="renga-peers">` from
+  and `docs/api-surface-v1.0.md` freezes renaming it as breaking, and
+  the other two are the config contract the same docs describe. The
+  consequence is stated rather than hidden — `renga mcp install` and
+  `renga-cp mcp install` write the same registration and overwrite each
+  other.
+
+  Distribution is GitHub Releases only. The `publish-npm` job is gone
+  and `npm/` with it: npm Trusted Publishing is bound to upstream's
+  package and repository and cannot be inherited by a fork, so the job
+  could only ever fail. `version_check.rs` reads the GitHub Releases
+  API for `knmgn/renga` instead of the npm registry, and the release
+  artifacts are `renga-cp-*`.
+
+  Repository URLs point here; **issue and PR links deliberately still
+  point at `suisya-systems/renga`**, because that is where those issues
+  exist. Attribution to both upstreams is preserved throughout.
+
+  The docs site is manual-dispatch only (GitHub Pages is not enabled
+  here, so the push trigger failed on every docs commit) and no longer
+  advertises a hosted URL.
+
 ### Added
 
 - **GitHub Copilot CLI joins the peer network as a third client.**
-  `renga mcp install --client copilot` registers `renga-peers` with
+  `renga-cp mcp install --client copilot` registers `renga-peers` with
   Copilot CLI, `spawn_copilot_pane` launches a Copilot worker in-band,
   and a pane running `copilot` is detected, colored purple in the pane
   border and org sidebar, and addressable by `send_message` /
@@ -33,7 +68,7 @@ rules in [`docs/semver-policy-2.0.md`](./docs/semver-policy-2.0.md).
 
   Like `spawn_codex_pane`, `spawn_copilot_pane` refuses up front with
   `[copilot_not_installed]` when Copilot's MCP entry lacks
-  `RENGA_PEER_CLIENT_KIND=copilot`, and `renga mcp status --client
+  `RENGA_PEER_CLIENT_KIND=copilot`, and `renga-cp mcp status --client
   copilot` reports that same mismatch rather than calling the
   registration fine — without the env var the pane registers as a push
   client and its mail vanishes silently. Note that Copilot CLI may print
@@ -201,7 +236,7 @@ rules in [`docs/semver-policy-2.0.md`](./docs/semver-policy-2.0.md).
   well-formed `Ok` indistinguishable from a correct answer, which is
   the one failure an orchestrator cannot detect. Clients asking for a
   cross-tab list against such a server fail closed with
-  `[server_too_old]` instead. `renga list` gains the new record fields
+  `[server_too_old]` instead. `renga-cp list` gains the new record fields
   but no flags; a CLI selector is deferred.
 
 ## [2.1.0] — 2026-08-09
@@ -290,13 +325,13 @@ rules in [`docs/semver-policy-2.0.md`](./docs/semver-policy-2.0.md).
   scopes the subscription: it receives the pane lifecycle events
   (`pane_started`, `pane_exited`, `events_dropped`, `heartbeat`) plus
   only the `peer_inbox` events whose `target_pane` is that pane. The
-  bundled `renga mcp-peer` opts in — the pane it serves is the only one
+  bundled `renga-cp mcp-peer` opts in — the pane it serves is the only one
   whose messages it was ever going to act on.
 
   **Behavior for existing subscribers is unchanged.** A `subscribe`
   that sends no `from_pane` receives exactly what it always received:
   every event, including every `peer_inbox` whatever its `target_pane`.
-  `renga events` sends no `from_pane`, so it prints the same lines it
+  `renga-cp events` sends no `from_pane`, so it prints the same lines it
   has always printed, and a consumer that never learns this field
   exists never notices that it was added. That is a new optional input
   with a default that preserves prior behavior, which
@@ -474,7 +509,7 @@ rules in [`docs/semver-policy-2.0.md`](./docs/semver-policy-2.0.md).
   escape hatch, unchanged), and name uniqueness is still judged per
   tab. On the wire this is an optional `from_pane` on the `close` and
   `set_pane_identity` requests; omitting it — which is what the
-  `renga close` / `renga rename` CLI does — keeps their pre-existing
+  `renga-cp close` / `renga-cp rename` CLI does — keeps their pre-existing
   all-workspace search exactly. Version skew fails closed through a
   new `caller_scope_close_identity` hello capability: a #290-era
   server would drop the unknown `from_pane` and close a pane in the
@@ -526,7 +561,7 @@ rules in [`docs/semver-policy-2.0.md`](./docs/semver-policy-2.0.md).
 ## [1.4.0] — 2026-07-29
 
 First minor release after the v1.3.x patch line. `inspect_pane` /
-`renga inspect` can now reach past the visible screen into scrollback
+`renga-cp inspect` can now reach past the visible screen into scrollback
 history, and pane close on Windows finally reaps the processes it used
 to leave behind. The frozen v1.0 API surface (MCP wire shape, CLI
 flags, config keys, env vars) is unchanged — `inspect`'s existing
@@ -537,7 +572,7 @@ undocumented), so this bumps the minor per
 
 ### Added
 
-- **`inspect_pane` / `renga inspect` can now read scrollback history.**
+- **`inspect_pane` / `renga-cp inspect` can now read scrollback history.**
   `lines` beyond the pane's visible height continues into the vt100
   scrollback (up to 2000 lines total), so an orchestrator can retrieve
   a worker's recent output even when small screens shrink every pane
@@ -568,7 +603,7 @@ undocumented), so this bumps the minor per
   as the fallback when job assignment fails or the kernel rejects the
   terminate, and the job's kill-on-close flag is the final backstop if
   renga itself goes away. (#268)
-- **`renga mcp-peer` no longer outlives the Claude Code process that
+- **`renga-cp mcp-peer` no longer outlives the Claude Code process that
   started it.** stdin EOF is not a reliable shutdown signal on Windows:
   handle inheritance can leak the write end of the stdin pipe into
   sibling children of the spawning client, and any survivor keeps EOF
@@ -766,7 +801,7 @@ from GitHub Actions' `ubuntu-latest` image.
 
 - **Linux npm installs no longer fail on distributions older than the
   release runner's glibc with `GLIBC_2.39 not found`.** The release
-  workflow now builds `renga-linux-x64` for
+  workflow now builds `renga-cp-linux-x64` for
   `x86_64-unknown-linux-musl` and installs `musl-tools` only for that
   matrix entry, keeping the published filename and npm installer
   contract unchanged. (#235)
@@ -880,12 +915,12 @@ verifier are bug fixes.
   preserved verbatim after the banner. (#221, #222)
 - **`spawn_codex_pane` now refuses to spawn when Codex's MCP config will
   not inject `RENGA_PEER_CLIENT_KIND=codex`.** Previously, if the user had
-  not run `renga mcp install --client codex`, the freshly spawned codex
+  not run `renga-cp mcp install --client codex`, the freshly spawned codex
   pane registered as a `claude` (push) client and message delivery
   silently bifurcated. The handler now inspects `~/.codex/config.toml` for
   the `[mcp_servers.renga-peers.env] RENGA_PEER_CLIENT_KIND = "codex"`
   entry and fails the call with the new `[codex_not_installed]` error
-  code, pointing the user at `renga mcp install --client codex`. The
+  code, pointing the user at `renga-cp mcp install --client codex`. The
   v1.0 freeze §6.2 entry tracking this as a follow-up has been removed
   and §1.8 / §5.1 are updated accordingly. Closes #203. (#220)
 

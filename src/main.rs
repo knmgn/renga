@@ -36,7 +36,7 @@ fn main() -> Result<()> {
     let cli = cli::Cli::parse();
     cli.validate_exec()?;
 
-    // Phase 3: subcommands (`renga list`, `renga send`, …) are IPC
+    // Phase 3: subcommands (`renga-cp list`, `renga-cp send`, …) are IPC
     // clients and MUST be runnable from inside a renga pane — that's
     // the whole point. Dispatch them before the nested-TUI guard kicks
     // in, so the `RENGA=1` env var set by the parent doesn't block
@@ -249,7 +249,7 @@ fn main() -> Result<()> {
     result
 }
 
-/// Handle an IPC subcommand (`renga send …`, `renga list`, etc.).
+/// Handle an IPC subcommand (`renga-cp send …`, `renga-cp list`, etc.).
 /// Resolves the endpoint from the `RENGA_SOCKET` env var the parent
 /// renga published to its child PTYs; prints the server's response to
 /// stdout and exits with a non-zero code on error so shell scripts can
@@ -301,7 +301,7 @@ fn run_ipc_client(cmd: &cli::IpcCommand) -> Result<()> {
     }
 }
 
-/// Run `renga events` with optional stop budgets. Bounds the drain so
+/// Run `renga-cp events` with optional stop budgets. Bounds the drain so
 /// shell callers can poll inside a `/loop` cycle without hanging.
 ///
 /// Architecture: a worker thread holds the subscription and forwards

@@ -1,4 +1,4 @@
-//! `renga mcp install / uninstall / status` — thin wrappers around
+//! `renga-cp mcp install / uninstall / status` — thin wrappers around
 //! client MCP management commands.
 //!
 //! We intentionally let each client CLI own the primary MCP
@@ -26,7 +26,7 @@ const SERVER_NAME: &str = "renga-peers";
 const CODEX_PASSTHROUGH_ENV_VARS: &[&str] = &["RENGA_PANE_ID", "RENGA_SOCKET", "RENGA_TOKEN"];
 const CODEX_AUTO_APPROVE_TOOLS: &[&str] = &["check_messages", "send_message"];
 
-/// Entry point from `main.rs` for the `renga mcp <action>` subcommand.
+/// Entry point from `main.rs` for the `renga-cp mcp <action>` subcommand.
 pub fn run(action: &McpAction) -> Result<()> {
     match action {
         McpAction::Install {
@@ -55,7 +55,7 @@ fn install(force: bool, client: McpClient, codex_auto_approve_peer_tools: bool) 
                 // Issue #203 follow-up: if the existing entry is
                 // missing `RENGA_PEER_CLIENT_KIND=codex` (e.g. installed
                 // by an earlier renga version, or partially edited),
-                // repair it in-place so the user's `renga mcp install`
+                // repair it in-place so the user's `renga-cp mcp install`
                 // call is self-healing. Without this, the remediation
                 // hint surfaced by `[codex_not_installed]` would lead
                 // users to a no-op and they'd have to discover `--force`
@@ -93,7 +93,7 @@ fn install(force: bool, client: McpClient, codex_auto_approve_peer_tools: bool) 
             }
             println!(
                 "{SERVER_NAME} is already registered in {} → {existing}\n\
-                 Re-run with `renga mcp install --client {client} --force` to overwrite with: {}",
+                 Re-run with `renga-cp mcp install --client {client} --force` to overwrite with: {}",
                 client_display_name(client),
                 exe.display()
             );
@@ -123,7 +123,7 @@ fn install_claude(exe: &Path) -> Result<()> {
     let exe_str = exe.to_str().ok_or_else(|| {
         anyhow!(
             "renga binary path is not valid UTF-8 ({}); cannot register as a Claude MCP command. \
-             Move the binary to a UTF-8 path and re-run `renga mcp install --client claude`.",
+             Move the binary to a UTF-8 path and re-run `renga-cp mcp install --client claude`.",
             exe.display()
         )
     })?;
@@ -222,7 +222,7 @@ fn install_success_message(
              by your organization's Copilot policy\" at startup even on a personal \
              account, where that policy does not apply. It is a known false \
              warning (github/copilot-cli#1707, #1976, #2236) and does not stop \
-             {SERVER_NAME} from loading — run `renga mcp status --client copilot` \
+             {SERVER_NAME} from loading — run `renga-cp mcp status --client copilot` \
              to confirm the registration.",
             exe.display()
         ),
@@ -295,7 +295,7 @@ fn status(client: McpClient) -> Result<()> {
                     println!(
                         "\nWARNING: {reason}.\n\
                          Peer messages will not reach this client until that is fixed. \
-                         Run `renga mcp install --client copilot` to repair the entry."
+                         Run `renga-cp mcp install --client copilot` to repair the entry."
                     );
                 }
             }
@@ -304,7 +304,7 @@ fn status(client: McpClient) -> Result<()> {
         None => {
             println!(
                 "{SERVER_NAME} is NOT registered in {}.\n\
-                 Run `renga mcp install --client {client}` to register it.",
+                 Run `renga-cp mcp install --client {client}` to register it.",
                 client_display_name(client)
             );
             Ok(())
@@ -328,7 +328,7 @@ fn ensure_client_cli_available(client: McpClient) -> Result<()> {
         )),
         Err(e) => Err(anyhow!(
             "`{binary}` CLI not found on PATH ({e}). Install {} first, \
-             or add it to PATH, then re-run `renga mcp install / uninstall / status --client {client}`.",
+             or add it to PATH, then re-run `renga-cp mcp install / uninstall / status --client {client}`.",
             client_display_name(client)
         )),
     }
@@ -496,7 +496,7 @@ fn codex_config_path() -> Result<PathBuf> {
     Ok(home.join(".codex").join("config.toml"))
 }
 
-/// Verify that `renga mcp install --client codex` has been run by
+/// Verify that `renga-cp mcp install --client codex` has been run by
 /// inspecting `~/.codex/config.toml` for the `[mcp_servers.renga-peers]`
 /// entry and confirming its `[...env]` subtable carries
 /// `RENGA_PEER_CLIENT_KIND = "codex"`. Issue #203: without this, the
@@ -804,7 +804,7 @@ fn resolve_client_binary(client: McpClient) -> Result<PathBuf> {
     find_binary_on_path(binary).ok_or_else(|| {
         anyhow!(
             "`{binary}` CLI not found on PATH (program not found). Install {} first, \
-             or add it to PATH, then re-run `renga mcp install / uninstall / status --client {client}`.",
+             or add it to PATH, then re-run `renga-cp mcp install / uninstall / status --client {client}`.",
             client_display_name(client)
         )
     })

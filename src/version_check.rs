@@ -1,4 +1,10 @@
-//! Background npm version check.
+//! Background release-version check.
+//!
+//! This fork ships through GitHub Releases only — there is no npm
+//! package to ask — so the check reads the latest release tag from the
+//! GitHub API instead of the npm registry. The tag is `vX.Y.Z`, and
+//! [`is_newer`] already strips a leading `v`, so the comparison is
+//! unchanged.
 
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -6,7 +12,7 @@ use std::time::Duration;
 
 pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// Shared state for the latest version fetched from npm registry.
+/// Shared state for the latest version fetched from GitHub Releases.
 #[derive(Clone, Default)]
 pub struct VersionInfo {
     inner: Arc<Mutex<Option<String>>>,
@@ -34,7 +40,7 @@ impl VersionInfo {
     }
 }
 
-/// Spawn a background thread to check npm for a newer version.
+/// Spawn a background thread to check GitHub Releases for a newer version.
 pub fn spawn_check(info: VersionInfo) {
     thread::spawn(move || {
         thread::sleep(Duration::from_secs(1)); // delay so it doesn't compete with startup
@@ -44,22 +50,34 @@ pub fn spawn_check(info: VersionInfo) {
     });
 }
 
+/// Where the update check looks. Kept next to the call so a fork of
+/// this fork has one line to change.
+const LATEST_RELEASE_URL: &str = "https://api.github.com/repos/knmgn/renga/releases/latest";
+
 fn fetch_latest() -> Result<String, Box<dyn std::error::Error>> {
-    let response = ureq::get("https://registry.npmjs.org/@suisya-systems%2frenga/latest")
+    let response = ureq::get(LATEST_RELEASE_URL)
+        // The GitHub API rejects requests without a User-Agent, and
+        // pins the response shape to a version when asked.
+        .set(
+            "User-Agent",
+            concat!("renga-cp/", env!("CARGO_PKG_VERSION")),
+        )
+        .set("Accept", "application/vnd.github+json")
         .timeout(Duration::from_secs(5))
         .call()?;
     let json: serde_json::Value = response.into_json()?;
     let version = json
-        .get("version")
+        .get("tag_name")
         .and_then(|v| v.as_str())
-        .ok_or("no version field")?
+        .ok_or("no tag_name field")?
         .to_string();
     Ok(version)
 }
 
 /// Compare semver-like versions (simple major.minor.patch).
-/// Prerelease suffix (e.g. "-fork.1") is stripped before comparison, matching
-/// what the npm `latest` tag tracks — we never surface a prerelease as an update.
+/// A leading `v` (GitHub release tags carry one) and any prerelease
+/// suffix (e.g. `-rc.1`) are stripped before comparison, so a
+/// prerelease is never surfaced as an update.
 fn is_newer(latest: &str, current: &str) -> bool {
     let parse = |s: &str| -> Vec<u32> {
         s.trim_start_matches('v')
@@ -84,6 +102,16 @@ mod tests {
         assert!(is_newer("0.3.1", "0.3.0"));
         assert!(!is_newer("0.3.0", "0.3.0"));
         assert!(!is_newer("0.2.0", "0.3.0"));
+    }
+
+    /// GitHub release tags are `vX.Y.Z`, unlike the bare npm versions
+    /// this used to read, so the `v` strip is load-bearing now rather
+    /// than defensive.
+    #[test]
+    fn test_is_newer_with_release_tag_prefix() {
+        assert!(is_newer("v3.1.0", "3.0.0"));
+        assert!(!is_newer("v3.0.0", "3.0.0"));
+        assert!(!is_newer("v2.9.9", "3.0.0"));
     }
 
     #[test]

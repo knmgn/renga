@@ -13,37 +13,37 @@
 ## セットアップ (1 回だけ)
 
 ```bash
-renga mcp install --client claude
-renga mcp install --client codex   # Codex peer も使う場合
-renga mcp install --client copilot # GitHub Copilot CLI peer も使う場合
+renga-cp mcp install --client claude
+renga-cp mcp install --client codex   # Codex peer も使う場合
+renga-cp mcp install --client copilot # GitHub Copilot CLI peer も使う場合
 ```
 
-いま走っている `renga` バイナリを `renga-peers` という名前で、選択した client のユーザー設定に登録します。同じ登録の重複実行は冪等で、renga アップグレード後に上書きしたいときは `--force` を付けてください。`renga mcp uninstall --client …` と `renga mcp status --client …` がそれぞれ逆操作・状態確認です。
+いま走っている `renga` バイナリを `renga-peers` という名前で、選択した client のユーザー設定に登録します。同じ登録の重複実行は冪等で、renga アップグレード後に上書きしたいときは `--force` を付けてください。`renga-cp mcp uninstall --client …` と `renga-cp mcp status --client …` がそれぞれ逆操作・状態確認です。
 
 Codex では、既定の install は client CLI の正規登録経路を尊重しつつ、peer messaging に必要な最小限の `env_vars` passthrough だけを補正します。`check_messages` と `send_message` も auto-approve 寄りにしたい場合は、明示的に opt-in してください:
 
 ```bash
-renga mcp install --client codex --codex-auto-approve-peer-tools
+renga-cp mcp install --client codex --codex-auto-approve-peer-tools
 ```
 
 このフラグは `send_keys` や pane 操作系のような、より強いツールまでは自動承認しません。
 
 Copilot では install が `copilot mcp add --env RENGA_PEER_CLIENT_KIND=copilot -- <renga> mcp-peer` を実行し、env 変数込みのエントリが `~/.copilot/mcp-config.json` (`$COPILOT_HOME` を設定している場合は `$COPILOT_HOME/mcp-config.json`) に直接書かれます。設定の後追いパッチは不要で、`--codex-auto-approve-peer-tools` に相当するオプションもありません — Copilot では承認は設定ではなく起動時の関心事なので、peer 呼び出しのたびに確認が出るのを止めたい場合は `copilot` のコマンドラインに `--allow-tool='renga-peers'` を渡してください。Copilot 側ではツール名が `renga-peers-<tool>` の形で見えます。
 
-> **起動時に出る誤警告。** Copilot CLI は、そのポリシーが適用されない個人アカウントでも *"Third-party MCP servers are disabled by your organization's Copilot policy"* と表示することがあります。これは既知の upstream バグ ([github/copilot-cli#1707](https://github.com/github/copilot-cli/issues/1707), [#1976](https://github.com/github/copilot-cli/issues/1976), [#2236](https://github.com/github/copilot-cli/issues/2236)) で、`renga-peers` の読み込み自体は止まりません。`renga mcp status --client copilot` で確認してください。このコマンドは、エントリは存在するのに `RENGA_PEER_CLIENT_KIND=copilot` が欠けている状態 — 一見正常で peer メッセージだけ黙って消える状態 — も警告します。
+> **起動時に出る誤警告。** Copilot CLI は、そのポリシーが適用されない個人アカウントでも *"Third-party MCP servers are disabled by your organization's Copilot policy"* と表示することがあります。これは既知の upstream バグ ([github/copilot-cli#1707](https://github.com/github/copilot-cli/issues/1707), [#1976](https://github.com/github/copilot-cli/issues/1976), [#2236](https://github.com/github/copilot-cli/issues/2236)) で、`renga-peers` の読み込み自体は止まりません。`renga-cp mcp status --client copilot` で確認してください。このコマンドは、エントリは存在するのに `RENGA_PEER_CLIENT_KIND=copilot` が欠けている状態 — 一見正常で peer メッセージだけ黙って消える状態 — も警告します。
 
 ## peer チャネル付きで起動する
 
 配送方式は client ごとに違います。
 
 - **Claude Code** は MCP の experimental channel 機能を使うので、起動時に毎回 `--dangerously-load-development-channels server:renga-peers` が必要です。
-- **Codex** は `renga mcp install --client codex` で入れた MCP 登録を使います。これが入っていれば plain `codex` 起動で足ります。非フォーカスの worker pane が PTY 入力を受けられる状態になったら renga が `check_messages` を促す nudge を送り、実際の peer 本文は `check_messages` で読みます。対象の Codex pane がフォーカス中なら、PTY 注入を即座にせずローカル通知 overlay を表示します。
-- **GitHub Copilot CLI** も `renga mcp install --client copilot` を入れれば同じ pull 経路で動き、plain `copilot` 起動で足ります。Copilot 固有の注意が 2 つあります。1 つは UI を **代替画面 (alternate screen)** に描くこと (renga は Copilot ペインについてはそれを前提に判定し、逆に *別の* 全画面プログラムがペインを乗っ取っている場合は従来どおり入力を拒否します)。もう 1 つは、composer に到達するまでに最大 3 つのダイアログを挟むことです: ディレクトリごとの初回起動時の **フォルダ信頼 (folder trust)**、そのディレクトリに過去の Copilot セッションがある場合の **セッション復元ピッカー**、そして `--allow-tool` / `--allow-all-tools` なしで起動した場合のツールごとの承認。renga はどれにも入力しません。`copilot --allow-tool='renga-peers'` で消えるのは 3 つ目だけなので、spawn 直後の worker には `send_keys(target=…, keys=["Enter"])` でフォルダを信頼し、`keys=["Esc"]` で新規セッションを開始させる操作が必要です。
+- **Codex** は `renga-cp mcp install --client codex` で入れた MCP 登録を使います。これが入っていれば plain `codex` 起動で足ります。非フォーカスの worker pane が PTY 入力を受けられる状態になったら renga が `check_messages` を促す nudge を送り、実際の peer 本文は `check_messages` で読みます。対象の Codex pane がフォーカス中なら、PTY 注入を即座にせずローカル通知 overlay を表示します。
+- **GitHub Copilot CLI** も `renga-cp mcp install --client copilot` を入れれば同じ pull 経路で動き、plain `copilot` 起動で足ります。Copilot 固有の注意が 2 つあります。1 つは UI を **代替画面 (alternate screen)** に描くこと (renga は Copilot ペインについてはそれを前提に判定し、逆に *別の* 全画面プログラムがペインを乗っ取っている場合は従来どおり入力を拒否します)。もう 1 つは、composer に到達するまでに最大 3 つのダイアログを挟むことです: ディレクトリごとの初回起動時の **フォルダ信頼 (folder trust)**、そのディレクトリに過去の Copilot セッションがある場合の **セッション復元ピッカー**、そして `--allow-tool` / `--allow-all-tools` なしで起動した場合のツールごとの承認。renga はどれにも入力しません。`copilot --allow-tool='renga-peers'` で消えるのは 3 つ目だけなので、spawn 直後の worker には `send_keys(target=…, keys=["Enter"])` でフォルダを信頼し、`keys=["Esc"]` で新規セッションを開始させる操作が必要です。
 
 Claude の起動フラグを毎回手で打たなくて済むように、renga 側から 2 つの経路を用意しています:
 
 - **`Alt+P`** — フォーカス中のペインに `claude --dangerously-load-development-channels server:renga-peers ` を入力 (末尾にスペース、**Enter は押されない**)。そのまま Enter で起動してもいいし、追加引数を続けて書いてから Enter でも OK。シェルの種類を問わず動作します。
-- **`renga split --role claude`** / **`renga new-tab --role claude`** — 新しいペインを開いて、上記フラグ付きの Claude Code を自動起動。`--command "..."` を明示したらそちらが優先されるので、カスタム起動の逃げ道は残ります。
+- **`renga-cp split --role claude`** / **`renga-cp new-tab --role claude`** — 新しいペインを開いて、上記フラグ付きの Claude Code を自動起動。`--command "..."` を明示したらそちらが優先されるので、カスタム起動の逃げ道は残ります。
 
 Codex / Copilot の登録が済んでいれば、orchestrator ペインは会話の中から `spawn_codex_pane(direction, …)` / `spawn_copilot_pane(direction, …)` でワーカーを起動できます。どちらも、client の MCP 設定に対応する `RENGA_PEER_CLIENT_KIND` が無ければ `[codex_not_installed]` / `[copilot_not_installed]` で事前に拒否します — 誤った kind で登録されたペインは、受信できない push チャネルを名乗ってしまうためです。
 
@@ -90,27 +90,27 @@ Claude B の次のターンのコンテキストに `<channel source="renga-peer
 >
 > 当時存在した 9 つのうち 7 つの修正が Issue #288、残る `close_pane` と `set_pane_identity` が Issue #296 です (`spawn_copilot_pane` は最初から修正後の挙動)。修正前は表示中のタブを対象にしていたため、バックグラウンドタブで動くオーケストレータの `send_keys` がユーザーの切り替え先タブに黙って入り込み、`close_pane(target="focused")` はユーザーが今まさに触っているペインを終了させていました。ツールが `[server_too_old] ... restart renga` を返す場合、ディスク上のバイナリは新しくても renga の**プロセス**が修正前のものです。renga を再起動してください。
 
-> **`claude` 自動アップグレード。** `spawn_pane` / `new_tab` / `renga split` / `renga new-tab`、および layout TOML の `command = "claude"` 指定は、peer 対応の起動コマンドに自動で書き換えられます。各呼び出し側で `--dangerously-load-development-channels server:renga-peers` を覚えていなくても、新ペインが renga-peers ネットワークに参加します。orchestrator が Claude を起動したい場合は `spawn_pane(command="claude ...")` より `spawn_claude_pane` を推奨 — launch policy が renga 側に集約され、`args[]` に予約済みフラグが混入したら `invalid-params` で拒否されます。
+> **`claude` 自動アップグレード。** `spawn_pane` / `new_tab` / `renga-cp split` / `renga-cp new-tab`、および layout TOML の `command = "claude"` 指定は、peer 対応の起動コマンドに自動で書き換えられます。各呼び出し側で `--dangerously-load-development-channels server:renga-peers` を覚えていなくても、新ペインが renga-peers ネットワークに参加します。orchestrator が Claude を起動したい場合は `spawn_pane(command="claude ...")` より `spawn_claude_pane` を推奨 — launch policy が renga 側に集約され、`args[]` に予約済みフラグが混入したら `invalid-params` で拒否されます。
 
-> **ペインの `cwd`。** `spawn_pane` / `new_tab` / `renga split --cwd` / `renga new-tab --cwd` / layout TOML `cwd = "..."` で新ペインの作業ディレクトリを指定できます。絶対パスはそのまま、相対パスは呼び出し元ペインの cwd (MCP)、シェルの cwd (CLI)、renga プロセスの cwd (layout TOML) を基準に解決されます。無効なパス (存在しない、アクセスできない、ディレクトリでない) はレイアウト変更前に `cwd_invalid` で失敗するため、half-mutated なレイアウトになりません。`claude` 自動アップグレードは `command` の先頭の空白区切りトークンがちょうど `claude` のときだけ発火する (`claudex` / `claude-mobile` / `./claude` は意図的に対象外) ため、`cd <dir> && ...` を書くと効かなくなります。`cwd` フィールドで指定してください。
+> **ペインの `cwd`。** `spawn_pane` / `new_tab` / `renga-cp split --cwd` / `renga-cp new-tab --cwd` / layout TOML `cwd = "..."` で新ペインの作業ディレクトリを指定できます。絶対パスはそのまま、相対パスは呼び出し元ペインの cwd (MCP)、シェルの cwd (CLI)、renga プロセスの cwd (layout TOML) を基準に解決されます。無効なパス (存在しない、アクセスできない、ディレクトリでない) はレイアウト変更前に `cwd_invalid` で失敗するため、half-mutated なレイアウトになりません。`claude` 自動アップグレードは `command` の先頭の空白区切りトークンがちょうど `claude` のときだけ発火する (`claudex` / `claude-mobile` / `./claude` は意図的に対象外) ため、`cd <dir> && ...` を書くと効かなくなります。`cwd` フィールドで指定してください。
 
 > **タブ配置 (`tab`、Issue #290)。** 3 つの `spawn_*` ツールはオプションの `tab` セレクタを受け付け、新ペインを**どのタブに**作るかを明示できます (上記の数値 id による暗黙の cross-tab とは別の、明示的な機構です)。キーはちょうど 1 つ: `{"name": "workers"}` (表示名の完全一致。0 件は `tab_not_found`、複数件は `tab_ambiguous` — タブ名は一意ではないため renga は推測しません)、`{"index": 2}` (0 始まり。`list_peers` が報告する index と同じ)、`{"pane_id": 17}` (そのペインが属するタブ。id はタブの close や rename でずれない安定アンカー)、`{"new": {}}` / `{"new": {"name": "workers"}}` (単一ペインの**バックグラウンド**新規タブを作成。ユーザーが見ているタブは切り替わらず、新規タブには split 対象が無いため `direction` / `target` の指定は拒否されます)。既存タブのセレクタでは `target` は選択したタブの**内側で**解決され、別タブの数値 target は `target_tab_mismatch` で失敗します。`tab.new` で `cwd` を省略すると呼び出し元ペインの cwd を継承します。`tab` を使うにはサーバが `spawn_tab` capability を広告している必要があり、古い renga プロセスに対しては呼び出し元のタブへ黙って spawn する代わりに `[server_too_old]` で fail closed します。`new_tab` は従来どおり「作成してフォーカス」のままです。またタブ数は MAX_TABS = 16 で上限され、超過は `tab_limit_reached` になります。
 
-> **タブ横断の列挙 (`tab`、Issue #329)。** `list_panes` は読み取り側で同じ `tab` セレクタを受け付けます — `{"name": "workers"}` / `{"index": 2}` / `{"pane_id": 17}` (サーバ側の解決処理は spawn 側と共通で、`tab_not_found` / `tab_ambiguous` / `pane_not_found` の意味も同じ) に加えて、全タブを返す `{"all": true}` (自分のタブが先頭、以降は index 順)。`{"new": …}` は読み取りには意味がないため存在しません。`tab` を省略した場合は #329 以前の挙動がバイト単位でそのまま残り、自分のタブだけを返します。全タブ形は、オーケストレータが **id を保持していない**ペイン — バックグラウンドタブに置いた worker を含む — を列挙するための経路です。#329 以前はそうしたペインが監視母集団からも容量会計からも落ち、生存している worker が退役され、spawn が過剰方向にずれていました。レコードには `tab` (0 始まりの index) と `tab_name` (表示ラベル) が加わりますが、どちらも**表示用メタデータのみ**です (index はタブを閉じるとずれ、ラベルは一意ではありません)。さらに `same_tab` が付きますが、これは複数タブにまたがりうる応答 (ペインから `tab` セレクタ付きで呼んだ場合) にだけ含まれます。タブを跨いで安定するアドレスは今も数値 `id` だけです。独立した 2 つの orchestration が別タブで動くと、どちらにも `dispatcher` と `worker-<task_id>` が実在するため `name` では判別できません — 判別材料は `cwd` です。`tab` を使うにはサーバが `cross_tab_list` capability を広告している必要があります。#329 以前のプロセスは未知のフィールドを捨てて自分のタブだけを返し、それは正しい答えと見分けのつかない well-formed な `Ok` になってしまうため、黙って狭い集合を返す代わりに `[server_too_old]` で fail closed します。CLI の `renga list` には新しいレコードのフィールドが出ますが、CLI 側のタブセレクタは見送りです。
+> **タブ横断の列挙 (`tab`、Issue #329)。** `list_panes` は読み取り側で同じ `tab` セレクタを受け付けます — `{"name": "workers"}` / `{"index": 2}` / `{"pane_id": 17}` (サーバ側の解決処理は spawn 側と共通で、`tab_not_found` / `tab_ambiguous` / `pane_not_found` の意味も同じ) に加えて、全タブを返す `{"all": true}` (自分のタブが先頭、以降は index 順)。`{"new": …}` は読み取りには意味がないため存在しません。`tab` を省略した場合は #329 以前の挙動がバイト単位でそのまま残り、自分のタブだけを返します。全タブ形は、オーケストレータが **id を保持していない**ペイン — バックグラウンドタブに置いた worker を含む — を列挙するための経路です。#329 以前はそうしたペインが監視母集団からも容量会計からも落ち、生存している worker が退役され、spawn が過剰方向にずれていました。レコードには `tab` (0 始まりの index) と `tab_name` (表示ラベル) が加わりますが、どちらも**表示用メタデータのみ**です (index はタブを閉じるとずれ、ラベルは一意ではありません)。さらに `same_tab` が付きますが、これは複数タブにまたがりうる応答 (ペインから `tab` セレクタ付きで呼んだ場合) にだけ含まれます。タブを跨いで安定するアドレスは今も数値 `id` だけです。独立した 2 つの orchestration が別タブで動くと、どちらにも `dispatcher` と `worker-<task_id>` が実在するため `name` では判別できません — 判別材料は `cwd` です。`tab` を使うにはサーバが `cross_tab_list` capability を広告している必要があります。#329 以前のプロセスは未知のフィールドを捨てて自分のタブだけを返し、それは正しい答えと見分けのつかない well-formed な `Ok` になってしまうため、黙って狭い集合を返す代わりに `[server_too_old]` で fail closed します。CLI の `renga-cp list` には新しいレコードのフィールドが出ますが、CLI 側のタブセレクタは見送りです。
 
 ## うまく動かないとき
 
-- **`list_peers` が "renga not reachable from this peer client" を返す** — client が renga の外で起動されたか、renga ペインの環境変数を引き継げていません。renga のペイン内から起動し直してください（Claude は `Alt+P` / `renga split --role claude`、Codex は `renga mcp install --client codex` 後の plain `codex` または `spawn_codex_pane`、Copilot は `renga mcp install --client copilot` 後の plain `copilot` または `spawn_copilot_pane`）。
+- **`list_peers` が "renga not reachable from this peer client" を返す** — client が renga の外で起動されたか、renga ペインの環境変数を引き継げていません。renga のペイン内から起動し直してください（Claude は `Alt+P` / `renga-cp split --role claude`、Codex は `renga-cp mcp install --client codex` 後の plain `codex` または `spawn_codex_pane`、Copilot は `renga-cp mcp install --client copilot` 後の plain `copilot` または `spawn_copilot_pane`）。
 - **相手に送ったメッセージが `<channel>` タグで表示されない** — 起動時のフラグ `--dangerously-load-development-channels server:renga-peers` を付け忘れています。`claude` と打つ代わりに `Alt+P` を使えばフラグ付きのコマンドが挿入されるので事故りにくくなります。
 - **Codex に送ったのに反応がない** — renga は Codex ペインが PTY 入力を安全に受けられる状態で、かつ非フォーカスになってから `check_messages` を促す nudge を流し込みます。フォーカス中に届いたメッセージは、会話を汚さないように通知 overlay へ回します。`Alt+Enter` / `Ctrl+Enter` で `check_messages` を呼ぶための文面だけ挿入し、`Esc` なら無視、Enter を押して実行するかどうかは人間が決めます。overlay を放置してもリクエストは MCP inbox に残り、フォーカスを外せば worker と同じ deferred nudge に戻ります。実際の依頼本文は MCP inbox 側にあり、`check_messages` の返り値が真実です。
-- **新しい Codex pane で `check_messages` / `send_message` の承認がまた出る** — Codex の承認は pane-local に振る舞うことがあります。`renga mcp install --client codex --codex-auto-approve-peer-tools` で安全な peer messaging 系の承認を事前設定できますが、Codex のバージョンや実行形態によっては、新しい pane で一度だけ warm-up 承認が必要です。
-- **`spawn_codex_pane` が `[codex_not_installed]` で失敗する** — Codex の MCP 設定 (`~/.codex/config.toml`) に renga-peers エントリがない、ファイルが読めない、もしくは `[mcp_servers.renga-peers.env]` に `RENGA_PEER_CLIENT_KIND=codex` が登録されていません。`renga mcp install --client codex` を 1 回実行してください。env 値だけが欠けた既存エントリも install 経路で self-heal します。
-- **`spawn_copilot_pane` が `[copilot_not_installed]` で失敗する** — 設定ファイルが 1 つ違うだけで、内容は Codex と同じ失敗です: `~/.copilot/mcp-config.json` (または `$COPILOT_HOME/mcp-config.json`) が無い、読めない、`renga-peers` エントリが無い、あるいはその `env` に `RENGA_PEER_CLIENT_KIND=copilot` が無い。`renga mcp install --client copilot` を実行してください。Codex と同様に env 値だけ欠けた既存エントリは self-heal するので `--force` は不要です。
+- **新しい Codex pane で `check_messages` / `send_message` の承認がまた出る** — Codex の承認は pane-local に振る舞うことがあります。`renga-cp mcp install --client codex --codex-auto-approve-peer-tools` で安全な peer messaging 系の承認を事前設定できますが、Codex のバージョンや実行形態によっては、新しい pane で一度だけ warm-up 承認が必要です。
+- **`spawn_codex_pane` が `[codex_not_installed]` で失敗する** — Codex の MCP 設定 (`~/.codex/config.toml`) に renga-peers エントリがない、ファイルが読めない、もしくは `[mcp_servers.renga-peers.env]` に `RENGA_PEER_CLIENT_KIND=codex` が登録されていません。`renga-cp mcp install --client codex` を 1 回実行してください。env 値だけが欠けた既存エントリも install 経路で self-heal します。
+- **`spawn_copilot_pane` が `[copilot_not_installed]` で失敗する** — 設定ファイルが 1 つ違うだけで、内容は Codex と同じ失敗です: `~/.copilot/mcp-config.json` (または `$COPILOT_HOME/mcp-config.json`) が無い、読めない、`renga-peers` エントリが無い、あるいはその `env` に `RENGA_PEER_CLIENT_KIND=copilot` が無い。`renga-cp mcp install --client copilot` を実行してください。Codex と同様に env 値だけ欠けた既存エントリは self-heal するので `--force` は不要です。
 - **Copilot ペインがメッセージを一向に拾わない** — 設定より先にペイン自体を見てください。Copilot は作業中もずっと空の枠付き composer を表示し続けるため、busy なペインは `esc interrupt` のフッター以外 idle と見分けがつきません。renga はこのフッターを読んで、消えるまで nudge を保留します。残る詰まり方は renga が代わりに答えないダイアログです: 初回起動時の **フォルダ信頼** 確認、過去セッションがある場合の **セッション復元ピッカー**、`--allow-tool='renga-peers'` なしで起動した場合のツールごとの承認。前の 2 つは `send_keys` (`Enter` → `Esc`) で解除できます。`inspect_pane(target=…, lines=20)` で状態を確認してください。いずれの場合も本文は MCP inbox に残っているので、詰まりが解ければ `check_messages` で読み出せます。
-- **Copilot が "Third-party MCP servers are disabled by your organization's Copilot policy" と表示する** — 個人アカウントでも出る既知の誤警告です (github/copilot-cli [#1707](https://github.com/github/copilot-cli/issues/1707), [#1976](https://github.com/github/copilot-cli/issues/1976), [#2236](https://github.com/github/copilot-cli/issues/2236))。`renga-peers` は読み込まれています。`renga mcp status --client copilot` で確認してください。
+- **Copilot が "Third-party MCP servers are disabled by your organization's Copilot policy" と表示する** — 個人アカウントでも出る既知の誤警告です (github/copilot-cli [#1707](https://github.com/github/copilot-cli/issues/1707), [#1976](https://github.com/github/copilot-cli/issues/1976), [#2236](https://github.com/github/copilot-cli/issues/2236))。`renga-peers` は読み込まれています。`renga-cp mcp status --client copilot` で確認してください。
 - **`send_keys` が効いていないように見える** — `send_keys` は target ペインの PTY に生の入力バイトを書き込むだけで、帯域外の「承認」操作ではありません。まず `inspect_pane(target=…, lines=20)` で本当に入力待ちか確認し、レイアウトが動く運用ではフォーカス推測ではなく安定した pane `name` を target に使ってください。
 - **`poll_events` が想定より早く `events: []` を返す** — `types=[…]` フィルタは返却結果を絞るだけで、非一致イベントでも long-poll は解除されて `next_since` は前進します。返ってきた cursor でそのまま再 poll してください。`events_dropped` が来た場合は全タブのビューで再同期してください。`poll_events` はプロセス全体が対象で**全タブ**のペインライフサイクルが届くので、素の `list_panes` (自分のタブだけ) では他タブで落ちたイベントを埋められません。母集団全体を取り直せるのは `list_peers` か `list_panes(tab={"all": true})` (Issue #329) です。`list_peers` は自分自身のペインを含まないため、自分のタブも込みで欲しいときは全タブ形の `list_panes` を使ってください。
-- **renga をアップグレードしたら** — 登録済みの各 client について `renga mcp install --client <claude|codex|copilot> --force` を実行し直し、新しいバイナリを指すようにしてください。
+- **renga をアップグレードしたら** — 登録済みの各 client について `renga-cp mcp install --client <claude|codex|copilot> --force` を実行し直し、新しいバイナリを指すようにしてください。
 
 ## 関連ドキュメント
 

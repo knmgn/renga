@@ -11,34 +11,32 @@ Only needed when building from source: [Rust toolchain](https://rustup.rs/).
 
 ## Installation
 
-### Via npm (recommended)
+### Download binary (recommended)
 
-```bash
-npm install -g @suisya-systems/renga
-```
+Grab the binary for your platform from [Releases](https://github.com/knmgn/renga/releases) and put it on your `PATH`. The command is `renga-cp`.
 
-Requires Node.js. After install, use the `renga` command from anywhere.
+This fork publishes no npm package — upstream's `@suisya-systems/renga` installs as `renga` and is unaffected, so the two can sit side by side.
 
 If you want Claude Code, Codex, or Copilot panes to talk to each other or control panes from inside the client, register renga's MCP server once per client:
 
 ```bash
-renga mcp install --client claude
-renga mcp install --client codex    # if you want Codex peers too
-renga mcp install --client copilot  # if you want GitHub Copilot CLI peers too
+renga-cp mcp install --client claude
+renga-cp mcp install --client codex    # if you want Codex peers too
+renga-cp mcp install --client copilot  # if you want GitHub Copilot CLI peers too
 ```
 
 That exposes the built-in `renga-peers` network and pane-control tools such as `list_panes`, `spawn_claude_pane`, `spawn_codex_pane`, `spawn_copilot_pane`, `inspect_pane`, and `send_keys` inside the selected client.
 
 ### Download binary
 
-Download the latest binary from [Releases](https://github.com/suisya-systems/renga/releases):
+Download the latest binary from [Releases](https://github.com/knmgn/renga/releases):
 
 | Platform | File |
 |----------|------|
-| Windows (x64) | `renga-windows-x64.exe` |
-| macOS (Apple Silicon) | `renga-macos-arm64` |
-| macOS (Intel) | `renga-macos-x64` |
-| Linux (x64) | `renga-linux-x64` |
+| Windows (x64) | `renga-cp-windows-x64.exe` |
+| macOS (Apple Silicon) | `renga-cp-macos-arm64` |
+| macOS (Intel) | `renga-cp-macos-x64` |
+| Linux (x64) | `renga-cp-linux-x64` |
 
 import { Callout } from 'nextra/components'
 
@@ -47,18 +45,18 @@ import { Callout } from 'nextra/components'
 </Callout>
 
 <Callout type="info">
-  **macOS / Linux:** After downloading, make the binary executable: `chmod +x renga-*`
+  **macOS / Linux:** After downloading, make the binary executable: `chmod +x renga-cp-*`
 </Callout>
 
 ### From source
 
 ```bash
-git clone https://github.com/suisya-systems/renga.git
+git clone https://github.com/knmgn/renga.git
 cd renga
 cargo build --release
 ```
 
-The binary will be at `target/release/renga` (or `renga.exe` on Windows).
+The binary will be at `target/release/renga-cp` (or `renga.exe` on Windows).
 
 ## First launch
 
@@ -74,11 +72,11 @@ You'll see a terminal pane with your shell, a file tree sidebar on the left, and
 
 Press `Alt+P` in a terminal pane. renga inserts the peer-enabled Claude launch command for you; review it, optionally append args, and press `Enter`.
 
-If you prefer the CLI path, `renga split --role claude` and `renga new-tab --role claude` open a new pane and auto-launch Claude Code with the same peer wiring.
+If you prefer the CLI path, `renga-cp split --role claude` and `renga-cp new-tab --role claude` open a new pane and auto-launch Claude Code with the same peer wiring.
 
 The pane border turns orange when Claude Code is running — green for Codex, purple for GitHub Copilot CLI.
 
-If you want a Codex worker, make sure `renga mcp install --client codex` has been run once, then launch plain `codex` in a pane or let an orchestrator call `spawn_codex_pane`. A GitHub Copilot CLI worker is the same shape one client over: `renga mcp install --client copilot`, then plain `copilot` or `spawn_copilot_pane`. Copilot asks for folder trust — and, in a directory it has seen before, which session to restore — before its composer appears; renga will not answer those dialogs for you, so clear them once with `send_keys` or by hand.
+If you want a Codex worker, make sure `renga-cp mcp install --client codex` has been run once, then launch plain `codex` in a pane or let an orchestrator call `spawn_codex_pane`. A GitHub Copilot CLI worker is the same shape one client over: `renga-cp mcp install --client copilot`, then plain `copilot` or `spawn_copilot_pane`. Copilot asks for folder trust — and, in a directory it has seen before, which session to restore — before its composer appears; renga will not answer those dialogs for you, so clear them once with `send_keys` or by hand.
 
 ### 2. Split panes
 

@@ -10,12 +10,12 @@ import { Callout } from 'nextra/components'
 
 ## 基本サブコマンド
 
-### `renga list`
+### `renga-cp list`
 
 アクティブタブ内の全 pane をリスト:
 
 ```bash
-$ renga list
+$ renga-cp list
 [
   { "id": 1, "name": "secretary", "role": "leader", "focused": true,
     "tab": 0, "tab_name": "renga",
@@ -46,7 +46,7 @@ renga 起動直後など一度もレイアウト計算が走っていない状�
 `pane_not_found`) — か、全タブを対象にする裸の文字列 `"all"` (呼び出し元の
 タブが先頭、以降は index 順)。省略時の挙動は従来とまったく同じで、
 `{"cmd":"list"}` は #329 以前のクライアントが送っていたものと wire 上
-byte 単位で一致する。`renga list` はこれを送らない — CLI にタブ指定の
+byte 単位で一致する。`renga-cp list` はこれを送らない — CLI にタブ指定の
 フラグは無く、従来どおりアクティブタブを列挙する — が、MCP の
 `list_panes` ツールでは利用できる (そちらでの綴りは `{"all": true}`)。
 [ピアメッセージング](/ja/peer-messaging) を参照。リクエストが `tab` と
@@ -61,52 +61,52 @@ byte 単位で一致する。`renga list` はこれを送らない — CLI に�
 ことになるため。`tab` を含まない `list` はどのサーバでも挙動が変わらず、
 gate も従来どおり `caller_scope` のまま。
 
-### `renga send`
+### `renga-cp send`
 
 指定 pane の PTY にテキストを送る。`--enter` で改行を付けて実行まで流す。
 
 ```bash
-renga send --name worker-foo --enter "git status"
-renga send --id 2 "Hello"
-renga send --focused $'\x1b'  # Esc を送る
+renga-cp send --name worker-foo --enter "git status"
+renga-cp send --id 2 "Hello"
+renga-cp send --focused $'\x1b'  # Esc を送る
 ```
 
 ターゲット指定: `--name <NAME>` / `--id <N>` / `--focused`。省略時は focused pane。
 
-### `renga focus`
+### `renga-cp focus`
 
 キーボードフォーカスを移動。
 
 ```bash
-renga focus --name secretary
+renga-cp focus --name secretary
 ```
 
-### `renga split`
+### `renga-cp split`
 
 pane を分割。新 pane に開始コマンドを流したり、安定名 (`--id`) や役割 (`--role`) を付けられる。
 
 ```bash
-renga split --direction vertical --command "claude" --id worker-a --role worker
+renga-cp split --direction vertical --command "claude" --id worker-a --role worker
 ```
 
 分割対象の pane は `--target-name <NAME>` / `--target-id <N>` / `--target-focused` で指定。省略時は focused pane が分割される。`--direction vertical | horizontal` は必須。
 
-### `renga new-tab`
+### `renga-cp new-tab`
 
 新しいタブを開き、そのタブに新 pane を 1 つ作る。
 
 ```bash
-renga new-tab --command "claude --permission-mode plan" --id worker-plan --role worker --label "plan-session"
+renga-cp new-tab --command "claude --permission-mode plan" --id worker-plan --role worker --label "plan-session"
 ```
 
 ## ライフサイクル監視
 
-### `renga events`
+### `renga-cp events`
 
 pane の起動 / 終了などライフサイクルイベントを JSON Lines で購読する。
 
 ```bash
-renga events --timeout 5s --count 10
+renga-cp events --timeout 5s --count 10
 ```
 
 | Flag | 意味 |
@@ -142,7 +142,7 @@ renga events --timeout 5s --count 10
 { "type": "peer_inbox", "target_pane": 3, "from_pane": 2, "from_name": "secretary", "from_kind": "claude", "body": "please run the tests", "ts_ms": 1700000014000 }
 ```
 
-`renga events` は `from_pane` を送らないので、CLI のストリームは従来どおり変わらない — これまでと同じように、どの pane 宛のものであれ `peer_inbox` 行が流れてくる。`from_pane` はもう一方の種類の利用者向けの opt-in で、特定の 1 pane を代表して IPC を話す統合 — 同梱の `renga mcp-peer` のように、自分が担当する pane 宛のメッセージにしか反応しない側 — のためにある。指定しなくても失うものは無い。なお、pane を名乗らなかった購読に対して server が pane を推測することはない (`hello` の pid も、先行する peer 登録も、購読しているその接続に紐づく保証が無いため、推測すればいずれ別 pane に結び付いてしまう)。peer メッセージング自体はどちらの場合も従来どおりで、メッセージは受信側 pane にこれまでと同じ経路で届く (Claude は `<channel>` タグ、Codex / Copilot は `check_messages` を促す nudge)。
+`renga-cp events` は `from_pane` を送らないので、CLI のストリームは従来どおり変わらない — これまでと同じように、どの pane 宛のものであれ `peer_inbox` 行が流れてくる。`from_pane` はもう一方の種類の利用者向けの opt-in で、特定の 1 pane を代表して IPC を話す統合 — 同梱の `renga-cp mcp-peer` のように、自分が担当する pane 宛のメッセージにしか反応しない側 — のためにある。指定しなくても失うものは無い。なお、pane を名乗らなかった購読に対して server が pane を推測することはない (`hello` の pid も、先行する peer 登録も、購読しているその接続に紐づく保証が無いため、推測すればいずれ別 pane に結び付いてしまう)。peer メッセージング自体はどちらの場合も従来どおりで、メッセージは受信側 pane にこれまでと同じ経路で届く (Claude は `<channel>` タグ、Codex / Copilot は `check_messages` を促す nudge)。
 
 そもそもルーティングされる event 種別は `peer_inbox` **だけ**で、しかも pane を名乗った購読に対してだけである。他の種別は従来どおり全 subscriber へ broadcast される。同じ pane を名乗った購読が複数あれば、その全員にその pane 宛のメッセージが届く。pane を名乗って得られるのはキュー負荷の削減で、スコープが受け取らない event はそもそもその購読のチャネルに渡されないため、上限 256 件のキューを埋めることも、その subscriber の `events_dropped` に計上されることもない。
 
@@ -155,16 +155,16 @@ renga events --timeout 5s --count 10
 ワーカーペイン終了だけを拾う:
 
 ```bash
-renga events --timeout 5s \
+renga-cp events --timeout 5s \
   | jq -c 'select(.type == "pane_exited" and .role == "worker")'
 ```
 
-### `renga inspect`
+### `renga-cp inspect`
 
 指定 pane の画面内容を取得。承認プロンプト検出 / エラーバナー検出など、人間の目を使わない観測に使う。
 
 ```bash
-renga inspect --name worker-foo --lines 10 --cursor
+renga-cp inspect --name worker-foo --lines 10 --cursor
 ```
 
 | Flag | 意味 |
@@ -213,7 +213,7 @@ IPC 応答のエラーは `[<code>] <message>` 形式で stderr に出る (renga
 シェルからの分岐例:
 
 ```bash
-out=$(renga send --name worker-foo --enter "ping" 2>&1)
+out=$(renga-cp send --name worker-foo --enter "ping" 2>&1)
 case "$out" in
   *"[pane_not_found]"*|*"[pane_vanished]"*)
     echo "worker closed" ;;
@@ -228,7 +228,7 @@ esac
 
 ## サブスクライバ切断
 
-`renga events` 購読は server 側で half-close 検知される。クライアントが read 側を閉じても、server 側の 30 秒おきの heartbeat write が失敗した時点で subscriber slot が解放される — quiet な workspace でも stale subscriber が残らない設計。
+`renga-cp events` 購読は server 側で half-close 検知される。クライアントが read 側を閉じても、server 側の 30 秒おきの heartbeat write が失敗した時点で subscriber slot が解放される — quiet な workspace でも stale subscriber が残らない設計。
 
 ## セキュリティモデル
 

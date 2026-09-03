@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "renga",
+    name = "renga-cp",
     version,
     about = "AI-native terminal for multi-agent coding"
 )]
@@ -123,7 +123,7 @@ pub enum IpcCommand {
         /// Pane name (defined in the layout or via `split --id NAME`).
         #[arg(long, conflicts_with_all = ["id", "focused"])]
         name: Option<String>,
-        /// Numeric pane id as shown by `renga list`.
+        /// Numeric pane id as shown by `renga-cp list`.
         #[arg(long, conflicts_with_all = ["name", "focused"])]
         id: Option<usize>,
         /// Target the currently focused pane.
@@ -235,7 +235,7 @@ pub enum IpcCommand {
     /// addressed to. Since #306 an IPC client may narrow that by sending
     /// `from_pane` on its `subscribe` request and receive only the
     /// `peer_inbox` for that one pane; this command deliberately does
-    /// not, so its output is unchanged. Use the `renga mcp-peer` tools
+    /// not, so its output is unchanged. Use the `renga-cp mcp-peer` tools
     /// if you want just one pane's peer messages.
     Events {
         /// Stop after this duration (e.g. "2s", "500ms", "1m"). If
@@ -286,7 +286,7 @@ pub enum IpcCommand {
     /// stdio while using the renga IPC as its peer-messaging backend.
     ///
     /// This subcommand is meant to be registered in
-    /// `~/.claude/mcp_servers.json` (done explicitly via `renga mcp
+    /// `~/.claude/mcp_servers.json` (done explicitly via `renga-cp mcp
     /// install`, not auto-installed — see #97's scope decision). Claude
     /// Code spawns it, inherits `RENGA_PANE_ID` / `RENGA_SOCKET` from
     /// the pane PTY, and never blocks on its own subcommand dispatch.
@@ -302,8 +302,8 @@ pub enum IpcCommand {
     },
 }
 
-/// Sub-subcommands of `renga mcp`. Kept as a separate enum so clap
-/// renders `renga mcp install` / `renga mcp status` as nested in
+/// Sub-subcommands of `renga-cp mcp`. Kept as a separate enum so clap
+/// renders `renga-cp mcp install` / `renga-cp mcp status` as nested in
 /// `--help` output, which is the documentation affordance a first-time
 /// user expects.
 #[derive(Subcommand, Debug, Clone)]
@@ -433,7 +433,7 @@ impl IpcCommand {
             }),
             IpcCommand::Close { name, id } => Ok(Request::Close {
                 target: pick_ref(name, id, false)?,
-                // Same reasoning as `Send`, plus: `renga close` has
+                // Same reasoning as `Send`, plus: `renga-cp close` has
                 // always searched every tab, and `from_pane: None` is
                 // what preserves that (Issue #296).
                 from_pane: None,
@@ -461,7 +461,7 @@ impl IpcCommand {
                     role: role.clone(),
                     cwd: resolve_cli_cwd(cwd.as_deref())?,
                     from_pane: None,
-                    // The CLI has no tab-placement flag: `renga split`
+                    // The CLI has no tab-placement flag: `renga-cp split`
                     // keeps splitting in the visible tab.
                     tab: None,
                 })
@@ -498,7 +498,7 @@ impl IpcCommand {
                     from_pane: None,
                 })
             }
-            // `renga events` subscribes unscoped: it is a generic tap
+            // `renga-cp events` subscribes unscoped: it is a generic tap
             // for shell scripts, not a pane's inbox, and it has no pane
             // identity of its own to declare (it runs from whatever
             // shell the operator typed it in, which may not be a renga
@@ -921,7 +921,7 @@ mod tests {
         }
     }
 
-    /// `renga events` must stay *unscoped* (`from_pane: None`). That is
+    /// `renga-cp events` must stay *unscoped* (`from_pane: None`). That is
     /// what keeps its output identical to every previous release under
     /// #306, and it keeps its wire form byte-identical too
     /// (`skip_serializing_if` drops the `None`, so the line is still
