@@ -456,11 +456,13 @@ against Copilot CLI 1.0.82:
   unexpected alternate screen still means some other full-screen program owns
   the pane. This is internal to the readiness predicate and changes no wire
   field.
-- Copilot prompts for **folder trust** on first launch in a directory, and for
-  approval on each tool use unless launched with `--allow-tool` /
-  `--allow-all-tools`. renga refuses to type into either dialog
-  (`user_turn_not_ready`), so an unattended worker pane usually wants
-  `args: ["--allow-tool=renga-peers"]`.
+- Copilot gates its composer behind up to three dialogs, and renga refuses to
+  type into any of them (`user_turn_not_ready`): **folder trust** on first
+  launch in a directory, a **session-restore picker** whenever that directory
+  has previous Copilot sessions, and per-tool approval unless launched with
+  `--allow-tool` / `--allow-all-tools`. `args: ["--allow-tool=renga-peers"]`
+  removes only the third; the first two need `send_keys` (`Enter` to trust,
+  `Esc` to start fresh), which is what `inspect_pane` is for.
 
 ### Common error wire format
 

@@ -918,8 +918,16 @@ fn render_panes(app: &mut App, frame: &mut Frame, area: Rect) -> Option<(u16, u1
                 |s| matches!(s.target, crate::app::SelectionTarget::Pane(id) if id == pane_id),
             );
             let claude_state = app.claude_monitor.state(pane_id);
-            let pane_caret =
-                render_single_pane(pane, is_focused, pane_sel, &claude_state, frame, rect);
+            let client_kind = app.pane_display_client_kind(app.active_tab, pane_id);
+            let pane_caret = render_single_pane(
+                pane,
+                is_focused,
+                pane_sel,
+                &claude_state,
+                client_kind,
+                frame,
+                rect,
+            );
             if is_focused {
                 caret = pane_caret;
             }
@@ -982,18 +990,22 @@ fn render_single_pane(
     is_focused: bool,
     selection: Option<&crate::app::TextSelection>,
     claude_state: &crate::claude_monitor::ClaudeState,
+    client_kind: Option<crate::ipc::PeerClientKind>,
     frame: &mut Frame,
     area: Rect,
 ) -> Option<(u16, u16)> {
-    // Cosmetic indicators (border accent, pane label) consume the
-    // sticky `*_ever_seen()` latches, not the live title check —
-    // Claude and Codex both rewrite their OSC titles to in-flight
-    // task summaries that frequently drop the literal client name,
-    // which would otherwise flip the indicators off mid-session
-    // even though the client is still interactive. See issue #209.
-    let is_claude = pane.claude_ever_seen();
-    let is_codex = pane.codex_ever_seen();
-    let is_copilot = pane.copilot_ever_seen();
+    // Cosmetic indicators (border accent, pane label) come from
+    // `App::pane_display_client_kind`, which prefers the pane's MCP
+    // registration and only falls back to the sticky `*_ever_seen()`
+    // title latches. Neither the live title check nor the latches can
+    // carry this alone: all three clients rewrite their OSC titles to
+    // in-flight task summaries that drop the literal client name (#209),
+    // and those same summaries can just as easily *gain* a rival
+    // client's name — renga's own peer nudge says `kind=claude` — which
+    // latched a Copilot worker as Claude for the rest of the session.
+    let is_claude = client_kind == Some(crate::ipc::PeerClientKind::Claude);
+    let is_codex = client_kind == Some(crate::ipc::PeerClientKind::Codex);
+    let is_copilot = client_kind == Some(crate::ipc::PeerClientKind::Copilot);
     let client_accent = if is_claude {
         Some(ACCENT_CLAUDE)
     } else if is_codex {

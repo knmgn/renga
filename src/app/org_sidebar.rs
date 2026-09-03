@@ -154,14 +154,14 @@ impl App {
                     // briefly outlive the pane map during teardown.
                     continue;
                 };
-                let kind = if pane.claude_ever_seen() {
-                    OrgPaneKind::Claude
-                } else if pane.codex_ever_seen() {
-                    OrgPaneKind::Codex
-                } else if pane.copilot_ever_seen() {
-                    OrgPaneKind::Copilot
-                } else {
-                    OrgPaneKind::Shell
+                // Same source as the pane label and border accent, so
+                // the sidebar row and the pane it points at cannot
+                // disagree about which client is in there.
+                let kind = match self.pane_display_client_kind(tab, pane_id) {
+                    Some(PeerClientKind::Claude) => OrgPaneKind::Claude,
+                    Some(PeerClientKind::Codex) => OrgPaneKind::Codex,
+                    Some(PeerClientKind::Copilot) => OrgPaneKind::Copilot,
+                    None => OrgPaneKind::Shell,
                 };
                 rows.push(OrgSidebarRow {
                     target: OrgSidebarTarget {
