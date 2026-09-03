@@ -14,7 +14,7 @@
 > proposal was cross-checked against `Cargo.toml` `version = "0.18.5"` (the
 > last pre-1.0 release).
 >
-> **Audience**: downstream callers (claude-org-ja workers, Codex peers,
+> **Audience**: downstream callers (claude-org-ja workers, Codex / Copilot peers,
 > third-party tooling that integrates with `renga-peers`).
 
 ## Stability legend
@@ -57,7 +57,8 @@ must accept these instead of JSON-RPC errors.
 |---|---|---|
 | `scope` (in) | `"machine"\|"directory"\|"repo"` | Optional; **ignored**. Accepted for wire-compat with `claude-peers-mcp`. Results always span every renga tab (#289; before that, the caller's tab only). |
 
-Result: text content listing `id`, `name`, `role`, `kind` (`claude`/`codex`),
+Result: text content listing `id`, `name`, `role`,
+`kind` (`claude`/`codex`/`copilot`),
 `receive_mode` (`push`/`pull`), `cwd`, plus display-only tab metadata
 (`tab` index, `tab_name`, `same_tab`) since #289. Every workspace is
 enumerated, the caller's own tab first. Empty case: `"No peers in any renga
@@ -112,8 +113,8 @@ deliver. See renga#221 for context.
 **Push-mode body banner (post-1.1)**: for Claude (push) recipients renga
 prepends a `📡 PEER MESSAGE — from {name} (id={id}) — NOT FROM USER` line
 to the body before pushing it as `notifications/claude/channel`. The original
-body is preserved verbatim after a blank line; pull-mode (Codex) deliveries
-are unaffected. See renga#221.
+body is preserved verbatim after a blank line; pull-mode (Codex, Copilot)
+deliveries are unaffected. See renga#221.
 
 Errors via `[code]`: `pane_not_found`, `pane_vanished`, `io_error`, plus the
 shared `app_timeout` / `shutting_down` / `internal` set. `deliver="user_turn"`
@@ -156,8 +157,9 @@ Input: `{}`.
 
 Result: text + `structuredContent.messages[]` (each entry has `from_id`,
 `from_name`, `from_kind`, `body`, `sent_at`) + `count`. Drains the local pull
-inbox. Used primarily by Codex panes; the returned text intentionally instructs
-the recipient to treat each body as an *instruction*, not transcript text.
+inbox. Used by every pull-mode client — Codex and Copilot panes. The returned
+text intentionally instructs the recipient to treat each body as an
+*instruction*, not transcript text.
 
 ### 1.5 `list_panes` — stable
 
@@ -426,6 +428,40 @@ this tool simply does not list it in `tools/list`, and a call yields
 advertises fewer tokens, which returns `status: "connected"` with a short or
 empty `capabilities` list.
 
+### 1.17 `spawn_copilot_pane` — stable
+
+Same envelope as `spawn_codex_pane`. `args` is appended after the literal
+`copilot` token, with the same POSIX shell quoting as §1.7.
+
+**Pre-condition**: the user must have run `renga mcp install --client copilot`
+so `RENGA_PEER_CLIENT_KIND=copilot` is injected into Copilot's MCP subprocess
+env. The handler verifies this up front by reading
+`~/.copilot/mcp-config.json` — or `$COPILOT_HOME/mcp-config.json` when that
+override is set — and requiring that
+`mcpServers["renga-peers"].env.RENGA_PEER_CLIENT_KIND` equals `"copilot"`. If
+the file is missing/unreadable, the entry is absent, or the value differs, the
+call returns a JSON-RPC `-32603` carrying the `[copilot_not_installed]` marker
+and the remediation hint
+`renga mcp install --client copilot`. Same rationale as §1.8: without the env
+var the new pane registers as a **push** client, and push rides
+`notifications/claude/channel`, which Copilot CLI does not implement — every
+peer message to that pane would be dropped with no error on either side.
+
+**Two Copilot-specific behaviors** callers should plan for, both measured
+against Copilot CLI 1.0.82:
+
+- Copilot draws its UI on the **alternate screen**. renga expects that for
+  panes it classifies as Copilot; a Copilot pane found on the *main* screen is
+  treated as one whose TUI is not up, and (as for Claude and Codex) an
+  unexpected alternate screen still means some other full-screen program owns
+  the pane. This is internal to the readiness predicate and changes no wire
+  field.
+- Copilot prompts for **folder trust** on first launch in a directory, and for
+  approval on each tool use unless launched with `--allow-tool` /
+  `--allow-all-tools`. renga refuses to type into either dialog
+  (`user_turn_not_ready`), so an unattended worker pane usually wants
+  `args: ["--allow-tool=renga-peers"]`.
+
 ### Common error wire format
 
 JSON-RPC error `message` is `[<code>] <human message>` per `fmt_code`. Codes
@@ -484,9 +520,9 @@ command (clap `conflicts_with_all`). When no selector is given, the default is
 | `renga events` | `--timeout <humantime::Duration>`, `--count <usize>` | `Request::Subscribe { from_pane: None }` + stream |
 | `renga rename` | `--name\|--id\|--focused`, `--to-name`/`--clear-name` (mutex), `--to-role`/`--clear-role` (mutex) | `Request::SetPaneIdentity` |
 | `renga mcp-peer` | — | (not IPC) handed off to `mcp_peer::run` for the stdio MCP loop |
-| `renga mcp install` | `--client <claude\|codex>` (default `claude`), `--force`, `--codex-auto-approve-peer-tools` | (writes Claude/Codex MCP config; not an IPC call) |
-| `renga mcp uninstall` | `--client <claude\|codex>` | (config write) |
-| `renga mcp status` | `--client <claude\|codex>` | (config read) |
+| `renga mcp install` | `--client <claude\|codex\|copilot>` (default `claude`), `--force`, `--codex-auto-approve-peer-tools` | (writes Claude/Codex/Copilot MCP config; not an IPC call) |
+| `renga mcp uninstall` | `--client <claude\|codex\|copilot>` | (config write) |
+| `renga mcp status` | `--client <claude\|codex\|copilot>` | (config read; for `copilot` also warns when the entry lacks `RENGA_PEER_CLIENT_KIND=copilot`) |
 
 **`renga list` and cross-tab enumeration (#329)**: the CLI sends `Request::List`
 with neither `from_pane` nor `tab`, so its scope is unchanged — the active tab,
@@ -521,7 +557,7 @@ These were de-facto stable; v1.0 makes them part of the formal contract.
 | `RENGA_SOCKET` | published by parent renga, read by children | Path to the IPC endpoint (Unix socket on Unix; Named Pipe path on Windows). |
 | `RENGA_TOKEN` | published by parent, read by children | Per-instance session token. Not a secret (same-user trust model); used as a PID-reuse defense. |
 | `RENGA_PANE_ID` | published per-PTY by renga, read by `renga mcp-peer` | Numeric pane id the MCP subprocess belongs to. Absent → MCP runs in **detached mode**. |
-| `RENGA_PEER_CLIENT_KIND` | injected by `renga mcp install --client codex` into Codex's MCP subprocess env | `"claude"` or `"codex"`. Defaults to `claude`. Selects the receive mode (`push` vs `pull`). |
+| `RENGA_PEER_CLIENT_KIND` | injected by `renga mcp install --client <codex\|copilot>` into that client's MCP subprocess env | `"claude"`, `"codex"` or `"copilot"`. Defaults to `claude`. Selects the receive mode: `claude` → `push`, `codex` / `copilot` → `pull`. |
 | `RENGA_LAYOUTS_DIR` | read by CLI | Override layout search root. |
 | `RENGA_NO_MACOS_TIP` | read by `macos_tip` | Set non-empty → suppress macOS first-launch banner. macOS-only. |
 
@@ -583,7 +619,7 @@ Server budgets: 5 s `APP_REPLY_TIMEOUT` (server → app event loop) +
 | `inspect` | `target: PaneRef`, `lines?`, `include_cursor: bool` (default false) | `lines` beyond the visible height reads scrollback since v1.4 (#278) — see §1.12. |
 | `peer_list` | `from_pane: usize` | |
 | `peer_send` | `from_pane: usize`, `target: PaneRef`, `body: string`, `deliver?: channel\|user_turn` | Cross-tab ids deliver since #289; names resolve in the sender's tab only; unresolvable targets fail `pane_not_found`. `deliver` (#323) is `skip_serializing_if = "is_channel"`, so a channel send is byte-identical on the wire to a pre-#323 one; senders must gate `user_turn` on `peer_user_turn` (§3.4). |
-| `peer_register_client` | `pane_id: usize`, `kind: claude\|codex` | Posted by `renga mcp-peer` on startup. |
+| `peer_register_client` | `pane_id: usize`, `kind: claude\|codex\|copilot` | Posted by `renga mcp-peer` on startup. |
 | `set_pane_identity` | `target: PaneRef`, `name?`, `role?` (three-state: missing / null / value), `from_pane?: usize` | Uses serde `double_option`. `from_pane` (#296) behaves exactly as on `close`. |
 | `set_summary` | `from_pane: usize`, `summary: string` | Empty `summary` clears. >256 `chars` rejected with `summary_too_long`. |
 
@@ -822,8 +858,8 @@ these as `[<code>] <human message>` in JSON-RPC error message strings.
 | `pane_not_found` | pane-targeted requests | `PaneRef` did not resolve. |
 | `pane_vanished` | pane-targeted requests | Resolved then disappeared mid-flight. Rare. |
 | `split_refused` | `split`, `spawn_*` (and layout TOML apply); `spawn_tab` only for a terminal below the layout threshold | **Narrowed in 3.0 (#335)** — through 2.x it folded the two causes below into one code, so a caller could not tell a retryable target from a full tab. From 3.0 it means *neither* of them: a terminal below the layout threshold, or the workspace-vanished race. Read from a 2.x server it still means "one of the two, unspecified", so a client that has not confirmed `split_refusal_causes` (§3.4) must keep that weaker reading. Corrected in #290: `new_tab` never returned this — its capacity failure is `tab_limit_reached`. |
-| `target_too_small` | `split`, `spawn_pane` / `spawn_claude_pane` / `spawn_codex_pane` (#335, 3.0) | Halving the **target pane** along the requested axis would fall below `min_pane_width` / `min_pane_height`. **Target-local**: the tab is not full, and the message carries the observed numbers (the target's extent on the split axis, the size each half would get, the minimum required, and the tab's pane count against MAX_PANES) so a caller can retry against a bigger target or the other direction. |
-| `pane_limit_reached` | `split`, `spawn_pane` / `spawn_claude_pane` / `spawn_codex_pane` (#335, 3.0) | The **tab** already holds MAX_PANES = 16 panes. **Tab-global**: no target in it will split; close a pane or use `tab: {new: …}`. Checked before geometry, so it wins over `target_too_small`. Distinct from `tab_limit_reached`, which is about the number of tabs. |
+| `target_too_small` | `split`, `spawn_pane` / `spawn_claude_pane` / `spawn_codex_pane` / `spawn_copilot_pane` (#335, 3.0) | Halving the **target pane** along the requested axis would fall below `min_pane_width` / `min_pane_height`. **Target-local**: the tab is not full, and the message carries the observed numbers (the target's extent on the split axis, the size each half would get, the minimum required, and the tab's pane count against MAX_PANES) so a caller can retry against a bigger target or the other direction. |
+| `pane_limit_reached` | `split`, `spawn_pane` / `spawn_claude_pane` / `spawn_codex_pane` / `spawn_copilot_pane` (#335, 3.0) | The **tab** already holds MAX_PANES = 16 panes. **Tab-global**: no target in it will split; close a pane or use `tab: {new: …}`. Checked before geometry, so it wins over `target_too_small`. Distinct from `tab_limit_reached`, which is about the number of tabs. |
 | `io_error` | requests with PTY side-effects | OS-level write/spawn failure. |
 | `last_pane` | `close` | Refused to remove the only pane of the only tab. |
 | `cwd_invalid` | `split`, `new_tab`, `spawn_tab` | `cwd` missing or not a directory. Pre-mutation rejection — no half-mutated layout. |
@@ -834,12 +870,13 @@ these as `[<code>] <human message>` in JSON-RPC error message strings.
 | `tab_ambiguous` | `split` with `tab`; `list` with `tab` (#329) | `{name}` matched several tabs. Labels are not unique; the server never first-matches — re-address via `{index}` or `{pane_id}`. |
 | `target_tab_mismatch` | `split` with `tab` | Numeric `target` lives in a different tab than the selector picked. The request contradicts itself; refused instead of following either half. |
 | `tab_limit_reached` | `new_tab`, `spawn_tab` | MAX_TABS = 16 tabs already open. Deliberately not `pane_limit_reached`, which is about pane capacity inside one tab. |
-| `user_turn_not_ready` | `peer_send` with `deliver: user_turn`, `send_message` (#323) | No empty, focused agent composer could be positively identified on the target's screen — a modal, a permission prompt, a folder-trust dialog, an existing draft, a scrolled-back pane, or a screen renga cannot read. Detection is *positive*, so an unrecognized Claude/Codex UI revision fails closed here. **Nothing was written**; clear the blocker (usually with `send_keys`) and retry. |
+| `user_turn_not_ready` | `peer_send` with `deliver: user_turn`, `send_message` (#323) | No empty, focused agent composer could be positively identified on the target's screen — a modal, a permission prompt, a folder-trust dialog, an existing draft, a scrolled-back pane, or a screen renga cannot read. Copilot's per-tool approval prompt lands here too, alongside its folder-trust dialog. Detection is *positive*, so an unrecognized Claude/Codex/Copilot UI revision fails closed here. **Nothing was written**; clear the blocker (usually with `send_keys`) and retry. |
 | `user_turn_busy` | `peer_send` with `deliver: user_turn`, `send_message` (#323) | The target agent is mid-turn. Refused rather than queued, so "this call submitted a turn" never degrades into "this may become a turn later". **Nothing was written.** |
 | `user_turn_unsupported_target` | `peer_send` with `deliver: user_turn`, `send_message` (#323) | The target pane is not running an agent that takes turns (a plain shell, another full-screen TUI, or a pane whose startup command has not run yet). Distinct from `user_turn_not_ready`: retrying will not help until what the pane runs changes. **Nothing was written.** |
 | `user_turn_invalid_body` | `peer_send` with `deliver: user_turn`, `send_message` (#323) | The body cannot be typed as a turn: empty/whitespace, carries control characters, or is multi-line against a target that has not enabled bracketed paste (raw newlines would submit the first line and drive the UI with the rest). Retryable only with a different body; **nothing was written**. |
 | `user_turn_stalled` | `peer_send` with `deliver: user_turn`, `send_message` (#323) | Body bytes reached the composer but submission was never observed. **The outcome is uncertain and bytes were written** — the only user-turn code for which that is true. Inspect the pane before retrying; an immediate identical retry is suppressed by the 5s user-turn dedupe window rather than firing a second `/clear`. |
 | `codex_not_installed` | `spawn_codex_pane` | Codex's `~/.codex/config.toml` is missing the renga-peers entry, the file is unreadable, or the `RENGA_PEER_CLIENT_KIND=codex` env-var passthrough is absent. Surfaced from the MCP layer (not `renga::ipc::err_code`); branch on the `[code]` token same as the others. Run `renga mcp install --client codex` to remediate. |
+| `copilot_not_installed` | `spawn_copilot_pane` | Copilot's `~/.copilot/mcp-config.json` (or `$COPILOT_HOME/mcp-config.json`) is missing, unreadable, has no renga-peers entry, or that entry's `env` lacks `RENGA_PEER_CLIENT_KIND=copilot`. Surfaced from the MCP layer (not `renga::ipc::err_code`), same as `codex_not_installed`. Run `renga mcp install --client copilot` to remediate. |
 | `server_too_old` | any capability-gated call (§3.4) | The connected server did not advertise the capability the call needs, so the client refused to send it. Raised **client-side** by `require_capability` and surfaced from the MCP layer (not `renga::ipc::err_code`); branch on the `[code]` token same as the others. The message names the advertised set and the remedy: the running renga *process* predates the feature even when the binary on disk does not, so restart renga. |
 
 ### 5.2 JSON-RPC numeric codes (Q9)
@@ -879,7 +916,8 @@ major version.
   tools require an explicit `target`.
 - **Tab scoping (Q4)**: `list_panes`, `focus_pane`, `send_message`,
   `inspect_pane`, `send_keys`, `spawn_pane`, `spawn_claude_pane`,
-  `spawn_codex_pane`, `close_pane`, `set_pane_identity`, and `peer_send` are
+  `spawn_codex_pane`, `spawn_copilot_pane`, `close_pane`, `set_pane_identity`,
+  and `peer_send` are
   **scoped to the caller's tab** — the tab the calling pane lives in, *not*
   whichever tab the user is currently looking at (Issue #288; before that fix
   these resolved against the visible tab, which silently misdirected every
@@ -937,7 +975,8 @@ minor release.
   --dangerously-load-...` rewrite (Q3). Callers who need verbatim execution
   must use a non-`claude` leading token (e.g. `bash -c '…'`).
 - **Per-call `min_pane_width` / `min_pane_height`** on `spawn_pane` /
-  `spawn_claude_pane` / `spawn_codex_pane`. Process-global only.
+  `spawn_claude_pane` / `spawn_codex_pane` / `spawn_copilot_pane`.
+  Process-global only.
 - **`peer_*` IPC variant naming as a stable surface**. The peer-routing
   subset of `Request` is reachable from downstream only via the MCP layer
   (§1) and the CLI (§2); the Rust-level variant names are not promised.
@@ -956,7 +995,7 @@ minor release.
 
 | Section | Count |
 |---|---|
-| MCP tools (§1) | 16 |
+| MCP tools (§1) | 17 |
 | CLI top-level flags (§2.1) | 12 |
 | CLI IPC subcommands (§2.2) | 13 |
 | Env vars (§2.3) | 6 |
