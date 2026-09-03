@@ -106,11 +106,24 @@ gh pr create --repo suisya-systems/renga --base main
 
 ## ブランチ保護
 
-**このフォークには現在ブランチ保護を設定していません。** 保護設定やルールセットはフォークに継承されないため、上流の「main は PR 必須」はここには効いていません。単独メンテナのリポジトリなので `main` へ直接 push できます。
+保護設定やルールセットはフォークに継承されないため、この設定はフォーク作成後に改めて入れたものです。
 
-とはいえ運用としては PR 経由を推奨します。CI (`.github/workflows/ci.yml`) は `pull_request` と `main` への push の両方で走るので、PR にすればマージ前に rustfmt / clippy / 3 プラットフォームの test を通せます。強制したくなったら上流と同じ設定を入れてください:
+`main` に対して:
 
-- `main`: PR 必須 / CI 必須 / force-push 禁止 / 直 push 禁止
+- **PR 必須** (直 push 禁止)。ただし **必要な approve 数は 0** — 単独メンテナのリポジトリで 1 以上にすると、自分の PR を自分で承認できず永久にマージできなくなるため
+- **CI 必須**: `rustfmt` / `clippy` / `clippy (windows)` / `cargo-audit` / `test (ubuntu-latest)` / `test (macos-latest)` / `test (windows-latest)` の 7 チェック
+- **force-push 禁止 / ブランチ削除禁止**
+- **管理者にも適用** (`enforce_admins: true`)。オフにすると owner は素通しできてしまい、保護が実質無効になるため
+
+急ぎで直 push したくなったら、一時的に外して戻します:
+
+```bash
+gh api -X DELETE repos/knmgn/renga/branches/main/protection/enforce_admins
+# ... 作業 ...
+gh api -X POST   repos/knmgn/renga/branches/main/protection/enforce_admins
+```
+
+タグ push は保護の対象外なので、リリース手順は影響を受けません。
 
 ## 関連
 
