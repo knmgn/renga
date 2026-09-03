@@ -740,6 +740,73 @@ fn a_copilot_title_alone_expects_pull_delivery() {
     app.shutdown();
 }
 
+/// The display dispatch must not be decided by the title latches
+/// alone.
+///
+/// This is the exact live failure that prompted the split: Copilot
+/// rewrites its OSC title to `<summary> - GitHub Copilot`, and when a
+/// Claude orchestrator nudges it renga's own message says
+/// `kind=claude`, so the summary Copilot generates for that turn can
+/// contain the word. `claude_seen` then latches for good, and a
+/// dispatch that tests Claude first repaints a Copilot worker as a
+/// Claude pane — wrong label, wrong accent, and a Claude status suffix
+/// reporting some other session's token counts out of the shared cwd.
+#[test]
+fn a_registered_copilot_pane_displays_as_copilot_despite_a_claude_title_latch() {
+    let mut app = App::new(40, 80).expect("App::new");
+    let pane_id = app.ws().focused_pane_id;
+    if let Some(pane) = app.ws_mut().panes.get_mut(&pane_id) {
+        // Both latches set: Copilot's own title landed first, then a
+        // task summary mentioning Claude latched the other one. They
+        // are independent booleans, so this is a reachable state, not
+        // a contrived one.
+        pane.copilot_seen
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        pane.claude_seen
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+    app.peer_client_kinds
+        .insert(pane_id, PeerClientKind::Copilot);
+
+    assert_eq!(
+        app.pane_display_client_kind(app.active_tab, pane_id),
+        Some(PeerClientKind::Copilot),
+        "registration is a fact the pane reported; the title is a guess"
+    );
+    app.shutdown();
+}
+
+/// Without a registration the latches are all there is — a client
+/// launched outside the renga-peers MCP server never registers — and
+/// the more specific title has to win, or the same collision reappears
+/// one layer down.
+#[test]
+fn an_unregistered_pane_falls_back_to_the_title_latch_copilot_first() {
+    let mut app = App::new(40, 80).expect("App::new");
+    let pane_id = app.ws().focused_pane_id;
+    if let Some(pane) = app.ws_mut().panes.get_mut(&pane_id) {
+        pane.copilot_seen
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        pane.claude_seen
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+    assert_eq!(
+        app.pane_display_client_kind(app.active_tab, pane_id),
+        Some(PeerClientKind::Copilot)
+    );
+
+    // A plain shell stays a plain shell.
+    let shell = app.ws().focused_pane_id;
+    if let Some(pane) = app.ws_mut().panes.get_mut(&shell) {
+        pane.copilot_seen
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        pane.claude_seen
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+    }
+    assert_eq!(app.pane_display_client_kind(app.active_tab, shell), None);
+    app.shutdown();
+}
+
 #[test]
 fn pane_expects_codex_peer_delivery_accepts_pending_codex_startup() {
     let mut app = App::new(40, 80).expect("App::new");

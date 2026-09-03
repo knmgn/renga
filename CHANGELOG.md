@@ -42,6 +42,28 @@ rules in [`docs/semver-policy-2.0.md`](./docs/semver-policy-2.0.md).
   known upstream false warning (github/copilot-cli#1707, #1976, #2236)
   and does not stop the server loading.
 
+- **The pane label, border accent and org-sidebar row now follow the
+  pane's MCP registration, not its window title.** Found by running the
+  feature above against a live Copilot pane rather than by reading the
+  code. Copilot rewrites its OSC title to `<task summary> - GitHub
+  Copilot`, and the nudge renga itself types into a pull-mode worker
+  says `kind=claude` whenever the sender is a Claude pane — so a Copilot
+  worker driven by a Claude orchestrator summarizes a task whose text
+  contains "claude", latches `claude_seen`, and (the dispatch tested
+  Claude first) repainted itself as a Claude pane for the rest of the
+  session: orange border, `claude` label, and a Claude status suffix
+  reading another session's token counts out of the shared cwd.
+
+  `App::pane_display_client_kind` now answers the display question the
+  way `pane_expects_pull_peer_delivery` already answered the delivery
+  one: registration is a fact the pane's MCP subprocess reported, the
+  title is a guess. The title latches remain the fallback for a client
+  launched without the renga-peers server, with the more specific title
+  winning. The bug predates Copilot — a Codex pane whose summary
+  mentioned Claude would have flipped the same way — but nothing made
+  it reliable until renga started putting `kind=claude` into a rival
+  client's transcript.
+
 ## [3.0.0] — 2026-08-29
 
 > **Major release.** Governed by

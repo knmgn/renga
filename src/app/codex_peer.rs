@@ -506,6 +506,53 @@ impl App {
             .is_some_and(|pane| pane.is_codex_running() || pending_startup_looks_like_codex(pane))
     }
 
+    /// Which client renga should *display* for `pane_id` — pane label,
+    /// border accent, org-sidebar row — or `None` for a plain shell.
+    ///
+    /// Registration wins over the `*_ever_seen()` title latches, for the
+    /// same reason it wins in [`Self::pane_expects_pull_peer_delivery`].
+    /// The display path was left on the latches alone, and the Copilot
+    /// arm made that reliably wrong rather than merely fragile: the
+    /// latches are substring matches against a title the agent owns,
+    /// every one of these clients rewrites that title to an
+    /// LLM-generated summary of the task in flight, and the nudge renga
+    /// itself types into a pull-mode worker carries `kind=claude`
+    /// whenever the sender is a Claude pane. A Copilot worker driven by
+    /// a Claude orchestrator therefore summarizes a task whose text
+    /// contains "claude", latches `claude_seen`, and — because the
+    /// dispatch tested Claude first — repainted itself as a Claude pane
+    /// for the rest of the session: orange border, `claude` label, and
+    /// the Claude status suffix reading another session's token counts
+    /// out of the shared cwd. Measured on a live pane
+    /// (`OSC 0;Run Check Messages Workflow - GitHub Copilot`), not
+    /// hypothesized.
+    ///
+    /// The latches stay the fallback. A client launched without the
+    /// renga-peers MCP server never registers, and for it the title is
+    /// the only evidence there is.
+    pub(crate) fn pane_display_client_kind(
+        &self,
+        ws_index: usize,
+        pane_id: usize,
+    ) -> Option<PeerClientKind> {
+        if let Some(kind) = self.peer_client_kinds.get(&pane_id) {
+            return Some(*kind);
+        }
+        let pane = self.workspaces.get(ws_index)?.panes.get(&pane_id)?;
+        // Copilot before Claude, as in `user_turn_agent_for_pane`: the
+        // latches are independent booleans, so a pane can hold more
+        // than one, and the more specific title wins.
+        if pane.copilot_ever_seen() {
+            Some(PeerClientKind::Copilot)
+        } else if pane.codex_ever_seen() {
+            Some(PeerClientKind::Codex)
+        } else if pane.claude_ever_seen() {
+            Some(PeerClientKind::Claude)
+        } else {
+            None
+        }
+    }
+
     /// Whether a pull-mode pane is in a state where renga may type a
     /// `check_messages` nudge into its composer.
     ///
