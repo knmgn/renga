@@ -1,11 +1,11 @@
-# Peer messaging between Claude Code and Codex panes
+# Peer messaging between Claude Code, Codex, and Copilot panes
 
 import { Callout } from 'nextra/components'
 
-Let mixed Claude Code and Codex instances running under the same renga session exchange structured messages through `renga-peers` — across every tab since Issue #289. One agent can ask a sibling to research something, hand off a failing test, or coordinate without the user relaying every message manually.
+Let mixed Claude Code, Codex, and GitHub Copilot CLI instances running under the same renga session exchange structured messages through `renga-peers` — across every tab since Issue #289. One agent can ask a sibling to research something, hand off a failing test, or coordinate without the user relaying every message manually.
 
 <Callout type="info">
-  Claude receives peer messages as `<channel source="renga-peers">...</channel>` tags, which keeps them distinct from user input. Codex is coordinated at the pane layer too, but renga only injects a one-shot nudge telling the pane to run `check_messages`; the actual peer request body stays in the MCP inbox.
+  Claude receives peer messages as `<channel source="renga-peers">...</channel>` tags, which keeps them distinct from user input. Codex and Copilot are coordinated at the pane layer instead: renga injects a one-shot nudge telling the pane to run `check_messages`, and the actual peer request body stays in the MCP inbox. Copilot is on the pull side because push rides `notifications/claude/channel`, a Claude-only JSON-RPC method it does not implement — a pushed message would vanish with no error on either side.
 </Callout>
 
 ## Scope authority: the renga session
@@ -19,24 +19,30 @@ Channel names differ (`server:renga-peers` vs `server:claude-peers`), so the two
 ```bash
 renga mcp install --client claude
 renga mcp install --client codex
+renga mcp install --client copilot
 ```
 
-Registers the running `renga` binary as the `renga-peers` MCP server in each selected client's user-scope config. Internally shells out to `claude mcp add-json` for Claude and `codex mcp add` for Codex first, so the primary registration path still goes through the client CLIs.
+Registers the running `renga` binary as the `renga-peers` MCP server in each selected client's user-scope config. Internally shells out to `claude mcp add-json` for Claude, `codex mcp add` for Codex, and `copilot mcp add --env` for Copilot first, so the primary registration path still goes through the client CLIs.
 
 For Codex, renga also applies the minimum post-registration patch needed to preserve the required env-var passthrough on the `renga-peers` entry in `~/.codex/config.toml`. If you also want `check_messages` and `send_message` to default to auto-approve, opt in explicitly with `--codex-auto-approve-peer-tools`. It intentionally does not auto-approve riskier tools such as `send_keys` or pane-control actions.
+
+For Copilot there is no post-registration patch and no equivalent flag: `copilot mcp add --env` writes `RENGA_PEER_CLIENT_KIND=copilot` straight into `~/.copilot/mcp-config.json` (or `$COPILOT_HOME/mcp-config.json`), and tool approval is a launch-time concern there — pass `--allow-tool='renga-peers'` on the `copilot` command line. Copilot exposes the tools namespaced as `renga-peers-<tool>`.
 
 Idempotent — re-runs without `--force` print the current entry and bail. Pass `--force` to overwrite after a renga upgrade. Use `renga mcp uninstall --client ...` to remove and `renga mcp status --client ...` to inspect.
 
 <Callout type="warning">
-  `renga mcp install --client ...` fails if the selected client CLI is not on PATH. Install Claude Code and/or Codex first.
+  `renga mcp install --client ...` fails if the selected client CLI is not on PATH. Install Claude Code, Codex, and/or GitHub Copilot CLI first.
+
+  Copilot CLI may also print *"Third-party MCP servers are disabled by your organization's Copilot policy"* on a personal account where no such policy applies. That is a known upstream false warning ([#1707](https://github.com/github/copilot-cli/issues/1707), [#1976](https://github.com/github/copilot-cli/issues/1976), [#2236](https://github.com/github/copilot-cli/issues/2236)) and does not stop `renga-peers` loading — confirm with `renga mcp status --client copilot`, which additionally warns when the entry exists but lost its env var.
 </Callout>
 
-## Launching Claude Code and Codex as peers
+## Launching Claude Code, Codex, and Copilot as peers
 
 Peer delivery is asymmetric:
 
 - Claude Code uses MCP's experimental channel protocol and needs `--dangerously-load-development-channels server:renga-peers` at startup.
 - Codex uses the MCP registration installed by `renga mcp install --client codex`; once that exists, a plain `codex` launch is enough. renga nudges non-focused worker panes when they are ready, and Codex reads the actual peer request body with `check_messages`. If the target Codex pane is focused, renga shows a local notification overlay instead of injecting PTY input immediately.
+- GitHub Copilot CLI works the same pull way off `renga mcp install --client copilot`, so a plain `copilot` launch is enough. It differs from the other two in where it draws — Copilot renders on the **alternate screen**, which renga expects for Copilot panes specifically — and in how many dialogs stand between launch and a usable composer: folder trust on first launch in a directory, a session-restore picker whenever that directory has earlier Copilot sessions, and per-tool approval unless launched with `--allow-tool` / `--allow-all-tools`. renga types into none of them.
 
 <Callout type="warning">
   Peer messaging on Codex is currently less stable than on Claude by design. Two constraints matter: Codex receives via pull-based `check_messages`, and MCP approvals are pane-local rather than shared across panes. The on-screen `pending messages` prompt can therefore become stale; treat `check_messages` as the source of truth.
@@ -69,6 +75,10 @@ An explicit `--command "…"` overrides the auto-launch, so the role path is a d
 
 Once Codex is registered, orchestrator panes can launch Codex workers directly with `spawn_codex_pane(direction, …)`. The helper builds the final `codex ...` command with renga-owned shell quoting, so the caller does not need to synthesize a free-form shell string.
 
+### `spawn_copilot_pane` — in-band Copilot worker launch
+
+The same shape one client over: `spawn_copilot_pane(direction, …)` builds the `copilot ...` command with renga-owned quoting. Because renga will not answer Copilot's startup dialogs, an unattended worker usually wants `args: ["--allow-tool=renga-peers"]`, and still needs `send_keys(target=…, keys=["Enter"])` to accept folder trust plus `keys=["Esc"]` to start a fresh session before it can receive anything. `inspect_pane` is how you tell which of those it is waiting on.
+
 ## Tool surface
 
 Exposed by the MCP server to each Claude pane:
@@ -79,7 +89,7 @@ Exposed by the MCP server to each Claude pane:
 |---|---|
 | `list_peers(scope?)` | Lists other panes across **all** renga tabs, the caller's own tab first (#289). Caller excluded. Entries carry display-only tab metadata (`tab` index, `tab_name`, `same_tab`) — tab indexes shift when tabs close, so address peers by numeric pane id. `scope` is accepted for wire-compat with `claude-peers-mcp` but ignored. |
 | `send_message(to_id, message, deliver?)` | Delivers to a peer in any tab by **numeric pane id**, or to a same-tab peer by stable name — names are unique per tab, not globally, so they never resolve across tabs (#289). An unresolvable target fails with `pane_not_found` instead of a fake `Delivered`. `deliver` picks the delivery *semantics*: `"channel"` (default, unchanged) shows the body without taking the recipient's turn; `"user_turn"` submits it as a real turn (#323 — see below). |
-| `check_messages` | Drain queued peer messages waiting for this client. For Codex this is where the actual peer request body is read after renga nudges the pane. Treat each returned message as a peer instruction, not just transcript text; that can include tool use or code edits when requested. |
+| `check_messages` | Drain queued peer messages waiting for this client. For Codex and Copilot this is where the actual peer request body is read after renga nudges the pane. Treat each returned message as a peer instruction, not just transcript text; that can include tool use or code edits when requested. |
 | `set_summary(summary)` | Set or clear a 1-2 sentence per-pane summary. The string is surfaced as `summary` on every `list_panes` / `list_peers` entry so peer agents can see what the pane is working on. Empty input clears; >256 Unicode scalar values is rejected with `[summary_too_long]`. In-memory only — not persisted across renga restart. |
 
 ### Channel delivery vs. user-turn delivery
@@ -142,6 +152,7 @@ delivery out of `send_keys`.
 | `spawn_pane(direction?, …)` | Splits a target pane. Optional `command`, `name`, `role`, `cwd`, and — since #290 — a `tab` placement selector (see below). A bare `command="claude"` (or `claude <args>`) is auto-upgraded to the `Alt+P` peer-enabled launch line so the new pane joins the `renga-peers` network without the caller having to remember `--dangerously-load-development-channels`. |
 | `spawn_claude_pane(direction?, …)` | Higher-level convenience for launching Claude. Accepts the same `tab` placement selector as `spawn_pane`. Takes structured `permission_mode` / `model` / `args[]` fields instead of a free-form command string, always enables the peer channel, and keeps launch policy in renga. Reserved flags (`--dangerously-load-development-channels` / `--permission-mode` / `--model`) inside `args[]` are rejected with `invalid-params`. |
 | `spawn_codex_pane(direction?, …)` | Higher-level convenience for launching Codex. Accepts the same `tab` placement selector as `spawn_pane`. Takes structured `args[]`, builds the final `codex ...` command with renga-owned shell quoting, and relies on `renga mcp install --client codex` for the MCP-side `RENGA_PEER_CLIENT_KIND=codex` registration. |
+| `spawn_copilot_pane(direction?, …)` | Higher-level convenience for launching GitHub Copilot CLI, with the same `tab` selector and structured `args[]`. Relies on `renga mcp install --client copilot` for the `RENGA_PEER_CLIENT_KIND=copilot` registration and refuses with `[copilot_not_installed]` without it. |
 | `close_pane(target)` | Closes a pane. Relative targets (`"focused"`, a name) resolve inside the caller's own tab; a numeric id may reach any tab (#296 — before it, `"focused"` meant the pane the *user* was looking at). Closing the only pane of a tab closes that whole tab when other tabs exist; only the last pane of the only tab is refused with `last_pane`. |
 | `focus_pane(target)` | Moves keyboard focus. **If the resolved pane is not in the tab the user is currently viewing, the visible tab switches to it** — deliberately so, since focus the keyboard cannot reach is not focus, but it makes this the most disruptive pane tool. Use sparingly. |
 | `new_tab(…)` | Opens a brand-new tab with a fresh pane and switches focus to it. Accepts the same `cwd` option as `spawn_pane`, plus the same `claude` auto-upgrade when `command`'s leading token is exactly `claude`. For a **background** tab that leaves the user's view alone, use `spawn_pane` with `tab={"new": {}}` instead. Tab creation caps at 16 tabs (`tab_limit_reached`). |
@@ -163,7 +174,7 @@ delivery out of `send_keys`.
 
 Use `cwd` on `spawn_pane` / `new_tab` instead of embedding `cd <dir> && ...` inside `command`. That keeps path resolution structured and preserves the `claude` auto-upgrade, which only fires when `command`'s leading token is exactly `claude`.
 
-**Tab placement (#290).** The three `spawn_*` tools take an optional `tab` selector choosing which tab hosts the new pane: `{"name": "workers"}` (exact display-name match — zero matches fail `tab_not_found`, several fail `tab_ambiguous`), `{"index": 2}` (0-based, as reported by `list_peers`), `{"pane_id": 17}` (the tab owning that pane — the stable anchor), or `{"new": {}}` / `{"new": {"name": "workers"}}` for a fresh single-pane **background** tab (the visible tab does not change; omit `direction` / `target`, and an omitted `cwd` inherits the caller pane's cwd). With an existing-tab selector, `target` resolves inside the selected tab; a numeric target from another tab fails `target_tab_mismatch`. Requires a server advertising the `spawn_tab` capability — older servers are refused with `[server_too_old]` instead of spawning into the wrong tab.
+**Tab placement (#290).** The `spawn_*` tools take an optional `tab` selector choosing which tab hosts the new pane: `{"name": "workers"}` (exact display-name match — zero matches fail `tab_not_found`, several fail `tab_ambiguous`), `{"index": 2}` (0-based, as reported by `list_peers`), `{"pane_id": 17}` (the tab owning that pane — the stable anchor), or `{"new": {}}` / `{"new": {"name": "workers"}}` for a fresh single-pane **background** tab (the visible tab does not change; omit `direction` / `target`, and an omitted `cwd` inherits the caller pane's cwd). With an existing-tab selector, `target` resolves inside the selected tab; a numeric target from another tab fails `target_tab_mismatch`. Requires a server advertising the `spawn_tab` capability — older servers are refused with `[server_too_old]` instead of spawning into the wrong tab.
 
 **Cross-tab enumeration (#329).** `list_panes` takes the same three tab shapes — `{"name": "workers"}`, `{"index": 2}`, `{"pane_id": 17}` — plus `{"all": true}` for every tab, the caller's own first and the rest in index order. `{"new": …}` is not accepted: there is nothing to list in a tab that does not exist yet. Omitting `tab` keeps the pre-#329 behavior exactly, so this is an addition, not a replacement. It is an **enumeration** surface only — pane placement and addressing are unchanged, and numeric ids already reached across tabs (#289); what was missing was the ability to *find* a pane whose id you never held, e.g. a worker parked in a background tab, which otherwise drops out of an orchestrator's monitoring population and capacity count. A record's `id` remains the only tab-stable address (`tab` / `tab_name` are display metadata and shift when tabs close), and `cwd` — not `name` — is what discriminates: two independent orchestrations running in different tabs each have a `dispatcher` and a `worker-<task_id>`. When the request carries both a `tab` selector and a caller pane, records also carry `same_tab`, which answers "can I address this one by bare name". Unresolvable selectors fail with the same codes the spawn path uses: `tab_not_found` / `tab_ambiguous` / `pane_not_found`. Requires a server advertising the `cross_tab_list` capability; an older one drops the unknown `tab` field and answers with the caller's tab alone — a well-formed reply indistinguishable from a correct one — so the tool refuses with `[server_too_old]` rather than let an orchestrator retire live panes it can no longer see.
 
@@ -244,6 +255,16 @@ The pane-local nudge is not a continuously-synchronised banner. It is a one-shot
 
 If `check_messages` returns 0, treat the on-screen nudge as stale. The real inbox is already empty.
 
+### `spawn_copilot_pane` fails with `[copilot_not_installed]`
+
+The same check one config file over. The handler requires `mcpServers["renga-peers"].env.RENGA_PEER_CLIENT_KIND == "copilot"` in `~/.copilot/mcp-config.json` (or `$COPILOT_HOME/mcp-config.json`) and refuses otherwise, rather than spawning a pane that registers as a push client and drops every peer message it is sent.
+
+Run `renga mcp install --client copilot`. Like the Codex path it self-heals an entry that exists but lost its env var, so `--force` is not needed.
+
+### A Copilot pane never picks up its messages
+
+Check the pane before the config. Copilot keeps an empty, framed composer on screen for the whole time it is working, so a busy pane looks identical to an idle one except for the `esc interrupt` footer; renga reads that footer and holds the nudge until it clears. The other stalls are the dialogs renga will not answer: folder trust, the session-restore picker, and per-tool approval when the pane was launched without `--allow-tool='renga-peers'`. Clear the first two with `send_keys` (`Enter`, then `Esc`). The queued body stays in the MCP inbox either way, so the pane can drain it with `check_messages` once unblocked.
+
 ### `spawn_codex_pane` fails with `[codex_not_installed]`
 
 The handler verifies up front that Codex's MCP config (`~/.codex/config.toml`) registers the renga-peers entry with `[mcp_servers.renga-peers.env] RENGA_PEER_CLIENT_KIND = "codex"`. If the file is missing/unreadable, the entry is absent, or the env value is missing or different, the call returns JSON-RPC `-32603` carrying the `[codex_not_installed]` marker instead of silently spawning a pane that registers as a `claude` (push) client.
@@ -276,7 +297,7 @@ Loop with the returned `next_since` cursor. If you ever receive an `events_dropp
 
 ### `renga mcp install` fails
 
-- The selected client CLI is not on PATH → install Claude Code and/or Codex first.
+- The selected client CLI is not on PATH → install Claude Code, Codex, and/or GitHub Copilot CLI first.
 - Another `renga-peers` entry exists → pass `--force` to overwrite, or `renga mcp uninstall` and re-run.
 
 ### Peers stopped connecting after a renga upgrade
@@ -286,13 +307,14 @@ The registered command path is stale. Refresh it:
 ```bash
 renga mcp install --client claude --force
 renga mcp install --client codex --force
+renga mcp install --client copilot --force
 ```
 
 ## Out of scope
 
 - **Broadcast.** Cross-tab point-to-point messaging landed in #289; a `broadcast_tab` tool remains a candidate for later.
 - **Persistent history.** Session-lifetime storage matches the feature's natural scope.
-- **Non-MCP peers.** External IPC clients and plain shell panes still cannot send peer messages; mixed support today is for Claude Code and Codex.
+- **Non-MCP peers.** External IPC clients and plain shell panes still cannot send peer messages; mixed support today is for Claude Code, Codex, and GitHub Copilot CLI.
 - **Attachments / structured request-response.** Body is text; no correlation ids.
 
 ## References

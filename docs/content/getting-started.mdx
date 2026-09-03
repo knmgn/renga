@@ -5,7 +5,7 @@
 - [Node.js](https://nodejs.org/)（npm 経由でインストールする場合）
 - ターミナルエミュレータ（Windows Terminal、iTerm2 など）
 - Windows の場合: [Git for Windows](https://git-scm.com/download/win)（Git Bash が含まれます。cd 追従のため推奨）
-- [Claude Code](https://docs.anthropic.com/en/docs/claude-code) と/または Codex（任意。でもこれが目的）
+- [Claude Code](https://docs.anthropic.com/en/docs/claude-code) と/または Codex / GitHub Copilot CLI（任意。でもこれが目的）
 
 ソースからビルドする場合のみ [Rust ツールチェーン](https://rustup.rs/) が必要です。
 
@@ -19,14 +19,15 @@ npm install -g @suisya-systems/renga
 
 Node.js が必要です。インストール後、どこからでも `renga` コマンドで起動できます。
 
-Claude Code や Codex のペイン同士の会話、client 内からのペイン操作を使いたい場合は、renga の MCP サーバを client ごとに一度登録してください。
+Claude Code / Codex / Copilot のペイン同士の会話、client 内からのペイン操作を使いたい場合は、renga の MCP サーバを client ごとに一度登録してください。
 
 ```bash
 renga mcp install --client claude
 renga mcp install --client codex   # Codex peer も使う場合
+renga mcp install --client copilot # GitHub Copilot CLI peer も使う場合
 ```
 
-これで選択した client 内から、組み込みの `renga-peers` network と `list_panes` / `spawn_claude_pane` / `spawn_codex_pane` / `inspect_pane` / `send_keys` などのペイン制御ツールが使えるようになります。
+これで選択した client 内から、組み込みの `renga-peers` network と `list_panes` / `spawn_claude_pane` / `spawn_codex_pane` / `spawn_copilot_pane` / `inspect_pane` / `send_keys` などのペイン制御ツールが使えるようになります。
 
 ### バイナリをダウンロード
 
@@ -69,15 +70,15 @@ renga
 
 ## 基本ワークフロー
 
-### 1. peer 対応で Claude Code / Codex を起動
+### 1. peer 対応で Claude Code / Codex / Copilot を起動
 
 ターミナルペインで `Alt+P` を押します。renga が peer 対応済みの Claude 起動コマンドを自動で入力するので、内容を確認して必要なら引数を足し、そのまま `Enter` で起動します。
 
 CLI から起動する場合は `renga split --role claude` / `renga new-tab --role claude` でも同じ peer 配線付きで新ペインに Claude Code が立ち上がります。
 
-Claude Code が起動すると、ペインの枠がオレンジに変わります。
+Claude Code が起動するとペインの枠がオレンジに変わります（Codex は緑、GitHub Copilot CLI は紫）。
 
-Codex ワーカーを使いたい場合は、先に `renga mcp install --client codex` を済ませたうえで、ペイン内で plain `codex` を起動するか、オーケストレータに `spawn_codex_pane` を呼ばせます。
+Codex ワーカーを使いたい場合は、先に `renga mcp install --client codex` を済ませたうえで、ペイン内で plain `codex` を起動するか、オーケストレータに `spawn_codex_pane` を呼ばせます。GitHub Copilot CLI ワーカーも client が 1 つ変わるだけで同じ形です: `renga mcp install --client copilot` のあと plain `copilot` か `spawn_copilot_pane`。ただし Copilot は composer が出る前にフォルダ信頼を尋ね、過去に開いたディレクトリではさらにセッション復元ピッカーを表示します。renga はこれらのダイアログに入力しないので、`send_keys` か手動で一度解除してください。
 
 ### 2. ペインを分割
 
@@ -95,9 +96,9 @@ Codex ワーカーを使いたい場合は、先に `renga mcp install --client 
 
 ### 5. Claude に他ペインを操作させる
 
-MCP サーバを登録した client のペインは `list_peers` / `send_message` / `list_panes` / `spawn_claude_pane` / `spawn_codex_pane` / `inspect_pane` / `send_keys` / `poll_events` などを呼べます。Claude は `<channel>` で push 受信し、Codex は `check_messages` で pull 受信します。これが renga の中核で、1 つのエージェントがワーカー起動、画面確認、対話プロンプト応答まで会話の中で完結できます。
+MCP サーバを登録した client のペインは `list_peers` / `send_message` / `list_panes` / `spawn_claude_pane` / `spawn_codex_pane` / `spawn_copilot_pane` / `inspect_pane` / `send_keys` / `poll_events` などを呼べます。Claude は `<channel>` で push 受信し、Codex / Copilot は `check_messages` で pull 受信します。これが renga の中核で、1 つのエージェントがワーカー起動、画面確認、対話プロンプト応答まで会話の中で完結できます。
 
-詳しくは [Claude Code と Codex ペイン間のメッセージング](/ja/peer-messaging) を参照してください。
+詳しくは [Claude Code / Codex / Copilot ペイン間のメッセージング](/ja/peer-messaging) を参照してください。
 
 ### 6. 終了
 

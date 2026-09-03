@@ -77,14 +77,14 @@ Select a file in the file tree to see its contents with syntax highlighting.
   Files larger than 10MB are not previewed. Binary files show a placeholder message.
 </Callout>
 
-## Claude Detection
+## Agent Detection
 
-When you run `claude` (Claude Code) inside a terminal pane, renga automatically detects it:
+When you run `claude` (Claude Code), `codex`, or `copilot` (GitHub Copilot CLI) inside a terminal pane, renga automatically detects it:
 
-- **Pane border turns orange** (Claude's brand color `#D97757`)
-- **Pane title changes** from `shell [N]` to `claude [N]`
+- **Pane border and org-sidebar row are color-coded per client** — orange for Claude Code (its brand color `#D97757`), green for Codex, purple for Copilot
+- **Pane title changes** from `shell [N]` to `claude [N]` / `codex [N]` / `copilot [N]`
 
-Detection works by monitoring the terminal's window title (OSC 0/2 escape sequences).
+renga prefers the pane's `renga-peers` MCP registration, which is a fact the client's MCP subprocess reported, and falls back to the terminal's window title (OSC 0/2 escape sequences) for a client launched without that server. The title alone is not enough: every one of these clients rewrites it to a summary of the task in flight, so a title can drop its own client's name — or pick up a rival's.
 
 ## cd Tracking
 
