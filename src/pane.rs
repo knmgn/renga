@@ -1019,12 +1019,11 @@ fn detect_alternate_scroll_toggle(data: &[u8]) -> Option<bool> {
     last
 }
 
-/// Start the thread that feeds PTY output into `parser` — except under
-/// `cfg(test)`, where it deliberately starts nothing and drops the
-/// reader.
+/// Start the thread that reads PTY output — feeding it to `parser` in
+/// normal builds, discarding it under `cfg(test)`.
 ///
 /// `App::new` opens a real PTY and spawns the developer's `$SHELL`, so
-/// with a live reader thread that shell's output pours into the very
+/// with a parsing reader that shell's output pours into the very
 /// `parser` the app tests seed by hand. Two writers, one screen, and
 /// the assertions start depending on which shell the machine has:
 ///
@@ -1037,13 +1036,21 @@ fn detect_alternate_scroll_toggle(data: &[u8]) -> Option<bool> {
 ///   `an_over_long_codex_body_is_refused_before_writing` flaky on the
 ///   macOS runner.
 ///
-/// No test wants that output on screen: they all seed `parser`
-/// themselves and push `AppEvent`s straight through `app.event_tx`. The
-/// one thing a test does want from a live shell is that `write_input`
-/// succeeds — a failed write sets `exited`, which much of the suite
-/// needs to stay false — so the PTY and its child stay and only the
-/// thread reading them back goes. The `prompt_seen` latch goes with it,
-/// which is why `Pane::mark_prompt_seen_for_test` exists.
+/// So what has to go is the *parsing*, not the reading. The reader
+/// thread still runs and still drains the PTY, it just throws the bytes
+/// away: nothing reaches `parser`, the `*_seen` latches, the OSC title,
+/// or `event_tx`.
+///
+/// Draining matters. Starting no reader at all also fixes the tests
+/// above, but then nothing empties the PTY and the shell blocks on a
+/// full buffer — which cost the Windows suite 15s (20.5s → 35.3s) and
+/// starved `win_job::tests::terminate_kills_grandchild_whose_parent_exited`
+/// out of its 10s budget. The PTY and its child have to stay regardless,
+/// because a failed `write_input` sets `exited` and much of the suite
+/// needs that to stay false.
+///
+/// The `prompt_seen` latch is parse-derived, so it stays unset here —
+/// that is why `Pane::mark_prompt_seen_for_test` exists.
 ///
 /// See issue #3.
 #[allow(clippy::too_many_arguments)]
@@ -1063,15 +1070,11 @@ fn spawn_pty_reader(
 ) -> thread::JoinHandle<()> {
     #[cfg(test)]
     {
-        // The reader here is a `try_clone_reader()` clone, so dropping
-        // it closes nothing — `Pane` still holds the master and a
-        // writer taken from it, and the child keeps running with its
-        // output accumulating undrained. These are dropped only so no
-        // handle is held for the pane's lifetime with nothing reading
-        // it; they are named rather than `_`-bound to make it visible
-        // that every one is accounted for.
+        // Every sink the parsing reader would write to is dropped here,
+        // named rather than `_`-bound so it is visible that each one is
+        // accounted for. `reader` is not among them: it is the whole
+        // point — see the note on draining above.
         drop((
-            reader,
             parser,
             title,
             scrollback_count,
@@ -1084,7 +1087,13 @@ fn spawn_pty_reader(
             pane_id,
             event_tx,
         ));
-        thread::spawn(|| {})
+        thread::spawn(move || {
+            let mut reader = reader;
+            let mut sink = [0u8; 4096];
+            // Ends on EOF or on the read error `kill()` provokes when
+            // the pane is dropped, exactly as `pty_reader_thread` does.
+            while matches!(reader.read(&mut sink), Ok(n) if n > 0) {}
+        })
     }
     #[cfg(not(test))]
     thread::spawn(move || {
@@ -1554,8 +1563,8 @@ mod tests {
     /// The guard on [`spawn_pty_reader`]'s `cfg(test)` arm.
     ///
     /// Every app test builds a real `App`, so a real login shell is
-    /// running behind every test pane. Its output must never reach
-    /// `parser`, which the tests own and seed by hand — otherwise
+    /// running behind every test pane, and the test arm's reader is
+    /// draining it. None of what it reads may be parsed — otherwise
     /// assertions start turning on which shell the machine has (bash's
     /// `\x1b[?2004h`) and on how fast the runner is. Two of the tests
     /// that broke that way are named on [`spawn_pty_reader`]; this one
@@ -1566,50 +1575,35 @@ mod tests {
         let (tx, _rx) = std::sync::mpsc::channel();
         let pane = Pane::new(1, 24, 80, tx).expect("spawn a pane");
 
-        // Read from our own clone of the master first, so the window
-        // below starts only once the shell has actually said something.
-        // A shell that stays silent is fine — then there was nothing to
-        // leak — so this waits with a timeout rather than blocking the
-        // suite forever on it.
-        let (seen_tx, seen_rx) = std::sync::mpsc::channel();
-        let mut reader = pane
-            .master
-            .try_clone_reader()
-            .expect("clone the PTY reader");
-        thread::spawn(move || {
-            let mut buf = [0u8; 64];
-            let _ = seen_tx.send(reader.read(&mut buf).map(|n| n > 0).unwrap_or(false));
-        });
-        let _ = seen_rx.recv_timeout(Duration::from_secs(5));
-
-        // A negative assertion needs a window: a reader thread would
-        // have taken the parser lock and repainted within a few
-        // milliseconds of that read, so failing to do so for this long
-        // is what "nothing is reading" looks like from out here. Poll
-        // so a regression fails fast instead of after the full window.
+        // "Nothing was parsed" is a negative, so it needs a window to
+        // hold over. The shell has plenty to say within this one: for
+        // bash and zsh `Pane::new` writes a setup line ending in
+        // `clear`, which the tty echoes straight back, and the draining
+        // reader is consuming all of it throughout. Polled rather than
+        // slept so a regression fails in milliseconds.
         let deadline = Instant::now() + Duration::from_millis(500);
         while Instant::now() < deadline {
-            // Screen contents alone would not catch a reader whose bytes
-            // are all non-printable — a clear, a cursor move, an OSC
-            // title, a bare `\r\n`. So check the side channels the
-            // reader writes regardless of what lands on screen. The
-            // newline counter is the cheapest tell: the setup line the
-            // PTY echoes back carries one.
+            // Screen contents alone would not catch a parser fed only
+            // non-printable bytes — a clear, a cursor move, an OSC
+            // title, a bare `\r\n`. So check the side channels a
+            // parsing reader writes regardless of what lands on screen.
+            // The newline counter is the cheapest tell: the echoed
+            // setup line alone carries one.
             assert_eq!(
                 pane.total_scrollback.load(Ordering::Relaxed),
                 0,
-                "the reader counted newlines, so it is running"
+                "newlines were counted, so the reader is parsing"
             );
             assert!(
                 !pane.prompt_seen.load(Ordering::Acquire),
-                "the reader latched prompt detection, so it is running"
+                "prompt detection latched, so the reader is parsing"
             );
             assert!(
                 pane.title
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .is_empty(),
-                "the reader parsed an OSC title, so it is running"
+                "an OSC title was parsed, so the reader is parsing"
             );
 
             let parser = pane.parser.lock().unwrap_or_else(|e| e.into_inner());
