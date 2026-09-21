@@ -203,22 +203,20 @@ impl Pane {
         let alternate_scroll_mode = Arc::new(AtomicBool::new(false));
         let alternate_scroll_mode_clone = Arc::clone(&alternate_scroll_mode);
         let codex_transcript_overlay_hint = Arc::new(AtomicBool::new(false));
-        let reader_handle = thread::spawn(move || {
-            pty_reader_thread(
-                reader,
-                parser_clone,
-                title_clone,
-                scrollback_clone,
-                prompt_seen_clone,
-                claude_seen_clone,
-                codex_seen_clone,
-                copilot_seen_clone,
-                mouse_protocol_cache_clone,
-                alternate_scroll_mode_clone,
-                id,
-                event_tx,
-            );
-        });
+        let reader_handle = spawn_pty_reader(
+            reader,
+            parser_clone,
+            title_clone,
+            scrollback_clone,
+            prompt_seen_clone,
+            claude_seen_clone,
+            codex_seen_clone,
+            copilot_seen_clone,
+            mouse_protocol_cache_clone,
+            alternate_scroll_mode_clone,
+            id,
+            event_tx,
+        );
 
         let mut pane = Self {
             id,
@@ -746,6 +744,23 @@ impl Pane {
         matches!(self.child.try_wait(), Ok(Some(_)))
     }
 
+    /// Latch the prompt gate that `try_flush_startup` waits on.
+    ///
+    /// Production latches it from `pty_reader_thread`, which
+    /// [`spawn_pty_reader`] does not start under `cfg(test)` — so a test
+    /// that needs a startup command to actually reach the shell has to
+    /// say "the prompt is there" itself. Only the `#[cfg(windows)]`
+    /// job-reaping test does, and its subject is grandchild reaping,
+    /// not prompt detection.
+    ///
+    /// Gated on `windows` as well as `test` for the same reason as
+    /// `child_exited_for_test` above: `#[cfg(test)]` alone would be
+    /// dead code on Linux and fail CI's clippy job.
+    #[cfg(all(test, windows))]
+    pub(crate) fn mark_prompt_seen_for_test(&self) {
+        self.prompt_seen.store(true, Ordering::Release);
+    }
+
     /// If a startup command is queued and the shell prompt has been
     /// observed, write the command into the PTY and clear the queue.
     /// Returns `Ok(true)` if a flush happened, `Ok(false)` otherwise.
@@ -1004,7 +1019,94 @@ fn detect_alternate_scroll_toggle(data: &[u8]) -> Option<bool> {
     last
 }
 
+/// Start the thread that feeds PTY output into `parser` — except under
+/// `cfg(test)`, where it deliberately starts nothing and drops the
+/// reader.
+///
+/// `App::new` opens a real PTY and spawns the developer's `$SHELL`, so
+/// with a live reader thread that shell's output pours into the very
+/// `parser` the app tests seed by hand. Two writers, one screen, and
+/// the assertions start depending on which shell the machine has:
+///
+/// - bash announces bracketed paste with `\x1b[?2004h`, which turns
+///   `a_multiline_body_without_bracketed_paste_is_refused` from a
+///   refusal into an accepted body (`SHELL=/bin/sh` passes, `/bin/bash`
+///   does not).
+/// - a late prompt repaint overwrites a seeded composer *between* a
+///   readiness assert and the call it guards, which is what made
+///   `an_over_long_codex_body_is_refused_before_writing` flaky on the
+///   macOS runner.
+///
+/// No test wants that output on screen: they all seed `parser`
+/// themselves and push `AppEvent`s straight through `app.event_tx`. The
+/// one thing a test does want from a live shell is that `write_input`
+/// succeeds — a failed write sets `exited`, which much of the suite
+/// needs to stay false — so the PTY and its child stay and only the
+/// thread reading them back goes. The `prompt_seen` latch goes with it,
+/// which is why `Pane::mark_prompt_seen_for_test` exists.
+///
+/// See issue #3.
+#[allow(clippy::too_many_arguments)]
+fn spawn_pty_reader(
+    reader: Box<dyn Read + Send>,
+    parser: Arc<Mutex<vt100::Parser>>,
+    title: Arc<Mutex<String>>,
+    scrollback_count: Arc<std::sync::atomic::AtomicUsize>,
+    prompt_seen: Arc<AtomicBool>,
+    claude_seen: Arc<AtomicBool>,
+    codex_seen: Arc<AtomicBool>,
+    copilot_seen: Arc<AtomicBool>,
+    mouse_protocol_cache: Arc<Mutex<Option<CachedMouseProtocol>>>,
+    alternate_scroll_mode: Arc<AtomicBool>,
+    pane_id: usize,
+    event_tx: Sender<AppEvent>,
+) -> thread::JoinHandle<()> {
+    #[cfg(test)]
+    {
+        // The reader here is a `try_clone_reader()` clone, so dropping
+        // it closes nothing — `Pane` still holds the master and a
+        // writer taken from it, and the child keeps running with its
+        // output accumulating undrained. These are dropped only so no
+        // handle is held for the pane's lifetime with nothing reading
+        // it; they are named rather than `_`-bound to make it visible
+        // that every one is accounted for.
+        drop((
+            reader,
+            parser,
+            title,
+            scrollback_count,
+            prompt_seen,
+            claude_seen,
+            codex_seen,
+            copilot_seen,
+            mouse_protocol_cache,
+            alternate_scroll_mode,
+            pane_id,
+            event_tx,
+        ));
+        thread::spawn(|| {})
+    }
+    #[cfg(not(test))]
+    thread::spawn(move || {
+        pty_reader_thread(
+            reader,
+            parser,
+            title,
+            scrollback_count,
+            prompt_seen,
+            claude_seen,
+            codex_seen,
+            copilot_seen,
+            mouse_protocol_cache,
+            alternate_scroll_mode,
+            pane_id,
+            event_tx,
+        );
+    })
+}
+
 /// Background thread that reads PTY output and feeds it to vt100 parser.
+#[cfg_attr(test, allow(dead_code))]
 #[allow(clippy::too_many_arguments)]
 fn pty_reader_thread(
     mut reader: Box<dyn Read + Send>,
@@ -1449,6 +1551,83 @@ fn detect_shell_unix() -> PathBuf {
 mod tests {
     use super::*;
 
+    /// The guard on [`spawn_pty_reader`]'s `cfg(test)` arm.
+    ///
+    /// Every app test builds a real `App`, so a real login shell is
+    /// running behind every test pane. Its output must never reach
+    /// `parser`, which the tests own and seed by hand — otherwise
+    /// assertions start turning on which shell the machine has (bash's
+    /// `\x1b[?2004h`) and on how fast the runner is. Two of the tests
+    /// that broke that way are named on [`spawn_pty_reader`]; this one
+    /// stands in for all of them by failing outright, and here, rather
+    /// than intermittently and somewhere else. See issue #3.
+    #[test]
+    fn a_test_pane_screen_is_not_written_by_its_real_shell() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let pane = Pane::new(1, 24, 80, tx).expect("spawn a pane");
+
+        // Read from our own clone of the master first, so the window
+        // below starts only once the shell has actually said something.
+        // A shell that stays silent is fine — then there was nothing to
+        // leak — so this waits with a timeout rather than blocking the
+        // suite forever on it.
+        let (seen_tx, seen_rx) = std::sync::mpsc::channel();
+        let mut reader = pane
+            .master
+            .try_clone_reader()
+            .expect("clone the PTY reader");
+        thread::spawn(move || {
+            let mut buf = [0u8; 64];
+            let _ = seen_tx.send(reader.read(&mut buf).map(|n| n > 0).unwrap_or(false));
+        });
+        let _ = seen_rx.recv_timeout(Duration::from_secs(5));
+
+        // A negative assertion needs a window: a reader thread would
+        // have taken the parser lock and repainted within a few
+        // milliseconds of that read, so failing to do so for this long
+        // is what "nothing is reading" looks like from out here. Poll
+        // so a regression fails fast instead of after the full window.
+        let deadline = Instant::now() + Duration::from_millis(500);
+        while Instant::now() < deadline {
+            // Screen contents alone would not catch a reader whose bytes
+            // are all non-printable — a clear, a cursor move, an OSC
+            // title, a bare `\r\n`. So check the side channels the
+            // reader writes regardless of what lands on screen. The
+            // newline counter is the cheapest tell: the setup line the
+            // PTY echoes back carries one.
+            assert_eq!(
+                pane.total_scrollback.load(Ordering::Relaxed),
+                0,
+                "the reader counted newlines, so it is running"
+            );
+            assert!(
+                !pane.prompt_seen.load(Ordering::Acquire),
+                "the reader latched prompt detection, so it is running"
+            );
+            assert!(
+                pane.title
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .is_empty(),
+                "the reader parsed an OSC title, so it is running"
+            );
+
+            let parser = pane.parser.lock().unwrap_or_else(|e| e.into_inner());
+            let screen = parser.screen();
+            assert!(
+                !screen.bracketed_paste(),
+                "the shell's mode declarations reached the parser"
+            );
+            assert_eq!(
+                screen.contents().trim(),
+                "",
+                "the shell's output reached the parser"
+            );
+            drop(parser);
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
     /// `file:///path` — empty hostname, the path is taken verbatim.
     #[test]
     fn extract_osc7_reads_empty_hostname_form() {
@@ -1574,12 +1753,15 @@ mod tests {
         pane.queue_startup_command(&format!(
             "powershell -NoProfile -ExecutionPolicy Bypass -File '{script_fwd}' & disown; exit"
         ));
+        // Prompt detection lives in the PTY reader thread, which test
+        // builds do not start (see `spawn_pty_reader`). Latch the gate
+        // directly: this test is about reaping a grandchild, and the
+        // shell is up and ready for the write either way.
+        pane.mark_prompt_seen_for_test();
         assert!(
-            wait_for(
-                || pane.try_flush_startup().unwrap_or(false),
-                Duration::from_secs(30)
-            ),
-            "shell prompt should be detected and startup command flushed"
+            pane.try_flush_startup()
+                .expect("flush the queued startup command"),
+            "the queued startup command should flush once the prompt gate is latched"
         );
         assert!(
             wait_for(|| lock_is_held(&lock_path), Duration::from_secs(30)),
