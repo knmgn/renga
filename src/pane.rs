@@ -28,6 +28,16 @@ pub struct Pane {
     pub parser: Arc<Mutex<vt100::Parser>>,
     child: Box<dyn Child + Send + Sync>,
     _reader_handle: thread::JoinHandle<()>,
+    /// Bytes the `cfg(test)` reader has drained and thrown away.
+    ///
+    /// The drain exists so the shell never blocks on a full PTY buffer
+    /// (see [`spawn_pty_reader`]). Every other assertion about that
+    /// reader is a negative — "nothing was parsed" — which a reader that
+    /// died on its first read would satisfy just as well. This counter
+    /// is the one positive signal, so the guard test can tell "not
+    /// parsing" from "not reading". See issue #3.
+    #[cfg(test)]
+    pub(crate) drained_bytes: Arc<std::sync::atomic::AtomicUsize>,
     last_rows: u16,
     last_cols: u16,
     pub exited: bool,
@@ -203,7 +213,7 @@ impl Pane {
         let alternate_scroll_mode = Arc::new(AtomicBool::new(false));
         let alternate_scroll_mode_clone = Arc::clone(&alternate_scroll_mode);
         let codex_transcript_overlay_hint = Arc::new(AtomicBool::new(false));
-        let reader_handle = spawn_pty_reader(
+        let pty_reader = spawn_pty_reader(
             reader,
             parser_clone,
             title_clone,
@@ -224,7 +234,9 @@ impl Pane {
             writer,
             parser,
             child,
-            _reader_handle: reader_handle,
+            _reader_handle: pty_reader.join,
+            #[cfg(test)]
+            drained_bytes: pty_reader.drained_bytes,
             last_rows: rows,
             last_cols: cols,
             exited: false,
@@ -746,12 +758,13 @@ impl Pane {
 
     /// Latch the prompt gate that `try_flush_startup` waits on.
     ///
-    /// Production latches it from `pty_reader_thread`, which
-    /// [`spawn_pty_reader`] does not start under `cfg(test)` — so a test
-    /// that needs a startup command to actually reach the shell has to
-    /// say "the prompt is there" itself. Only the `#[cfg(windows)]`
-    /// job-reaping test does, and its subject is grandchild reaping,
-    /// not prompt detection.
+    /// The latch is parse-derived: production sets it from
+    /// `pty_reader_thread`, which [`spawn_pty_reader`] does not call
+    /// under `cfg(test)` — its reader drains and discards instead of
+    /// parsing. So a test that needs a startup command to actually
+    /// reach the shell has to say "the prompt is there" itself. Only the
+    /// `#[cfg(windows)]` job-reaping test does, and its subject is
+    /// grandchild reaping, not prompt detection.
     ///
     /// Gated on `windows` as well as `test` for the same reason as
     /// `child_exited_for_test` above: `#[cfg(test)]` alone would be
@@ -1041,18 +1054,39 @@ fn detect_alternate_scroll_toggle(data: &[u8]) -> Option<bool> {
 /// away: nothing reaches `parser`, the `*_seen` latches, the OSC title,
 /// or `event_tx`.
 ///
-/// Draining matters. Starting no reader at all also fixes the tests
-/// above, but then nothing empties the PTY and the shell blocks on a
-/// full buffer — which cost the Windows suite 15s (20.5s → 35.3s) and
-/// starved `win_job::tests::terminate_kills_grandchild_whose_parent_exited`
-/// out of its 10s budget. The PTY and its child have to stay regardless,
-/// because a failed `write_input` sets `exited` and much of the suite
-/// needs that to stay false.
+/// Draining matters, and this is the part to read before deciding the
+/// drain is redundant. Starting no reader at all also fixes the tests
+/// above — it was the first cut of this change — but then nothing
+/// empties the PTY. Measured on one Windows runner, that cost the suite
+/// 15 seconds (20.5s → 35.3s) and made
+/// `win_job::tests::terminate_kills_grandchild_whose_parent_exited`,
+/// which allows a detached PowerShell 10s to take a file lock, fail for
+/// the first time in eleven green runs.
+///
+/// The mechanism is inferred, not proven: with nobody reading, the shell
+/// blocks on a full buffer, and a slave write that never drains can
+/// stall `write_input` on the test's own thread. That `win_job` test
+/// builds no `Pane` at all, so it was starved by suite-wide contention
+/// rather than by anything reaching into it. The A/B measurement is
+/// solid; the causal story behind it is not. `Pane::drained_bytes` is
+/// what keeps a revert honest.
+///
+/// The PTY and its child have to stay regardless, because a failed
+/// `write_input` sets `exited` and much of the suite needs that to stay
+/// false.
 ///
 /// The `prompt_seen` latch is parse-derived, so it stays unset here —
 /// that is why `Pane::mark_prompt_seen_for_test` exists.
 ///
 /// See issue #3.
+/// What [`spawn_pty_reader`] hands back: the thread, plus — in test
+/// builds only — the drained-byte counter that proves it is alive.
+struct PtyReader {
+    join: thread::JoinHandle<()>,
+    #[cfg(test)]
+    drained_bytes: Arc<std::sync::atomic::AtomicUsize>,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn spawn_pty_reader(
     reader: Box<dyn Read + Send>,
@@ -1067,7 +1101,7 @@ fn spawn_pty_reader(
     alternate_scroll_mode: Arc<AtomicBool>,
     pane_id: usize,
     event_tx: Sender<AppEvent>,
-) -> thread::JoinHandle<()> {
+) -> PtyReader {
     #[cfg(test)]
     {
         // Every sink the parsing reader would write to is dropped here,
@@ -1087,31 +1121,44 @@ fn spawn_pty_reader(
             pane_id,
             event_tx,
         ));
-        thread::spawn(move || {
+        let drained_bytes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = Arc::clone(&drained_bytes);
+        let join = thread::spawn(move || {
             let mut reader = reader;
             let mut sink = [0u8; 4096];
             // Ends on EOF or on the read error `kill()` provokes when
             // the pane is dropped, exactly as `pty_reader_thread` does.
-            while matches!(reader.read(&mut sink), Ok(n) if n > 0) {}
-        })
+            while let Ok(n) = reader.read(&mut sink) {
+                if n == 0 {
+                    break;
+                }
+                counter.fetch_add(n, Ordering::Relaxed);
+            }
+        });
+        PtyReader {
+            join,
+            drained_bytes,
+        }
     }
     #[cfg(not(test))]
-    thread::spawn(move || {
-        pty_reader_thread(
-            reader,
-            parser,
-            title,
-            scrollback_count,
-            prompt_seen,
-            claude_seen,
-            codex_seen,
-            copilot_seen,
-            mouse_protocol_cache,
-            alternate_scroll_mode,
-            pane_id,
-            event_tx,
-        );
-    })
+    PtyReader {
+        join: thread::spawn(move || {
+            pty_reader_thread(
+                reader,
+                parser,
+                title,
+                scrollback_count,
+                prompt_seen,
+                claude_seen,
+                codex_seen,
+                copilot_seen,
+                mouse_protocol_cache,
+                alternate_scroll_mode,
+                pane_id,
+                event_tx,
+            );
+        }),
+    }
 }
 
 /// Background thread that reads PTY output and feeds it to vt100 parser.
@@ -1576,11 +1623,13 @@ mod tests {
         let pane = Pane::new(1, 24, 80, tx).expect("spawn a pane");
 
         // "Nothing was parsed" is a negative, so it needs a window to
-        // hold over. The shell has plenty to say within this one: for
-        // bash and zsh `Pane::new` writes a setup line ending in
-        // `clear`, which the tty echoes straight back, and the draining
-        // reader is consuming all of it throughout. Polled rather than
-        // slept so a regression fails in milliseconds.
+        // hold over. Bytes are guaranteed to arrive inside this one
+        // without depending on runner speed: for bash and zsh
+        // `Pane::new` writes a setup line ending in `clear`, and the tty
+        // line discipline echoes it straight back onto the master, so
+        // the first read lands in microseconds whether or not the shell
+        // has finished starting. Polled rather than slept so a
+        // regression fails in milliseconds.
         let deadline = Instant::now() + Duration::from_millis(500);
         while Instant::now() < deadline {
             // Screen contents alone would not catch a parser fed only
@@ -1620,6 +1669,18 @@ mod tests {
             drop(parser);
             thread::sleep(Duration::from_millis(10));
         }
+
+        // Everything above is a negative, and a reader that died on its
+        // first read would satisfy all of it. This is the positive half:
+        // the drain has to still be draining, because that is what keeps
+        // the shell from blocking on a full PTY buffer. Without it a
+        // revert to "start no reader at all" passes this test and
+        // reappears as 15 seconds of Windows CI and a timeout in
+        // `win_job`, which is how it got here the first time.
+        assert!(
+            pane.drained_bytes.load(Ordering::Relaxed) > 0,
+            "the reader drained nothing, so the PTY is filling up"
+        );
     }
 
     /// `file:///path` — empty hostname, the path is taken verbatim.
@@ -1747,10 +1808,11 @@ mod tests {
         pane.queue_startup_command(&format!(
             "powershell -NoProfile -ExecutionPolicy Bypass -File '{script_fwd}' & disown; exit"
         ));
-        // Prompt detection lives in the PTY reader thread, which test
-        // builds do not start (see `spawn_pty_reader`). Latch the gate
-        // directly: this test is about reaping a grandchild, and the
-        // shell is up and ready for the write either way.
+        // Prompt detection is parse-derived, and the test build's
+        // reader discards rather than parses (see `spawn_pty_reader`),
+        // so the gate never latches on its own. Latch it directly: this
+        // test is about reaping a grandchild, and the shell is up and
+        // ready for the write either way.
         pane.mark_prompt_seen_for_test();
         assert!(
             pane.try_flush_startup()

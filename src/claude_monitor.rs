@@ -596,8 +596,7 @@ fn process_event(monitor: &mut PaneMonitor, line: &str) {
     }
 }
 
-/// Where Claude Code keeps its per-project session logs, or `None` when
-/// there is no home directory — and always `None` under `cfg(test)`.
+/// No store at all under `cfg(test)`, so the real one is never read.
 ///
 /// `App::new` builds a real `ClaudeMonitor`, and `find_jsonl_path`
 /// derives its lookup from the pane's cwd. So a developer running the
@@ -606,17 +605,18 @@ fn process_event(monitor: &mut PaneMonitor, line: &str) {
 /// `is_working: true` because the session driving the test was working,
 /// and `background_status_changes_do_not_pierce_the_ime_overlay_freeze`
 /// failed on their machine while passing in CI, where no such session
-/// exists. Test builds therefore never consult the real store; the
-/// monitor's own tests inject a resolved path with
-/// `register_pane_with_path` instead. See issue #3.
-/// Test builds never consult the real store. `find_jsonl_path_in` keeps
-/// the lookup itself reachable, so gating the *root* is all this needs
-/// to do.
+/// exists.
+///
+/// Gating the root is all this needs to do — `find_jsonl_path_in` keeps
+/// the lookup itself reachable — and the monitor's own tests inject a
+/// resolved path with `register_pane_with_path`. See issue #3.
 #[cfg(test)]
 fn projects_dir() -> Option<PathBuf> {
     None
 }
 
+/// Where Claude Code keeps its per-project session logs, or `None` when
+/// there is no home directory to resolve them against.
 #[cfg(not(test))]
 fn projects_dir() -> Option<PathBuf> {
     Some(dirs::home_dir()?.join(".claude").join("projects"))
@@ -703,6 +703,15 @@ mod tests {
             std::process::id(),
             line!()
         ));
+        // Removed even if an assertion panics mid-test, matching the
+        // `TempFiles` pattern the pane and win_job tests use.
+        struct TempTree(PathBuf);
+        impl Drop for TempTree {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _cleanup = TempTree(root.clone());
         let cwd = Path::new("/home/someone/work");
         let project = root.join(encode_cwd_to_project_name(cwd));
         std::fs::create_dir_all(&project).expect("create the project dir");
@@ -713,8 +722,7 @@ mod tests {
         let decoy = project.join("newest.txt");
         for (path, secs_ago) in [(&older, 60u64), (&newer, 10), (&decoy, 0)] {
             std::fs::write(path, "").expect("write the file");
-            let when = filetime_from_now_minus(secs_ago);
-            set_mtime(path, when);
+            set_mtime(path, SystemTime::now() - Duration::from_secs(secs_ago));
         }
 
         assert_eq!(find_jsonl_path_in(&root, cwd), Some(newer));
@@ -725,12 +733,6 @@ mod tests {
             None
         );
         assert_eq!(find_jsonl_path_in(&root.join("absent"), cwd), None);
-
-        std::fs::remove_dir_all(&root).ok();
-    }
-
-    fn filetime_from_now_minus(secs: u64) -> SystemTime {
-        SystemTime::now() - Duration::from_secs(secs)
     }
 
     /// `std` has no portable mtime setter, so go through the file's
