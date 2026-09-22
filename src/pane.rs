@@ -524,12 +524,17 @@ impl Pane {
     /// (e.g. `shell_accepts_command_injection`); use
     /// `claude_ever_seen` for cursor-rendering purposes that must
     /// survive Claude's transient task-name title rewrites.
+    ///
+    /// Recovers from a poisoned mutex rather than answering `false`,
+    /// as do its Codex and Copilot siblings. Poison is sticky — nothing
+    /// short of `clear_poison` lifts it — so a single panic while the
+    /// lock was held used to switch all three live signals off for the
+    /// rest of the process, silently and permanently. They gate real
+    /// behaviour: `shell_accepts_command_injection` here, and mouse
+    /// forwarding through `is_codex_running`. See issue #8.
     pub fn is_claude_running(&self) -> bool {
-        if let Ok(t) = self.title.lock() {
-            title_mentions_client(&t, "claude")
-        } else {
-            false
-        }
+        let t = self.title.lock().unwrap_or_else(|e| e.into_inner());
+        title_mentions_client(&t, "claude")
     }
 
     /// Check if Codex is running in this pane (by current window
@@ -540,11 +545,8 @@ impl Pane {
     /// `codex_ever_seen()` for cosmetic indicators that must
     /// survive Codex's transient task-name title rewrites (#209).
     pub fn is_codex_running(&self) -> bool {
-        if let Ok(t) = self.title.lock() {
-            title_mentions_client(&t, "codex")
-        } else {
-            false
-        }
+        let t = self.title.lock().unwrap_or_else(|e| e.into_inner());
+        title_mentions_client(&t, "codex")
     }
 
     /// Check if GitHub Copilot CLI is running in this pane (by current
@@ -552,11 +554,8 @@ impl Pane {
     /// same caveats as the Claude and Codex variants; use
     /// `copilot_ever_seen()` for cosmetic indicators.
     pub fn is_copilot_running(&self) -> bool {
-        if let Ok(t) = self.title.lock() {
-            title_mentions_client(&t, "copilot")
-        } else {
-            false
-        }
+        let t = self.title.lock().unwrap_or_else(|e| e.into_inner());
+        title_mentions_client(&t, "copilot")
     }
 
     fn effective_mouse_protocol(
@@ -1170,9 +1169,16 @@ fn process_pty_chunk(data: &[u8], tails: &mut ReaderTails, sinks: &ReaderSinks) 
         if lower.contains("copilot") {
             sinks.copilot_seen.store(true, Ordering::Relaxed);
         }
-        if let Ok(mut t) = sinks.title.lock() {
-            *t = new_title;
-        }
+        // `into_inner` on poison, like the parser and mouse-cache locks
+        // above. The `*_seen` latches overhead are not at stake — they
+        // are stored before this lock and never gated on it — but the
+        // live `is_*_running` signals read this string, and dropping the
+        // write on `Err` would leave them reading a stale title for the
+        // rest of the process. The value behind a poisoned lock is a
+        // `String` some panicking thread was mid-assignment on, and the
+        // next line overwrites it. See issue #8.
+        let mut t = sinks.title.lock().unwrap_or_else(|e| e.into_inner());
+        *t = new_title;
     }
 
     // Heuristic prompt detection over a rolling tail so prompts
@@ -1907,6 +1913,72 @@ mod tests {
         assert!(
             !sinks.codex_seen.load(Ordering::Relaxed),
             "copilot must not latch codex"
+        );
+    }
+
+    /// A poisoned title mutex must not switch the live client signals
+    /// off for the rest of the process.
+    ///
+    /// The `*_seen` latches are not what is at risk — they are plain
+    /// atomics stored before the lock is taken. What breaks is
+    /// `is_claude_running` / `is_codex_running` / `is_copilot_running`,
+    /// which read the title itself: answering `false` on `Err` meant one
+    /// panic while the lock was held turned them off permanently, since
+    /// poison is sticky. They gate command injection and mouse
+    /// forwarding, so this is behaviour, not decoration (#8).
+    #[test]
+    fn a_poisoned_title_mutex_does_not_silence_the_live_client_signals() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let pane = Pane::new(1, 24, 80, tx).expect("spawn a pane");
+        *pane.title.lock().unwrap_or_else(|e| e.into_inner()) = "claude — building".to_string();
+        assert!(pane.is_claude_running(), "precondition");
+
+        // Poison it the only way it can be poisoned: panic while holding
+        // it. The hook is swapped out so the deliberate panic does not
+        // look like a failure in the log; `cargo test` runs tests in
+        // parallel, so this is kept to the shortest possible window.
+        let title = Arc::clone(&pane.title);
+        let previous_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let _ = thread::spawn(move || {
+            let _guard = title.lock().expect("lock");
+            panic!("poisoning the title mutex on purpose");
+        })
+        .join();
+        std::panic::set_hook(previous_hook);
+        assert!(pane.title.is_poisoned(), "the mutex must be poisoned");
+
+        assert!(
+            pane.is_claude_running(),
+            "a poisoned mutex must not switch the live signal off"
+        );
+        assert!(!pane.is_codex_running());
+        assert!(!pane.is_copilot_running());
+    }
+
+    /// The writer side of the same mutex: a poisoned lock must not make
+    /// the title stop tracking what the pane is showing.
+    #[test]
+    fn a_poisoned_title_mutex_still_accepts_new_titles() {
+        let (sinks, _rx) = sinks();
+        let mut tails = ReaderTails::new();
+
+        let title = Arc::clone(&sinks.title);
+        let previous_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let _ = thread::spawn(move || {
+            let _guard = title.lock().expect("lock");
+            panic!("poisoning the title mutex on purpose");
+        })
+        .join();
+        std::panic::set_hook(previous_hook);
+        assert!(sinks.title.is_poisoned());
+
+        process_pty_chunk(b"\x1b]2;claude: still here\x07", &mut tails, &sinks);
+
+        assert_eq!(
+            *sinks.title.lock().unwrap_or_else(|e| e.into_inner()),
+            "claude: still here"
         );
     }
 
