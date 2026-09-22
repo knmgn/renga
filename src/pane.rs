@@ -196,36 +196,29 @@ impl Pane {
             .try_clone_reader()
             .context("Failed to clone PTY reader")?;
 
-        let parser_clone = Arc::clone(&parser);
-        let title_clone = Arc::clone(&pane_title);
         let scrollback_counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let scrollback_clone = Arc::clone(&scrollback_counter);
         let prompt_seen = Arc::new(AtomicBool::new(false));
-        let prompt_seen_clone = Arc::clone(&prompt_seen);
         let claude_seen = Arc::new(AtomicBool::new(false));
-        let claude_seen_clone = Arc::clone(&claude_seen);
         let codex_seen = Arc::new(AtomicBool::new(false));
-        let codex_seen_clone = Arc::clone(&codex_seen);
         let copilot_seen = Arc::new(AtomicBool::new(false));
-        let copilot_seen_clone = Arc::clone(&copilot_seen);
         let mouse_protocol_cache = Arc::new(Mutex::new(None));
-        let mouse_protocol_cache_clone = Arc::clone(&mouse_protocol_cache);
         let alternate_scroll_mode = Arc::new(AtomicBool::new(false));
-        let alternate_scroll_mode_clone = Arc::clone(&alternate_scroll_mode);
         let codex_transcript_overlay_hint = Arc::new(AtomicBool::new(false));
         let pty_reader = spawn_pty_reader(
             reader,
-            parser_clone,
-            title_clone,
-            scrollback_clone,
-            prompt_seen_clone,
-            claude_seen_clone,
-            codex_seen_clone,
-            copilot_seen_clone,
-            mouse_protocol_cache_clone,
-            alternate_scroll_mode_clone,
-            id,
-            event_tx,
+            ReaderSinks {
+                parser: Arc::clone(&parser),
+                title: Arc::clone(&pane_title),
+                scrollback_count: Arc::clone(&scrollback_counter),
+                prompt_seen: Arc::clone(&prompt_seen),
+                claude_seen: Arc::clone(&claude_seen),
+                codex_seen: Arc::clone(&codex_seen),
+                copilot_seen: Arc::clone(&copilot_seen),
+                mouse_protocol_cache: Arc::clone(&mouse_protocol_cache),
+                alternate_scroll_mode: Arc::clone(&alternate_scroll_mode),
+                pane_id: id,
+                event_tx,
+            },
         );
 
         let mut pane = Self {
@@ -1032,6 +1025,188 @@ fn detect_alternate_scroll_toggle(data: &[u8]) -> Option<bool> {
     last
 }
 
+/// What [`spawn_pty_reader`] hands back: the thread, plus — in test
+/// builds only — the drained-byte counter that proves it is alive.
+struct PtyReader {
+    join: thread::JoinHandle<()>,
+    #[cfg(test)]
+    drained_bytes: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+/// Everything one chunk of PTY output can write to.
+///
+/// Passed as one named struct rather than eleven positional arguments:
+/// five of them are `Arc<AtomicBool>`, so a positional swap between the
+/// `*_seen` latches would compile silently and break a production latch
+/// with nothing to catch it.
+struct ReaderSinks {
+    parser: Arc<Mutex<vt100::Parser>>,
+    title: Arc<Mutex<String>>,
+    scrollback_count: Arc<std::sync::atomic::AtomicUsize>,
+    prompt_seen: Arc<AtomicBool>,
+    claude_seen: Arc<AtomicBool>,
+    codex_seen: Arc<AtomicBool>,
+    copilot_seen: Arc<AtomicBool>,
+    mouse_protocol_cache: Arc<Mutex<Option<CachedMouseProtocol>>>,
+    alternate_scroll_mode: Arc<AtomicBool>,
+    pane_id: usize,
+    event_tx: Sender<AppEvent>,
+}
+
+/// Rolling buffers [`process_pty_chunk`] carries between reads.
+///
+/// A PTY read boundary falls wherever the kernel put it, so every
+/// pattern worth detecting can arrive split across two chunks. Each of
+/// these keeps just enough of the previous chunk to recognise one
+/// anyway, and each is bounded so a long-lived pane cannot grow them
+/// without limit.
+struct ReaderTails {
+    /// Tail of recent output, for a shell prompt that straddles a read.
+    /// Dropped for good once `prompt_seen` latches.
+    prompt: Vec<u8>,
+    /// Last few bytes, for a mode toggle that straddles a read.
+    control: Vec<u8>,
+    /// Pending OSC 52 clipboard payload, which is base64 and can be far
+    /// larger than one chunk.
+    osc52: Vec<u8>,
+}
+
+impl ReaderTails {
+    /// Cap on the prompt tail. Kept at `TAIL_CAP` bytes, allowed to
+    /// reach twice that before being trimmed back so the trim is
+    /// amortised rather than run on every chunk.
+    const TAIL_CAP: usize = 256;
+    /// Cap on the control tail: long enough to hold a split
+    /// `\x1b[?1007h`, short enough to scan per chunk.
+    const CONTROL_CAP: usize = 64;
+    /// Point at which a *pending* OSC 52 payload is abandoned, on the
+    /// assumption that a terminator this far away is never coming.
+    ///
+    /// It is a heuristic, and it has a cost: a genuine copy larger than
+    /// this is dropped with it, because the clamp runs after the drain
+    /// and the terminator then arrives to find nothing. Every copy over
+    /// the cap is affected, since one larger than a 4 KiB read cannot
+    /// land whole inside a single chunk. The bound is also soft — the
+    /// buffer can peak one chunk above it before the clamp fires.
+    const OSC52_CAP: usize = 1_048_576;
+
+    fn new() -> Self {
+        Self {
+            prompt: Vec::with_capacity(Self::TAIL_CAP * 2),
+            control: Vec::with_capacity(Self::CONTROL_CAP),
+            osc52: Vec::with_capacity(4096),
+        }
+    }
+}
+
+/// Everything one chunk of PTY output does, with no PTY and no thread
+/// in sight.
+///
+/// Split out from [`pty_reader_thread`] so it can be driven with
+/// synthetic bytes (#5). The thread around it cannot be: under
+/// `cfg(test)` no reader parses at all (see [`spawn_pty_reader`]), so
+/// before this split every line below was compiled and never run, and
+/// the tail arithmetic in particular could break with nothing failing.
+fn process_pty_chunk(data: &[u8], tails: &mut ReaderTails, sinks: &ReaderSinks) {
+    // Track scrollback lines (count newlines)
+    let newlines = data.iter().filter(|&&b| b == b'\n').count();
+    if newlines > 0 {
+        sinks
+            .scrollback_count
+            .fetch_add(newlines, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    // Detect OSC 7 (cwd notification). Bash/zsh emit this on
+    // every prompt thanks to the hook injected in `Pane::new`,
+    // so its presence is also a strong "prompt is up" signal.
+    // Release ordering pairs with the Acquire load in
+    // `Pane::try_flush_startup` so the queued startup command
+    // is published to the main thread atomically.
+    if let Some(path) = extract_osc7(data) {
+        sinks.prompt_seen.store(true, Ordering::Release);
+        // Drop the rolling tail once the latch is set so we
+        // do not retain memory for the rest of the session.
+        tails.prompt = Vec::new();
+        let _ = sinks
+            .event_tx
+            .send(AppEvent::CwdChanged(sinks.pane_id, path));
+    }
+
+    // Detect OSC 0/2 (window title) — used to detect Claude Code
+    if let Some(new_title) = extract_osc_title(data) {
+        // Latch: once Claude has been seen in this pane,
+        // remember it forever so transient title rewrites
+        // (Claude reflects the in-flight task in the title
+        // and the literal "claude" frequently drops out)
+        // do not flip `is_claude_running()` to false and
+        // hide the hardware caret. See `Pane::claude_seen`.
+        let lower = new_title.to_lowercase();
+        if lower.contains("claude") {
+            sinks.claude_seen.store(true, Ordering::Relaxed);
+        }
+        if lower.contains("codex") {
+            sinks.codex_seen.store(true, Ordering::Relaxed);
+        }
+        if lower.contains("copilot") {
+            sinks.copilot_seen.store(true, Ordering::Relaxed);
+        }
+        if let Ok(mut t) = sinks.title.lock() {
+            *t = new_title;
+        }
+    }
+
+    // Heuristic prompt detection over a rolling tail so prompts
+    // that straddle two reads are still picked up.
+    if !sinks.prompt_seen.load(Ordering::Acquire) {
+        tails.prompt.extend_from_slice(data);
+        if tails.prompt.len() > ReaderTails::TAIL_CAP * 2 {
+            let drop = tails.prompt.len() - ReaderTails::TAIL_CAP;
+            tails.prompt.drain(..drop);
+        }
+        if is_prompt_ready(&tails.prompt) {
+            sinks.prompt_seen.store(true, Ordering::Release);
+            // Tail no longer needed once the flag latches on.
+            tails.prompt = Vec::new();
+        }
+    }
+
+    tails.control.extend_from_slice(data);
+    if tails.control.len() > ReaderTails::CONTROL_CAP {
+        let drop = tails.control.len() - ReaderTails::CONTROL_CAP;
+        tails.control.drain(..drop);
+    }
+    if let Some(enabled) = detect_alternate_scroll_toggle(&tails.control) {
+        sinks
+            .alternate_scroll_mode
+            .store(enabled, Ordering::Relaxed);
+    }
+    tails.osc52.extend_from_slice(data);
+    for text in drain_osc52_copies(&mut tails.osc52) {
+        let _ = sinks.event_tx.send(AppEvent::ClipboardCopy(text));
+    }
+    if tails.osc52.len() > ReaderTails::OSC52_CAP {
+        tails.osc52.clear();
+    }
+
+    let mut parser = sinks.parser.lock().unwrap_or_else(|e| e.into_inner());
+    parser.process(data);
+    let screen = parser.screen();
+    let mode = screen.mouse_protocol_mode();
+    if !matches!(mode, vt100::MouseProtocolMode::None) {
+        let mut cache = sinks
+            .mouse_protocol_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        *cache = Some(CachedMouseProtocol {
+            mode,
+            encoding: screen.mouse_protocol_encoding(),
+            seen_at: Instant::now(),
+        });
+    }
+    drop(parser);
+    let _ = sinks.event_tx.send(AppEvent::PtyOutput(sinks.pane_id));
+}
+
 /// Start the thread that reads PTY output — feeding it to `parser` in
 /// normal builds, discarding it under `cfg(test)`.
 ///
@@ -1079,48 +1254,13 @@ fn detect_alternate_scroll_toggle(data: &[u8]) -> Option<bool> {
 /// that is why `Pane::mark_prompt_seen_for_test` exists.
 ///
 /// See issue #3.
-/// What [`spawn_pty_reader`] hands back: the thread, plus — in test
-/// builds only — the drained-byte counter that proves it is alive.
-struct PtyReader {
-    join: thread::JoinHandle<()>,
-    #[cfg(test)]
-    drained_bytes: Arc<std::sync::atomic::AtomicUsize>,
-}
-
-#[allow(clippy::too_many_arguments)]
-fn spawn_pty_reader(
-    reader: Box<dyn Read + Send>,
-    parser: Arc<Mutex<vt100::Parser>>,
-    title: Arc<Mutex<String>>,
-    scrollback_count: Arc<std::sync::atomic::AtomicUsize>,
-    prompt_seen: Arc<AtomicBool>,
-    claude_seen: Arc<AtomicBool>,
-    codex_seen: Arc<AtomicBool>,
-    copilot_seen: Arc<AtomicBool>,
-    mouse_protocol_cache: Arc<Mutex<Option<CachedMouseProtocol>>>,
-    alternate_scroll_mode: Arc<AtomicBool>,
-    pane_id: usize,
-    event_tx: Sender<AppEvent>,
-) -> PtyReader {
+fn spawn_pty_reader(reader: Box<dyn Read + Send>, sinks: ReaderSinks) -> PtyReader {
     #[cfg(test)]
     {
-        // Every sink the parsing reader would write to is dropped here,
-        // named rather than `_`-bound so it is visible that each one is
-        // accounted for. `reader` is not among them: it is the whole
-        // point — see the note on draining above.
-        drop((
-            parser,
-            title,
-            scrollback_count,
-            prompt_seen,
-            claude_seen,
-            codex_seen,
-            copilot_seen,
-            mouse_protocol_cache,
-            alternate_scroll_mode,
-            pane_id,
-            event_tx,
-        ));
+        // Every sink the parsing reader would write to is dropped here.
+        // `reader` is not: draining it is the whole point — see the note
+        // above.
+        drop(sinks);
         let drained_bytes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let counter = Arc::clone(&drained_bytes);
         let join = thread::spawn(move || {
@@ -1143,153 +1283,28 @@ fn spawn_pty_reader(
     #[cfg(not(test))]
     PtyReader {
         join: thread::spawn(move || {
-            pty_reader_thread(
-                reader,
-                parser,
-                title,
-                scrollback_count,
-                prompt_seen,
-                claude_seen,
-                codex_seen,
-                copilot_seen,
-                mouse_protocol_cache,
-                alternate_scroll_mode,
-                pane_id,
-                event_tx,
-            );
+            pty_reader_thread(reader, sinks);
         }),
     }
 }
 
 /// Background thread that reads PTY output and feeds it to vt100 parser.
-#[cfg_attr(test, allow(dead_code))]
-#[allow(clippy::too_many_arguments)]
-fn pty_reader_thread(
-    mut reader: Box<dyn Read + Send>,
-    parser: Arc<Mutex<vt100::Parser>>,
-    title: Arc<Mutex<String>>,
-    scrollback_count: Arc<std::sync::atomic::AtomicUsize>,
-    prompt_seen: Arc<AtomicBool>,
-    claude_seen: Arc<AtomicBool>,
-    codex_seen: Arc<AtomicBool>,
-    copilot_seen: Arc<AtomicBool>,
-    mouse_protocol_cache: Arc<Mutex<Option<CachedMouseProtocol>>>,
-    alternate_scroll_mode: Arc<AtomicBool>,
-    pane_id: usize,
-    event_tx: Sender<AppEvent>,
-) {
-    // Rolling tail of the most recent bytes read from the PTY. Used to
-    // detect a shell prompt that may straddle two reader chunks. Capped
-    // so the buffer cannot grow without bound.
-    const TAIL_CAP: usize = 256;
-    let mut tail: Vec<u8> = Vec::with_capacity(TAIL_CAP * 2);
-    let mut control_tail: Vec<u8> = Vec::with_capacity(64);
-    let mut osc52_tail: Vec<u8> = Vec::with_capacity(4096);
-
+///
+/// Only the read loop lives here; [`process_pty_chunk`] does the work.
+/// The loop is driven in tests through a `Read` that hands out
+/// pre-baked chunks, which is what makes `&buf[..n]` observable — see
+/// `the_read_loop_passes_only_the_bytes_it_read`.
+fn pty_reader_thread(mut reader: Box<dyn Read + Send>, sinks: ReaderSinks) {
+    let mut tails = ReaderTails::new();
     let mut buf = [0u8; 4096];
     loop {
         match reader.read(&mut buf) {
             Ok(0) => {
-                let _ = event_tx.send(AppEvent::PtyEof(pane_id));
+                let _ = sinks.event_tx.send(AppEvent::PtyEof(sinks.pane_id));
                 break;
             }
-            Ok(n) => {
-                let data = &buf[..n];
-
-                // Track scrollback lines (count newlines)
-                let newlines = data.iter().filter(|&&b| b == b'\n').count();
-                if newlines > 0 {
-                    scrollback_count.fetch_add(newlines, std::sync::atomic::Ordering::Relaxed);
-                }
-
-                // Detect OSC 7 (cwd notification). Bash/zsh emit this on
-                // every prompt thanks to the hook injected in `Pane::new`,
-                // so its presence is also a strong "prompt is up" signal.
-                // Release ordering pairs with the Acquire load in
-                // `Pane::try_flush_startup` so the queued startup command
-                // is published to the main thread atomically.
-                if let Some(path) = extract_osc7(data) {
-                    prompt_seen.store(true, Ordering::Release);
-                    // Drop the rolling tail once the latch is set so we
-                    // do not retain memory for the rest of the session.
-                    tail = Vec::new();
-                    let _ = event_tx.send(AppEvent::CwdChanged(pane_id, path));
-                }
-
-                // Detect OSC 0/2 (window title) — used to detect Claude Code
-                if let Some(new_title) = extract_osc_title(data) {
-                    // Latch: once Claude has been seen in this pane,
-                    // remember it forever so transient title rewrites
-                    // (Claude reflects the in-flight task in the title
-                    // and the literal "claude" frequently drops out)
-                    // do not flip `is_claude_running()` to false and
-                    // hide the hardware caret. See `Pane::claude_seen`.
-                    let lower = new_title.to_lowercase();
-                    if lower.contains("claude") {
-                        claude_seen.store(true, Ordering::Relaxed);
-                    }
-                    if lower.contains("codex") {
-                        codex_seen.store(true, Ordering::Relaxed);
-                    }
-                    if lower.contains("copilot") {
-                        copilot_seen.store(true, Ordering::Relaxed);
-                    }
-                    if let Ok(mut t) = title.lock() {
-                        *t = new_title;
-                    }
-                }
-
-                // Heuristic prompt detection over a rolling tail so prompts
-                // that straddle two reads are still picked up.
-                if !prompt_seen.load(Ordering::Acquire) {
-                    tail.extend_from_slice(data);
-                    if tail.len() > TAIL_CAP * 2 {
-                        let drop = tail.len() - TAIL_CAP;
-                        tail.drain(..drop);
-                    }
-                    if is_prompt_ready(&tail) {
-                        prompt_seen.store(true, Ordering::Release);
-                        // Tail no longer needed once the flag latches on.
-                        tail = Vec::new();
-                    }
-                }
-
-                control_tail.extend_from_slice(data);
-                if control_tail.len() > 64 {
-                    let drop = control_tail.len() - 64;
-                    control_tail.drain(..drop);
-                }
-                if let Some(enabled) = detect_alternate_scroll_toggle(&control_tail) {
-                    alternate_scroll_mode.store(enabled, Ordering::Relaxed);
-                }
-                osc52_tail.extend_from_slice(data);
-                for text in drain_osc52_copies(&mut osc52_tail) {
-                    let _ = event_tx.send(AppEvent::ClipboardCopy(text));
-                }
-                if osc52_tail.len() > 1_048_576 {
-                    osc52_tail.clear();
-                }
-
-                let mut parser = parser.lock().unwrap_or_else(|e| e.into_inner());
-                parser.process(data);
-                let screen = parser.screen();
-                let mode = screen.mouse_protocol_mode();
-                if !matches!(mode, vt100::MouseProtocolMode::None) {
-                    let mut cache = mouse_protocol_cache
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner());
-                    *cache = Some(CachedMouseProtocol {
-                        mode,
-                        encoding: screen.mouse_protocol_encoding(),
-                        seen_at: Instant::now(),
-                    });
-                }
-                drop(parser);
-                let _ = event_tx.send(AppEvent::PtyOutput(pane_id));
-            }
-            Err(_) => {
-                break;
-            }
+            Ok(n) => process_pty_chunk(&buf[..n], &mut tails, &sinks),
+            Err(_) => break,
         }
     }
 }
@@ -1680,6 +1695,446 @@ mod tests {
         assert!(
             pane.drained_bytes.load(Ordering::Relaxed) > 0,
             "the reader drained nothing, so the PTY is filling up"
+        );
+    }
+
+    // ── process_pty_chunk ─────────────────────────────────────────
+    //
+    // A PTY read boundary lands wherever the kernel put it, so these
+    // drive the chunk processor with the splits a real terminal
+    // produces. Before #5 none of this code ran under `cfg(test)` at
+    // all.
+
+    /// Builds sinks plus the receiver their events land in.
+    fn sinks() -> (ReaderSinks, std::sync::mpsc::Receiver<AppEvent>) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        (
+            ReaderSinks {
+                parser: Arc::new(Mutex::new(vt100::Parser::new(24, 80, 100))),
+                title: Arc::new(Mutex::new(String::new())),
+                scrollback_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                prompt_seen: Arc::new(AtomicBool::new(false)),
+                claude_seen: Arc::new(AtomicBool::new(false)),
+                codex_seen: Arc::new(AtomicBool::new(false)),
+                copilot_seen: Arc::new(AtomicBool::new(false)),
+                mouse_protocol_cache: Arc::new(Mutex::new(None)),
+                alternate_scroll_mode: Arc::new(AtomicBool::new(false)),
+                pane_id: 7,
+                event_tx: tx,
+            },
+            rx,
+        )
+    }
+
+    fn events(rx: &std::sync::mpsc::Receiver<AppEvent>) -> Vec<AppEvent> {
+        rx.try_iter().collect()
+    }
+
+    #[test]
+    fn a_prompt_split_across_two_chunks_still_latches() {
+        let (sinks, _rx) = sinks();
+        let mut tails = ReaderTails::new();
+
+        process_pty_chunk(b"user@host:~", &mut tails, &sinks);
+        assert!(
+            !sinks.prompt_seen.load(Ordering::Acquire),
+            "half a prompt is not a prompt"
+        );
+
+        process_pty_chunk(b"/work$ ", &mut tails, &sinks);
+        assert!(
+            sinks.prompt_seen.load(Ordering::Acquire),
+            "the tail must carry the first half across the read boundary"
+        );
+        assert!(
+            tails.prompt.is_empty(),
+            "the tail is released once the latch is set"
+        );
+    }
+
+    /// The trim has to keep the *newest* bytes — a prompt can only ever
+    /// be at the end. Trimming the other way still bounds the buffer and
+    /// still passes a test that appends the prompt *after* the trim, so
+    /// this drives the case that separates them: one chunk that
+    /// overflows the cap and carries the prompt inside the part a
+    /// wrong-ended trim would throw away.
+    #[test]
+    fn the_prompt_tail_trim_keeps_the_newest_bytes() {
+        let (sinks, _rx) = sinks();
+        let mut tails = ReaderTails::new();
+
+        let mut chunk = vec![b'x'; ReaderTails::TAIL_CAP * 2 + 64];
+        chunk.extend_from_slice(b"\nuser@host:~$ ");
+        process_pty_chunk(&chunk, &mut tails, &sinks);
+
+        assert!(
+            sinks.prompt_seen.load(Ordering::Acquire),
+            "the prompt was at the end of the chunk and must survive the trim"
+        );
+    }
+
+    /// The bound itself, over many reads, with the prompt never
+    /// arriving — the shape a long-running pane actually has.
+    #[test]
+    fn the_prompt_tail_stays_bounded_across_many_reads() {
+        let (sinks, _rx) = sinks();
+        let mut tails = ReaderTails::new();
+
+        for i in 0..40 {
+            process_pty_chunk(&[b'x'; 64], &mut tails, &sinks);
+            assert!(
+                tails.prompt.len() <= ReaderTails::TAIL_CAP * 2,
+                "tail grew past its cap on read {i}: {}",
+                tails.prompt.len()
+            );
+            // Whatever is retained, it has to be the newest bytes.
+            assert!(
+                tails.prompt.ends_with(&[b'x'; 64]),
+                "the trim dropped the newest bytes"
+            );
+        }
+        assert!(!sinks.prompt_seen.load(Ordering::Acquire));
+
+        process_pty_chunk(b"\n~ $ ", &mut tails, &sinks);
+        assert!(
+            sinks.prompt_seen.load(Ordering::Acquire),
+            "a prompt arriving after a long run of output must still be seen"
+        );
+    }
+
+    #[test]
+    fn osc7_latches_the_prompt_and_reports_the_cwd() {
+        let (sinks, rx) = sinks();
+        let mut tails = ReaderTails::new();
+
+        // Ordinary output first, so the tail is non-empty and the
+        // release below is something rather than nothing.
+        process_pty_chunk(b"building...\n", &mut tails, &sinks);
+        assert!(!tails.prompt.is_empty());
+
+        process_pty_chunk(b"\x1b]7;file://host/tmp/work\x07", &mut tails, &sinks);
+
+        assert!(sinks.prompt_seen.load(Ordering::Acquire));
+        assert!(
+            tails.prompt.is_empty(),
+            "the tail is released once the latch is set, not retained for the session"
+        );
+        assert!(events(&rx).iter().any(|e| matches!(
+            e,
+            AppEvent::CwdChanged(7, p) if p == &PathBuf::from("/tmp/work")
+        )));
+    }
+
+    #[test]
+    fn an_osc_title_sets_the_title_and_latches_its_client() {
+        let (sinks, _rx) = sinks();
+        let mut tails = ReaderTails::new();
+
+        process_pty_chunk(b"\x1b]2;claude: refactor\x07", &mut tails, &sinks);
+        assert_eq!(
+            *sinks.title.lock().unwrap_or_else(|e| e.into_inner()),
+            "claude: refactor"
+        );
+        assert!(sinks.claude_seen.load(Ordering::Relaxed));
+        assert!(!sinks.codex_seen.load(Ordering::Relaxed));
+        assert!(!sinks.copilot_seen.load(Ordering::Relaxed));
+
+        // The latch is sticky: Claude rewrites its title constantly and
+        // the literal "claude" drops out, which must not un-see it.
+        process_pty_chunk(
+            b"\x1b]2;\xe2\x9c\xb6 writing a novel\x07",
+            &mut tails,
+            &sinks,
+        );
+        assert!(
+            sinks.claude_seen.load(Ordering::Relaxed),
+            "the client latch must never clear"
+        );
+        assert_eq!(
+            *sinks.title.lock().unwrap_or_else(|e| e.into_inner()),
+            "✶ writing a novel",
+            "the title itself still tracks the newest value"
+        );
+
+        // Each client has its own branch, and they must not be wired to
+        // each other — this fork exists for the Copilot one.
+        process_pty_chunk(b"\x1b]2;copilot: fix the build\x07", &mut tails, &sinks);
+        assert!(sinks.copilot_seen.load(Ordering::Relaxed));
+        assert!(
+            !sinks.codex_seen.load(Ordering::Relaxed),
+            "copilot must not latch codex"
+        );
+    }
+
+    #[test]
+    fn newlines_accumulate_into_the_scrollback_counter() {
+        let (sinks, _rx) = sinks();
+        let mut tails = ReaderTails::new();
+
+        process_pty_chunk(b"one\ntwo\n", &mut tails, &sinks);
+        process_pty_chunk(b"three\n", &mut tails, &sinks);
+
+        assert_eq!(
+            sinks
+                .scrollback_count
+                .load(std::sync::atomic::Ordering::Relaxed),
+            3
+        );
+    }
+
+    #[test]
+    fn an_alternate_scroll_toggle_split_across_chunks_is_seen() {
+        let (sinks, _rx) = sinks();
+        let mut tails = ReaderTails::new();
+
+        process_pty_chunk(b"\x1b[?100", &mut tails, &sinks);
+        assert!(!sinks.alternate_scroll_mode.load(Ordering::Relaxed));
+
+        process_pty_chunk(b"7h", &mut tails, &sinks);
+        assert!(
+            sinks.alternate_scroll_mode.load(Ordering::Relaxed),
+            "the control tail must carry the split sequence"
+        );
+
+        process_pty_chunk(b"\x1b[?1007l", &mut tails, &sinks);
+        assert!(!sinks.alternate_scroll_mode.load(Ordering::Relaxed));
+    }
+
+    /// The control tail is trimmed to 64 bytes, so a toggle must still
+    /// be found when it arrives right after a chunk that overflows it.
+    #[test]
+    fn the_control_tail_stays_bounded_without_losing_a_toggle() {
+        let (sinks, _rx) = sinks();
+        let mut tails = ReaderTails::new();
+
+        process_pty_chunk(&[b'.'; 500], &mut tails, &sinks);
+        assert!(tails.control.len() <= ReaderTails::CONTROL_CAP);
+
+        process_pty_chunk(b"\x1b[?1007h", &mut tails, &sinks);
+        assert!(sinks.alternate_scroll_mode.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn an_osc52_copy_split_across_chunks_is_delivered_once() {
+        let (sinks, rx) = sinks();
+        let mut tails = ReaderTails::new();
+
+        // "hello" base64'd, cut mid-payload.
+        process_pty_chunk(b"\x1b]52;c;aGVs", &mut tails, &sinks);
+        assert!(
+            !events(&rx)
+                .iter()
+                .any(|e| matches!(e, AppEvent::ClipboardCopy(_))),
+            "an unterminated payload must not be delivered"
+        );
+
+        process_pty_chunk(b"bG8=\x07", &mut tails, &sinks);
+        let copies: Vec<String> = events(&rx)
+            .into_iter()
+            .filter_map(|e| match e {
+                AppEvent::ClipboardCopy(t) => Some(t),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(copies, vec!["hello".to_string()]);
+
+        process_pty_chunk(b"plain output", &mut tails, &sinks);
+        assert!(
+            !events(&rx)
+                .iter()
+                .any(|e| matches!(e, AppEvent::ClipboardCopy(_))),
+            "a delivered copy must not be delivered again"
+        );
+    }
+
+    /// A terminator that never arrives must not grow the buffer without
+    /// bound. Pins the `OSC52_CAP` clamp.
+    #[test]
+    fn an_unterminated_osc52_payload_is_abandoned_at_the_cap() {
+        let (sinks, rx) = sinks();
+        let mut tails = ReaderTails::new();
+
+        process_pty_chunk(b"\x1b]52;c;", &mut tails, &sinks);
+        let chunk = vec![b'A'; 4096];
+        let mut sent = 0usize;
+        let mut peak = 0usize;
+        while sent <= ReaderTails::OSC52_CAP {
+            process_pty_chunk(&chunk, &mut tails, &sinks);
+            sent += chunk.len();
+            peak = peak.max(tails.osc52.len());
+        }
+
+        // The peak is what the clamp actually bounds; the length after
+        // it fires is near zero and would pass by six orders of
+        // magnitude, saying nothing.
+        assert!(
+            peak <= ReaderTails::OSC52_CAP + chunk.len(),
+            "the pending payload peaked past its cap: {peak}"
+        );
+        assert!(
+            sent > ReaderTails::OSC52_CAP,
+            "the loop must actually reach the cap"
+        );
+        assert!(
+            !events(&rx)
+                .iter()
+                .any(|e| matches!(e, AppEvent::ClipboardCopy(_))),
+            "nothing was ever terminated, so nothing may be delivered"
+        );
+    }
+
+    #[test]
+    fn every_chunk_reports_output_and_reaches_the_parser() {
+        let (sinks, rx) = sinks();
+        let mut tails = ReaderTails::new();
+
+        process_pty_chunk(b"visible", &mut tails, &sinks);
+        process_pty_chunk(b" and more", &mut tails, &sinks);
+
+        assert_eq!(
+            events(&rx)
+                .iter()
+                .filter(|e| matches!(e, AppEvent::PtyOutput(7)))
+                .count(),
+            2,
+            "one per chunk, not one per burst"
+        );
+        let parser = sinks.parser.lock().unwrap_or_else(|e| e.into_inner());
+        assert!(parser.screen().contents().contains("visible and more"));
+    }
+
+    #[test]
+    fn a_mouse_protocol_mode_is_cached_only_once_the_app_asks_for_one() {
+        let (sinks, _rx) = sinks();
+        let mut tails = ReaderTails::new();
+
+        process_pty_chunk(b"no mouse here", &mut tails, &sinks);
+        assert!(sinks
+            .mouse_protocol_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_none());
+
+        // SGR button-event tracking, as Claude Code turns on.
+        process_pty_chunk(b"\x1b[?1002h\x1b[?1006h", &mut tails, &sinks);
+        let cache = sinks
+            .mouse_protocol_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let cached = cache.expect("a mode was requested, so it must be cached");
+        assert!(!matches!(cached.mode, vt100::MouseProtocolMode::None));
+        // The encoding travels with the mode: `click_forward_bytes` and
+        // `wheel_forward_bytes` branch on it, so caching the mode with a
+        // default encoding ships malformed reports.
+        assert!(
+            matches!(cached.encoding, vt100::MouseProtocolEncoding::Sgr),
+            "\x1b[?1006h selects SGR, which must reach the cache"
+        );
+    }
+
+    // ── pty_reader_thread ─────────────────────────────────────────
+
+    /// A `Read` that hands out pre-baked chunks, one per call, then
+    /// EOFs. Chunk boundaries are the whole point: they are what a real
+    /// PTY read gives you, and what several of the behaviours below
+    /// depend on.
+    struct Chunks(std::collections::VecDeque<Vec<u8>>);
+
+    impl Chunks {
+        fn new<const N: usize>(chunks: [&[u8]; N]) -> Self {
+            Self(chunks.iter().map(|c| c.to_vec()).collect())
+        }
+    }
+
+    impl Read for Chunks {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let Some(chunk) = self.0.pop_front() else {
+                return Ok(0);
+            };
+            let n = chunk.len().min(buf.len());
+            buf[..n].copy_from_slice(&chunk[..n]);
+            Ok(n)
+        }
+    }
+
+    /// The loop must hand `process_pty_chunk` exactly the bytes it read
+    /// and no more. Passing the whole 4 KiB buffer compiles and looks
+    /// harmless, but feeds the parser and all three tails the previous
+    /// read's leftovers plus NUL padding on every chunk — which, among
+    /// other things, flushes a split escape sequence out of the control
+    /// tail before its other half arrives. That is the failure this
+    /// test exists for, and it is invisible to any test that only calls
+    /// `process_pty_chunk` directly.
+    #[test]
+    fn the_read_loop_passes_only_the_bytes_it_read() {
+        let (sinks, rx) = sinks();
+        let alternate_scroll_mode = Arc::clone(&sinks.alternate_scroll_mode);
+
+        pty_reader_thread(Box::new(Chunks::new([b"\x1b[?100", b"7h"])), sinks);
+
+        assert!(
+            alternate_scroll_mode.load(Ordering::Relaxed),
+            "a toggle split across two reads was lost, so the loop passed \
+             more than it read"
+        );
+        assert_eq!(
+            events(&rx)
+                .iter()
+                .filter(|e| matches!(e, AppEvent::PtyOutput(7)))
+                .count(),
+            2,
+            "one PtyOutput per chunk actually read"
+        );
+    }
+
+    /// EOF is how a pane learns its shell is gone; the id has to be its
+    /// own, and the event has to be sent exactly once, after the last
+    /// chunk rather than instead of it.
+    #[test]
+    fn the_read_loop_reports_eof_once_and_for_its_own_pane() {
+        let (sinks, rx) = sinks();
+
+        pty_reader_thread(Box::new(Chunks::new([b"output\n"])), sinks);
+
+        let seen = events(&rx);
+        assert_eq!(
+            seen.iter()
+                .filter(|e| matches!(e, AppEvent::PtyEof(7)))
+                .count(),
+            1
+        );
+        assert!(
+            matches!(seen.last(), Some(AppEvent::PtyEof(7))),
+            "EOF is last: the final chunk is processed before it"
+        );
+    }
+
+    /// A read error ends the loop. Continuing instead would busy-spin
+    /// forever on a closed PTY, burning a core per dead pane with
+    /// nothing failing anywhere.
+    #[test]
+    fn the_read_loop_stops_on_a_read_error() {
+        struct Failing(bool);
+        impl Read for Failing {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                if self.0 {
+                    self.0 = false;
+                    buf[..2].copy_from_slice(b"hi");
+                    return Ok(2);
+                }
+                Err(std::io::Error::other("PTY closed"))
+            }
+        }
+
+        let (sinks, rx) = sinks();
+        // Returns rather than hangs — that is the assertion.
+        pty_reader_thread(Box::new(Failing(true)), sinks);
+
+        let seen = events(&rx);
+        assert!(seen.iter().any(|e| matches!(e, AppEvent::PtyOutput(7))));
+        assert!(
+            !seen.iter().any(|e| matches!(e, AppEvent::PtyEof(7))),
+            "an error is not a clean EOF"
         );
     }
 
