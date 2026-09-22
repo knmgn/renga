@@ -596,11 +596,45 @@ fn process_event(monitor: &mut PaneMonitor, line: &str) {
     }
 }
 
+/// No store at all under `cfg(test)`, so the real one is never read.
+///
+/// `App::new` builds a real `ClaudeMonitor`, and `find_jsonl_path`
+/// derives its lookup from the pane's cwd. So a developer running the
+/// suite *inside a directory that has a live Claude Code session* had
+/// that session's JSONL read back as pane state: the sweep reported
+/// `is_working: true` because the session driving the test was working,
+/// and `background_status_changes_do_not_pierce_the_ime_overlay_freeze`
+/// failed on their machine while passing in CI, where no such session
+/// exists.
+///
+/// Gating the root is all this needs to do — `find_jsonl_path_in` keeps
+/// the lookup itself reachable — and the monitor's own tests inject a
+/// resolved path with `register_pane_with_path`. See issue #3.
+#[cfg(test)]
+fn projects_dir() -> Option<PathBuf> {
+    None
+}
+
+/// Where Claude Code keeps its per-project session logs, or `None` when
+/// there is no home directory to resolve them against.
+#[cfg(not(test))]
+fn projects_dir() -> Option<PathBuf> {
+    Some(dirs::home_dir()?.join(".claude").join("projects"))
+}
+
 /// Convert a cwd path to Claude's project directory name and find the most recent JSONL.
 fn find_jsonl_path(cwd: &Path) -> Option<PathBuf> {
-    let home = dirs::home_dir()?;
-    let projects_dir = home.join(".claude").join("projects");
+    find_jsonl_path_in(&projects_dir()?, cwd)
+}
 
+/// [`find_jsonl_path`] against an explicit store root.
+///
+/// Split out so the lookup stays testable after `projects_dir` was
+/// gated off under `cfg(test)` (#3) — otherwise the cwd encoding and
+/// the most-recent-mtime pick, which is exactly the kind of comparison
+/// that silently returns the wrong session, would be unreachable in
+/// every test configuration.
+fn find_jsonl_path_in(projects_dir: &Path, cwd: &Path) -> Option<PathBuf> {
     if !projects_dir.exists() {
         return None;
     }
@@ -655,6 +689,61 @@ mod tests {
         let path = PathBuf::from(r"C:\Users\foo\bar");
         let encoded = encode_cwd_to_project_name(&path);
         assert_eq!(encoded, "C--Users-foo-bar");
+    }
+
+    /// A pane's cwd picks the *most recently written* transcript in its
+    /// project directory, and nothing but `.jsonl`. Reads the store root
+    /// through `find_jsonl_path_in`, which is why that seam exists —
+    /// `projects_dir()` is `None` under `cfg(test)` so the real
+    /// `~/.claude` is never touched (#3).
+    #[test]
+    fn find_jsonl_path_in_picks_the_newest_transcript() {
+        let root = std::env::temp_dir().join(format!(
+            "renga_find_jsonl_test_{}_{}",
+            std::process::id(),
+            line!()
+        ));
+        // Removed even if an assertion panics mid-test, matching the
+        // `TempFiles` pattern the pane and win_job tests use.
+        struct TempTree(PathBuf);
+        impl Drop for TempTree {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _cleanup = TempTree(root.clone());
+        let cwd = Path::new("/home/someone/work");
+        let project = root.join(encode_cwd_to_project_name(cwd));
+        std::fs::create_dir_all(&project).expect("create the project dir");
+
+        let older = project.join("older.jsonl");
+        let newer = project.join("newer.jsonl");
+        // Not a transcript: must be ignored even though it is newest.
+        let decoy = project.join("newest.txt");
+        for (path, secs_ago) in [(&older, 60u64), (&newer, 10), (&decoy, 0)] {
+            std::fs::write(path, "").expect("write the file");
+            set_mtime(path, SystemTime::now() - Duration::from_secs(secs_ago));
+        }
+
+        assert_eq!(find_jsonl_path_in(&root, cwd), Some(newer));
+        // An unknown cwd has no project directory, and a root that is
+        // not there at all resolves to nothing rather than panicking.
+        assert_eq!(
+            find_jsonl_path_in(&root, Path::new("/home/someone/elsewhere")),
+            None
+        );
+        assert_eq!(find_jsonl_path_in(&root.join("absent"), cwd), None);
+    }
+
+    /// `std` has no portable mtime setter, so go through the file's
+    /// times via `File::set_times` (stable since 1.75).
+    fn set_mtime(path: &Path, when: SystemTime) {
+        let f = File::options()
+            .write(true)
+            .open(path)
+            .expect("open for set_times");
+        f.set_times(std::fs::FileTimes::new().set_modified(when))
+            .expect("set mtime");
     }
 
     #[test]
