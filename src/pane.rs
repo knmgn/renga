@@ -524,12 +524,17 @@ impl Pane {
     /// (e.g. `shell_accepts_command_injection`); use
     /// `claude_ever_seen` for cursor-rendering purposes that must
     /// survive Claude's transient task-name title rewrites.
+    ///
+    /// Recovers from a poisoned mutex rather than answering `false`,
+    /// as do its Codex and Copilot siblings. Poison is sticky — nothing
+    /// short of `clear_poison` lifts it — so a single panic while the
+    /// lock was held used to switch all three live signals off for the
+    /// rest of the process, silently and permanently. They gate real
+    /// behaviour: `shell_accepts_command_injection` here, and mouse
+    /// forwarding through `is_codex_running`. See issue #8.
     pub fn is_claude_running(&self) -> bool {
-        if let Ok(t) = self.title.lock() {
-            title_mentions_client(&t, "claude")
-        } else {
-            false
-        }
+        let t = self.title.lock().unwrap_or_else(|e| e.into_inner());
+        title_mentions_client(&t, "claude")
     }
 
     /// Check if Codex is running in this pane (by current window
@@ -540,11 +545,8 @@ impl Pane {
     /// `codex_ever_seen()` for cosmetic indicators that must
     /// survive Codex's transient task-name title rewrites (#209).
     pub fn is_codex_running(&self) -> bool {
-        if let Ok(t) = self.title.lock() {
-            title_mentions_client(&t, "codex")
-        } else {
-            false
-        }
+        let t = self.title.lock().unwrap_or_else(|e| e.into_inner());
+        title_mentions_client(&t, "codex")
     }
 
     /// Check if GitHub Copilot CLI is running in this pane (by current
@@ -552,11 +554,8 @@ impl Pane {
     /// same caveats as the Claude and Codex variants; use
     /// `copilot_ever_seen()` for cosmetic indicators.
     pub fn is_copilot_running(&self) -> bool {
-        if let Ok(t) = self.title.lock() {
-            title_mentions_client(&t, "copilot")
-        } else {
-            false
-        }
+        let t = self.title.lock().unwrap_or_else(|e| e.into_inner());
+        title_mentions_client(&t, "copilot")
     }
 
     fn effective_mouse_protocol(
@@ -1069,6 +1068,15 @@ struct ReaderTails {
     /// Pending OSC 52 clipboard payload, which is base64 and can be far
     /// larger than one chunk.
     osc52: Vec<u8>,
+    /// How far into `osc52` the terminator search has already looked.
+    ///
+    /// Without it, every chunk rescans the whole pending payload: the
+    /// prefix is found at index 0 immediately, but `find_osc_terminator`
+    /// walks to the end each time. At 4 KiB reads that is ~135 MB of
+    /// scanning before [`ReaderTails::OSC52_CAP`] cuts the payload off,
+    /// paid by the reader thread while it is also the only thing
+    /// draining the PTY (#7).
+    osc52_scanned: usize,
 }
 
 impl ReaderTails {
@@ -1095,7 +1103,18 @@ impl ReaderTails {
             prompt: Vec::with_capacity(Self::TAIL_CAP * 2),
             control: Vec::with_capacity(Self::CONTROL_CAP),
             osc52: Vec::with_capacity(4096),
+            osc52_scanned: 0,
         }
+    }
+
+    /// Give up on a runaway OSC 52 payload.
+    ///
+    /// The watermark has to go with the bytes: left behind, it would
+    /// point into whatever lands in the buffer next, and the terminator
+    /// search would resume past a terminator that is actually there.
+    fn abandon_osc52(&mut self) {
+        self.osc52.clear();
+        self.osc52_scanned = 0;
     }
 }
 
@@ -1150,9 +1169,16 @@ fn process_pty_chunk(data: &[u8], tails: &mut ReaderTails, sinks: &ReaderSinks) 
         if lower.contains("copilot") {
             sinks.copilot_seen.store(true, Ordering::Relaxed);
         }
-        if let Ok(mut t) = sinks.title.lock() {
-            *t = new_title;
-        }
+        // `into_inner` on poison, like the parser and mouse-cache locks
+        // above. The `*_seen` latches overhead are not at stake — they
+        // are stored before this lock and never gated on it — but the
+        // live `is_*_running` signals read this string, and dropping the
+        // write on `Err` would leave them reading a stale title for the
+        // rest of the process. The value behind a poisoned lock is a
+        // `String` some panicking thread was mid-assignment on, and the
+        // next line overwrites it. See issue #8.
+        let mut t = sinks.title.lock().unwrap_or_else(|e| e.into_inner());
+        *t = new_title;
     }
 
     // Heuristic prompt detection over a rolling tail so prompts
@@ -1181,11 +1207,11 @@ fn process_pty_chunk(data: &[u8], tails: &mut ReaderTails, sinks: &ReaderSinks) 
             .store(enabled, Ordering::Relaxed);
     }
     tails.osc52.extend_from_slice(data);
-    for text in drain_osc52_copies(&mut tails.osc52) {
+    for text in drain_osc52_copies(&mut tails.osc52, &mut tails.osc52_scanned) {
         let _ = sinks.event_tx.send(AppEvent::ClipboardCopy(text));
     }
     if tails.osc52.len() > ReaderTails::OSC52_CAP {
-        tails.osc52.clear();
+        tails.abandon_osc52();
     }
 
     let mut parser = sinks.parser.lock().unwrap_or_else(|e| e.into_inner());
@@ -1309,22 +1335,46 @@ fn pty_reader_thread(mut reader: Box<dyn Read + Send>, sinks: ReaderSinks) {
     }
 }
 
-fn drain_osc52_copies(buf: &mut Vec<u8>) -> Vec<String> {
+/// Pull every *complete* OSC 52 clipboard copy out of `buf`, leaving any
+/// unterminated tail behind for the next chunk.
+///
+/// `scanned` is how far the terminator search got last time, carried
+/// across calls so an open payload is not walked from the start again on
+/// every chunk (#7). It indexes `buf` directly, which stays valid
+/// because between calls `buf` is only appended to — every path here
+/// that removes bytes from the front resets it, and
+/// [`ReaderTails::abandon_osc52`] resets it when the payload is dropped
+/// wholesale.
+fn drain_osc52_copies(buf: &mut Vec<u8>, scanned: &mut usize) -> Vec<String> {
     const PREFIX: &[u8] = b"\x1b]52;";
     let mut copies = Vec::new();
-    let mut search_from = 0;
+
+    // The property every reset below exists to preserve. A live
+    // watermark is only ever left by the open-payload branch, which
+    // drains everything before the prefix first — so if it is non-zero,
+    // the payload it indexes into starts at 0. Anything that breaks that
+    // makes `resume` point into unrelated bytes, and the next copy is
+    // swallowed rather than merely rescanned.
+    debug_assert!(
+        *scanned == 0 || buf.starts_with(PREFIX),
+        "a non-zero watermark means an open payload, whose prefix is at index 0"
+    );
 
     loop {
-        let Some(start_rel) = find_subslice(&buf[search_from..], PREFIX) else {
+        let Some(start) = find_subslice(buf, PREFIX) else {
             keep_possible_prefix_suffix(buf, PREFIX);
+            *scanned = 0;
             break;
         };
-        let start = search_from + start_rel;
         let payload_start = start + PREFIX.len();
-        let Some((term_start, term_end)) = find_osc_terminator(buf, payload_start) else {
+        let resume = payload_start.max(*scanned);
+        let Some((term_start, term_end)) = find_osc_terminator(buf, resume) else {
             if start > 0 {
                 buf.drain(..start);
             }
+            // Everything is examined except the last byte, which could
+            // be the `ESC` half of a terminator split across the read.
+            *scanned = buf.len().saturating_sub(1);
             break;
         };
 
@@ -1332,7 +1382,7 @@ fn drain_osc52_copies(buf: &mut Vec<u8>) -> Vec<String> {
             copies.push(text);
         }
         buf.drain(..term_end);
-        search_from = 0;
+        *scanned = 0;
     }
 
     copies
@@ -1866,6 +1916,72 @@ mod tests {
         );
     }
 
+    /// A poisoned title mutex must not switch the live client signals
+    /// off for the rest of the process.
+    ///
+    /// The `*_seen` latches are not what is at risk — they are plain
+    /// atomics stored before the lock is taken. What breaks is
+    /// `is_claude_running` / `is_codex_running` / `is_copilot_running`,
+    /// which read the title itself: answering `false` on `Err` meant one
+    /// panic while the lock was held turned them off permanently, since
+    /// poison is sticky. They gate command injection and mouse
+    /// forwarding, so this is behaviour, not decoration (#8).
+    #[test]
+    fn a_poisoned_title_mutex_does_not_silence_the_live_client_signals() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let pane = Pane::new(1, 24, 80, tx).expect("spawn a pane");
+        *pane.title.lock().unwrap_or_else(|e| e.into_inner()) = "claude — building".to_string();
+        assert!(pane.is_claude_running(), "precondition");
+
+        // Poison it the only way it can be poisoned: panic while holding
+        // it. The hook is swapped out so the deliberate panic does not
+        // look like a failure in the log; `cargo test` runs tests in
+        // parallel, so this is kept to the shortest possible window.
+        let title = Arc::clone(&pane.title);
+        let previous_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let _ = thread::spawn(move || {
+            let _guard = title.lock().expect("lock");
+            panic!("poisoning the title mutex on purpose");
+        })
+        .join();
+        std::panic::set_hook(previous_hook);
+        assert!(pane.title.is_poisoned(), "the mutex must be poisoned");
+
+        assert!(
+            pane.is_claude_running(),
+            "a poisoned mutex must not switch the live signal off"
+        );
+        assert!(!pane.is_codex_running());
+        assert!(!pane.is_copilot_running());
+    }
+
+    /// The writer side of the same mutex: a poisoned lock must not make
+    /// the title stop tracking what the pane is showing.
+    #[test]
+    fn a_poisoned_title_mutex_still_accepts_new_titles() {
+        let (sinks, _rx) = sinks();
+        let mut tails = ReaderTails::new();
+
+        let title = Arc::clone(&sinks.title);
+        let previous_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let _ = thread::spawn(move || {
+            let _guard = title.lock().expect("lock");
+            panic!("poisoning the title mutex on purpose");
+        })
+        .join();
+        std::panic::set_hook(previous_hook);
+        assert!(sinks.title.is_poisoned());
+
+        process_pty_chunk(b"\x1b]2;claude: still here\x07", &mut tails, &sinks);
+
+        assert_eq!(
+            *sinks.title.lock().unwrap_or_else(|e| e.into_inner()),
+            "claude: still here"
+        );
+    }
+
     #[test]
     fn newlines_accumulate_into_the_scrollback_counter() {
         let (sinks, _rx) = sinks();
@@ -1945,6 +2061,110 @@ mod tests {
                 .any(|e| matches!(e, AppEvent::ClipboardCopy(_))),
             "a delivered copy must not be delivered again"
         );
+    }
+
+    /// The watermark is honoured, not merely maintained.
+    ///
+    /// Every honest input agrees on the answer whether the search
+    /// resumes or restarts — that is the point of the watermark — so the
+    /// only way to observe that it is read at all is to park it past a
+    /// terminator that is really there and require the search to miss
+    /// it. Without this, `resume = payload_start` reverts the whole of
+    /// #7 with every test still green.
+    #[test]
+    fn the_terminator_search_resumes_at_the_watermark() {
+        // BEL sits at index 15; the watermark is parked past it.
+        let mut buf = b"\x1b]52;c;aGVsbG8=\x07X".to_vec();
+        let mut scanned = 16;
+        assert!(
+            drain_osc52_copies(&mut buf, &mut scanned).is_empty(),
+            "the search restarted from the payload head instead of resuming"
+        );
+    }
+
+    /// The watermark advances with the payload. Pins the setter, which
+    /// the test above pins the reader of.
+    #[test]
+    fn the_watermark_advances_with_an_open_payload() {
+        let (sinks, _rx) = sinks();
+        let mut tails = ReaderTails::new();
+
+        process_pty_chunk(b"\x1b]52;c;", &mut tails, &sinks);
+        process_pty_chunk(&vec![b'A'; 4096], &mut tails, &sinks);
+        let after_first = tails.osc52_scanned;
+        assert!(
+            after_first >= 4096,
+            "the watermark did not advance past the first chunk: {after_first}"
+        );
+
+        process_pty_chunk(&vec![b'B'; 4096], &mut tails, &sinks);
+        assert!(
+            tails.osc52_scanned >= after_first + 4096,
+            "the watermark did not advance past the second chunk"
+        );
+    }
+
+    /// A terminator split across a read must still be found, which is
+    /// why the watermark stops one byte short of the end rather than at
+    /// it. `ESC` lands at the end of one chunk, `\` at the start of the
+    /// next.
+    #[test]
+    fn an_osc52_terminator_split_across_chunks_is_still_found() {
+        let (sinks, rx) = sinks();
+        let mut tails = ReaderTails::new();
+
+        process_pty_chunk(b"\x1b]52;c;aGVsbG8=\x1b", &mut tails, &sinks);
+        process_pty_chunk(b"\\", &mut tails, &sinks);
+
+        let copies: Vec<String> = events(&rx)
+            .into_iter()
+            .filter_map(|e| match e {
+                AppEvent::ClipboardCopy(t) => Some(t),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(copies, vec!["hello".to_string()]);
+    }
+
+    /// Abandoning a runaway payload has to drop the watermark with it.
+    /// Left behind, it points into whatever arrives next and the
+    /// terminator search resumes past a terminator that is right there
+    /// — so the very next copy is swallowed.
+    #[test]
+    fn abandoning_a_runaway_payload_does_not_swallow_the_next_copy() {
+        let (sinks, rx) = sinks();
+        let mut tails = ReaderTails::new();
+
+        process_pty_chunk(b"\x1b]52;c;", &mut tails, &sinks);
+        let chunk = vec![b'A'; 4096];
+
+        // Stop the moment the clamp fires — "abandoned" is a shrink, not
+        // an empty buffer. Stopping here matters: one more chunk of
+        // payload-free output would reset the watermark down the
+        // no-prefix path and hide the bug this test is for.
+        let mut abandoned = false;
+        let mut previous = tails.osc52.len();
+        for _ in 0..(ReaderTails::OSC52_CAP / chunk.len() + 8) {
+            process_pty_chunk(&chunk, &mut tails, &sinks);
+            if tails.osc52.len() < previous {
+                abandoned = true;
+                break;
+            }
+            previous = tails.osc52.len();
+        }
+        assert!(abandoned, "the runaway payload was never abandoned");
+        let _ = events(&rx);
+
+        // A complete, ordinary copy in the very next chunk.
+        process_pty_chunk(b"\x1b]52;c;aGVsbG8=\x07", &mut tails, &sinks);
+        let copies: Vec<String> = events(&rx)
+            .into_iter()
+            .filter_map(|e| match e {
+                AppEvent::ClipboardCopy(t) => Some(t),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(copies, vec!["hello".to_string()]);
     }
 
     /// A terminator that never arrives must not grow the buffer without
@@ -2168,24 +2388,30 @@ mod tests {
     #[test]
     fn drain_osc52_copies_decodes_bel_terminated_payload() {
         let mut buf = b"\x1b]52;c;aGVsbG8=\x07".to_vec();
-        assert_eq!(drain_osc52_copies(&mut buf), vec!["hello"]);
+        assert_eq!(drain_osc52_copies(&mut buf, &mut 0), vec!["hello"]);
         assert!(buf.is_empty());
     }
 
     #[test]
     fn drain_osc52_copies_decodes_st_terminated_payload() {
         let mut buf = b"\x1b]52;c;44GT44KT44Gr44Gh44Gv\x1b\\".to_vec();
-        assert_eq!(drain_osc52_copies(&mut buf), vec!["こんにちは"]);
+        assert_eq!(drain_osc52_copies(&mut buf, &mut 0), vec!["こんにちは"]);
         assert!(buf.is_empty());
     }
 
     #[test]
     fn drain_osc52_copies_handles_split_sequence() {
         let mut buf = b"\x1b]52;c;aGVs".to_vec();
-        assert!(drain_osc52_copies(&mut buf).is_empty());
+        let mut scanned = 0;
+        assert!(drain_osc52_copies(&mut buf, &mut scanned).is_empty());
+        // The watermark stops just short of the end, so an `ESC` that
+        // turns out to be half a split terminator is still examined.
+        assert_eq!(scanned, buf.len() - 1);
+
         buf.extend_from_slice(b"bG8=\x07");
-        assert_eq!(drain_osc52_copies(&mut buf), vec!["hello"]);
+        assert_eq!(drain_osc52_copies(&mut buf, &mut scanned), vec!["hello"]);
         assert!(buf.is_empty());
+        assert_eq!(scanned, 0, "a delivered copy releases the watermark");
     }
 
     /// End-to-end acceptance for the pane Job Object (renga-trx): a
