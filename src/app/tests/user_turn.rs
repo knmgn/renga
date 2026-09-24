@@ -19,7 +19,7 @@ use super::super::*;
 
 /// Paint `bytes` onto the focused pane's vt100 screen without going
 /// near its PTY, and hand back the pane id.
-fn seed_focused_pane_screen(app: &mut App, bytes: &[u8]) -> usize {
+pub(super) fn seed_focused_pane_screen(app: &mut App, bytes: &[u8]) -> usize {
     let pane_id = app.ws().focused_pane_id;
     let pane = app
         .ws_mut()
@@ -74,7 +74,7 @@ fn copilot_readiness_via_dispatch(bytes: &[u8], rows: u16, cols: u16) -> TurnRea
 ///
 /// `body` is what sits after the prompt glyph; empty for an idle
 /// composer.
-fn copilot_screen(footer: &str, body: &str) -> Vec<u8> {
+pub(super) fn copilot_screen(footer: &str, body: &str) -> Vec<u8> {
     copilot_screen_cols(footer, body, 40)
 }
 
@@ -99,7 +99,8 @@ fn copilot_screen_cols(footer: &str, body: &str, cols: usize) -> Vec<u8> {
 // ── readiness: Copilot ────────────────────────────────────────
 
 /// The live idle footer, verbatim.
-const COPILOT_IDLE_FOOTER: &str = " \u{2190} open sidebar \u{00B7} / commands \u{00B7} ? help";
+pub(super) const COPILOT_IDLE_FOOTER: &str =
+    " \u{2190} open sidebar \u{00B7} / commands \u{00B7} ? help";
 
 #[test]
 fn copilot_idle_composer_is_ready() {
@@ -569,7 +570,7 @@ fn copilot_nudges_are_withheld_while_working_or_modal() {
     let ready = |app: &mut App, bytes: &[u8]| {
         seed_focused_pane_screen(app, bytes);
         let pane = app.ws().panes.get(&pane_id).expect("pane");
-        App::pull_peer_delivery_ready(TurnAgent::Copilot, true, pane)
+        App::pull_peer_delivery_ready(TurnAgent::Copilot, true, pane, None)
     };
 
     assert!(

@@ -681,7 +681,7 @@ fn an_unregistered_pending_codex_startup_is_not_nudge_ready() {
     }
     let pane = app.ws().panes.get(&pane_id).expect("pane");
     assert!(
-        !App::pull_peer_delivery_ready(TurnAgent::Codex, false, pane),
+        !App::pull_peer_delivery_ready(TurnAgent::Codex, false, pane, None),
         "an unregistered pane whose codex has not started must not be typed into"
     );
     app.shutdown();

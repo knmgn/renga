@@ -201,6 +201,7 @@ impl App {
                 self.saved_overlay_drafts.remove(pid);
                 self.claude_monitor.remove(*pid);
                 self.peer_client_kinds.remove(pid);
+                self.agent_hook_states.remove(pid);
                 self.pending_codex_peer_messages.remove(pid);
             }
         }
@@ -734,6 +735,7 @@ impl App {
         self.drop_overlay_for_pane(pane_id);
         self.claude_monitor.remove(pane_id);
         self.peer_client_kinds.remove(&pane_id);
+        self.agent_hook_states.remove(&pane_id);
         self.pending_codex_peer_messages.remove(&pane_id);
         if self
             .codex_peer_notification

@@ -9,6 +9,7 @@ use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
 
+mod agent_hooks;
 mod app_core;
 mod app_state;
 mod codex_peer;

@@ -693,6 +693,20 @@ fn dispatch_request(req: Request, command_tx: &Sender<AppCommand>) -> Response {
                 reply,
             })
         }
+        Request::AgentHook {
+            pane_id,
+            kind,
+            event,
+            notification_type,
+            recoverable,
+        } => forward_unit(command_tx, |reply| AppCommand::AgentHook {
+            pane_id,
+            kind,
+            event,
+            notification_type,
+            recoverable,
+            reply,
+        }),
         Request::SetSummary { from_pane, summary } => {
             let (reply_tx, reply_rx) = oneshot::channel();
             if command_tx

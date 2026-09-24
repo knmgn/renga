@@ -50,6 +50,7 @@ fn main() -> Result<()> {
         match cmd {
             cli::IpcCommand::McpPeer => return mcp_peer::run(),
             cli::IpcCommand::Mcp { action } => return mcp_peer::install::run(action),
+            cli::IpcCommand::CopilotHook { event } => return mcp_peer::copilot::run_hook(event),
             _ => return run_ipc_client(cmd),
         }
     }
@@ -391,6 +392,9 @@ fn run_event_loop(
             }
         }
 
+        // Before the two delivery flushes, so a cancelled Copilot turn is
+        // demoted in the same frame its grace period runs out.
+        app.settle_agent_hook_states();
         app.flush_pending_codex_peer_messages();
         app.flush_pending_user_turns();
 

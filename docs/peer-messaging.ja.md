@@ -47,6 +47,8 @@ Claude の起動フラグを毎回手で打たなくて済むように、renga �
 
 Codex / Copilot の登録が済んでいれば、orchestrator ペインは会話の中から `spawn_codex_pane(direction, …)` / `spawn_copilot_pane(direction, …)` でワーカーを起動できます。どちらも、client の MCP 設定に対応する `RENGA_PEER_CLIENT_KIND` が無ければ `[codex_not_installed]` / `[copilot_not_installed]` で事前に拒否します — 誤った kind で登録されたペインは、受信できない push チャネルを名乗ってしまうためです。
 
+`spawn_copilot_pane` は `prompt` (最初のターン。`copilot -i` で渡されます) も受け取り、Copilot の初回起動時のフォルダ信頼ダイアログにも対処します。`trust_folder: true` を渡した場合、または呼び出し元の git リポジトリ全体がすでに信頼済みで、新しいフォルダがそのリポジトリ (worktree など) に属する場合は新しいペインのフォルダを信頼済みに追加し、それ以外はダイアログが出る旨を結果で知らせます。ファイルシステムのルート、ホームディレクトリ、およびその上位のフォルダは信頼しません。また `renga-cp mcp install --client copilot` は Copilot のライフサイクル hook (`~/.copilot/hooks/renga.json`) もインストールします。以後 Copilot ペインは `list_panes` / `list_peers` で `agent_state` (`working` / `idle` / `blocked`) を報告するので、オーケストレータはワーカーのターン終了や権限確認待ちを判別できます。renga の外で動く Copilot セッションでは、hook は何も報告せずにすぐ終了します。詳細は [`api-surface-v1.0.md`](./api-surface-v1.0.md) §1.17 (英語) を参照してください。
+
 ## 2 ペインでのやり取り
 
 ```

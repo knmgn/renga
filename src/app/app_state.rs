@@ -163,6 +163,16 @@ pub enum AppCommand {
         summary: String,
         reply: oneshot::Sender<std::result::Result<PaneInfo, ipc::CodedError>>,
     },
+    /// Record one agent lifecycle-hook report for `pane_id`. See
+    /// [`ipc::Request::AgentHook`].
+    AgentHook {
+        pane_id: usize,
+        kind: PeerClientKind,
+        event: String,
+        notification_type: Option<String>,
+        recoverable: Option<bool>,
+        reply: oneshot::Sender<std::result::Result<(), ipc::CodedError>>,
+    },
 }
 
 /// Events dispatched within the app.
@@ -321,6 +331,10 @@ pub struct App {
     /// Keyed by pane id so `list_peers` / `list_panes` can surface
     /// whether a pane is using Claude-style push or Codex-style poll.
     pub(crate) peer_client_kinds: HashMap<usize, PeerClientKind>,
+    /// Last lifecycle-hook report per pane (see `agent_hooks.rs`).
+    /// Read through [`App::agent_activity`], never directly: a record
+    /// from an earlier run of the agent must read as absent.
+    pub(crate) agent_hook_states: HashMap<usize, super::agent_hooks::AgentHookRecord>,
     /// One-shot nudges waiting to be injected into Codex panes so the
     /// pane runs `check_messages` once it looks ready for PTY input.
     pub(crate) pending_codex_peer_messages: HashMap<usize, VecDeque<PendingCodexPeerDelivery>>,

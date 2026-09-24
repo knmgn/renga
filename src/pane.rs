@@ -1,6 +1,6 @@
 use std::io::{Read, Write};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -72,6 +72,19 @@ pub struct Pane {
     /// `GitHub Copilot` at startup — and never resets, for the same
     /// cosmetic-indicator reason the other two latches exist.
     pub copilot_seen: Arc<AtomicBool>,
+    /// Bumped every time the child switches the alternate screen on or
+    /// off (`CSI ? 1049 h` / `CSI ? 1049 l`), counted from the raw byte
+    /// stream rather than from vt100's current mode.
+    ///
+    /// It marks the lifetime of a full-screen TUI: Copilot CLI enters
+    /// the alternate screen before it paints anything and leaves it on
+    /// exit, so anything renga learned *about that process* — its hook
+    /// reports in particular — is only true while this value is
+    /// unchanged. Counting sequences instead of watching the mode is
+    /// what catches a relaunch after a crash: a SIGKILLed Copilot never
+    /// sends `1049l`, so the pane is still in the alternate screen when
+    /// the next Copilot sends `1049h`, and the mode never visibly flips.
+    screen_epoch: Arc<AtomicU64>,
     /// Cache of the most recently *detected* Claude caret cell on
     /// this pane: `(host_row, host_col)` in vt100 screen coords —
     /// already shifted to land on Claude's inverse-video marker.
@@ -201,6 +214,7 @@ impl Pane {
         let claude_seen = Arc::new(AtomicBool::new(false));
         let codex_seen = Arc::new(AtomicBool::new(false));
         let copilot_seen = Arc::new(AtomicBool::new(false));
+        let screen_epoch = Arc::new(AtomicU64::new(0));
         let mouse_protocol_cache = Arc::new(Mutex::new(None));
         let alternate_scroll_mode = Arc::new(AtomicBool::new(false));
         let codex_transcript_overlay_hint = Arc::new(AtomicBool::new(false));
@@ -214,6 +228,7 @@ impl Pane {
                 claude_seen: Arc::clone(&claude_seen),
                 codex_seen: Arc::clone(&codex_seen),
                 copilot_seen: Arc::clone(&copilot_seen),
+                screen_epoch: Arc::clone(&screen_epoch),
                 mouse_protocol_cache: Arc::clone(&mouse_protocol_cache),
                 alternate_scroll_mode: Arc::clone(&alternate_scroll_mode),
                 pane_id: id,
@@ -241,6 +256,7 @@ impl Pane {
             claude_seen,
             codex_seen,
             copilot_seen,
+            screen_epoch,
             claude_caret_cache: Mutex::new(None),
             mouse_protocol_cache,
             alternate_scroll_mode,
@@ -645,6 +661,19 @@ impl Pane {
         self.copilot_seen.load(Ordering::Relaxed)
     }
 
+    /// See [`Pane::screen_epoch`]: equal values mean no full-screen
+    /// program has started or stopped in between.
+    pub fn screen_epoch(&self) -> u64 {
+        self.screen_epoch.load(Ordering::Acquire)
+    }
+
+    /// Stand in for the reader thread seeing an alternate-screen switch,
+    /// which never runs under `cfg(test)` (see [`spawn_pty_reader`]).
+    #[cfg(test)]
+    pub(crate) fn bump_screen_epoch_for_test(&self) {
+        self.screen_epoch.fetch_add(1, Ordering::Release);
+    }
+
     /// Whether it is safe to synthesize a shell command line into this
     /// pane's PTY. Returns `false` when any other foreground process
     /// has captured the terminal — `alternate_screen()` catches TUIs
@@ -1010,6 +1039,27 @@ fn encode_utf8_coord(out: &mut Vec<u8>, coord: u16) {
     }
 }
 
+const ALT_SCREEN_ENTER: &[u8] = b"\x1b[?1049h";
+const ALT_SCREEN_LEAVE: &[u8] = b"\x1b[?1049l";
+/// Both switch sequences are this long.
+const ALT_SCREEN_TOGGLE_LEN: usize = 8;
+
+/// Count the alternate-screen switches that complete inside `data`,
+/// using `carry` (see [`ReaderTails::alt_screen_carry`]) to catch one
+/// split across the previous read, and leave the new carry behind.
+fn count_alt_screen_toggles(carry: &mut Vec<u8>, data: &[u8]) -> usize {
+    carry.extend_from_slice(data);
+    let window = carry.as_slice();
+    let count = window
+        .windows(ALT_SCREEN_TOGGLE_LEN)
+        .filter(|w| *w == ALT_SCREEN_ENTER || *w == ALT_SCREEN_LEAVE)
+        .count();
+    let keep = window.len().min(ALT_SCREEN_TOGGLE_LEN - 1);
+    let drop = window.len() - keep;
+    carry.drain(..drop);
+    count
+}
+
 fn detect_alternate_scroll_toggle(data: &[u8]) -> Option<bool> {
     let enable = b"\x1b[?1007h";
     let disable = b"\x1b[?1007l";
@@ -1046,6 +1096,7 @@ struct ReaderSinks {
     claude_seen: Arc<AtomicBool>,
     codex_seen: Arc<AtomicBool>,
     copilot_seen: Arc<AtomicBool>,
+    screen_epoch: Arc<AtomicU64>,
     mouse_protocol_cache: Arc<Mutex<Option<CachedMouseProtocol>>>,
     alternate_scroll_mode: Arc<AtomicBool>,
     pane_id: usize,
@@ -1065,6 +1116,15 @@ struct ReaderTails {
     prompt: Vec<u8>,
     /// Last few bytes, for a mode toggle that straddles a read.
     control: Vec<u8>,
+    /// Up to `ALT_SCREEN_TOGGLE_LEN - 1` bytes of the previous chunk, for
+    /// an alternate-screen switch that straddles a read.
+    ///
+    /// Separate from `control` because that tail is rescanned whole on
+    /// every chunk, which is harmless for a last-value-wins mode but
+    /// would count one switch twice. A carry shorter than the sequence
+    /// can never hold a complete one, so every match found in
+    /// `carry + chunk` ends inside the new chunk and is counted once.
+    alt_screen_carry: Vec<u8>,
     /// Pending OSC 52 clipboard payload, which is base64 and can be far
     /// larger than one chunk.
     osc52: Vec<u8>,
@@ -1102,6 +1162,7 @@ impl ReaderTails {
         Self {
             prompt: Vec::with_capacity(Self::TAIL_CAP * 2),
             control: Vec::with_capacity(Self::CONTROL_CAP),
+            alt_screen_carry: Vec::with_capacity(ALT_SCREEN_TOGGLE_LEN),
             osc52: Vec::with_capacity(4096),
             osc52_scanned: 0,
         }
@@ -1205,6 +1266,15 @@ fn process_pty_chunk(data: &[u8], tails: &mut ReaderTails, sinks: &ReaderSinks) 
         sinks
             .alternate_scroll_mode
             .store(enabled, Ordering::Relaxed);
+    }
+    let toggles = count_alt_screen_toggles(&mut tails.alt_screen_carry, data);
+    if toggles > 0 {
+        // Release pairs with the Acquire in `Pane::screen_epoch`. Bumped
+        // before the bytes reach the parser, so by the time the App can
+        // see the new screen it can also see that its hook state is stale.
+        sinks
+            .screen_epoch
+            .fetch_add(toggles as u64, Ordering::Release);
     }
     tails.osc52.extend_from_slice(data);
     for text in drain_osc52_copies(&mut tails.osc52, &mut tails.osc52_scanned) {
@@ -1767,6 +1837,7 @@ mod tests {
                 claude_seen: Arc::new(AtomicBool::new(false)),
                 codex_seen: Arc::new(AtomicBool::new(false)),
                 copilot_seen: Arc::new(AtomicBool::new(false)),
+                screen_epoch: Arc::new(AtomicU64::new(0)),
                 mouse_protocol_cache: Arc::new(Mutex::new(None)),
                 alternate_scroll_mode: Arc::new(AtomicBool::new(false)),
                 pane_id: 7,
@@ -1914,6 +1985,69 @@ mod tests {
             !sinks.codex_seen.load(Ordering::Relaxed),
             "copilot must not latch codex"
         );
+    }
+
+    fn epoch(sinks: &ReaderSinks) -> u64 {
+        sinks.screen_epoch.load(Ordering::Acquire)
+    }
+
+    #[test]
+    fn each_alternate_screen_switch_bumps_the_epoch_once() {
+        let (sinks, _rx) = sinks();
+        let mut tails = ReaderTails::new();
+
+        process_pty_chunk(b"$ copilot\r\n", &mut tails, &sinks);
+        assert_eq!(epoch(&sinks), 0, "ordinary output is not a switch");
+
+        process_pty_chunk(b"\x1b[?1049h\x1b[H\x1b[2J", &mut tails, &sinks);
+        assert_eq!(epoch(&sinks), 1);
+
+        // A tiny follow-up chunk must not rediscover the switch that the
+        // previous chunk already counted, however little it pushes out.
+        process_pty_chunk(b"x", &mut tails, &sinks);
+        process_pty_chunk(b"", &mut tails, &sinks);
+        assert_eq!(epoch(&sinks), 1);
+
+        process_pty_chunk(b"bye\x1b[?1049l$ ", &mut tails, &sinks);
+        assert_eq!(epoch(&sinks), 2);
+    }
+
+    #[test]
+    fn an_alternate_screen_switch_split_across_chunks_is_counted_once() {
+        let (sinks, _rx) = sinks();
+        let mut tails = ReaderTails::new();
+
+        process_pty_chunk(b"abc\x1b[?10", &mut tails, &sinks);
+        assert_eq!(epoch(&sinks), 0);
+        process_pty_chunk(b"49h", &mut tails, &sinks);
+        assert_eq!(epoch(&sinks), 1);
+
+        // Split one byte at a time: the carry has to survive several
+        // chunks that each complete nothing.
+        for b in b"\x1b[?1049l" {
+            process_pty_chunk(&[*b], &mut tails, &sinks);
+        }
+        assert_eq!(epoch(&sinks), 2);
+    }
+
+    /// The case the epoch exists for: a Copilot killed mid-turn never
+    /// leaves the alternate screen, so its successor's `1049h` arrives
+    /// while the mode is already on and vt100's flag never flips.
+    #[test]
+    fn re_entering_the_alternate_screen_still_bumps_the_epoch() {
+        let (sinks, _rx) = sinks();
+        let mut tails = ReaderTails::new();
+
+        process_pty_chunk(b"\x1b[?1049h", &mut tails, &sinks);
+        process_pty_chunk(b"\x1b[?1049h", &mut tails, &sinks);
+        assert_eq!(epoch(&sinks), 2);
+        let alt = sinks
+            .parser
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .screen()
+            .alternate_screen();
+        assert!(alt, "the mode itself stayed on throughout");
     }
 
     /// A poisoned title mutex must not switch the live client signals

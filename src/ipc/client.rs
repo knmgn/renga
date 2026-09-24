@@ -25,7 +25,19 @@ use super::{Event, EventScope, Request, Response, RESPONSE_TIMEOUT};
 /// the helper thread is detached and cleaned up by the OS when the
 /// client process exits.
 pub fn send_request(endpoint: &EndpointName, request: &Request) -> Result<Response> {
-    send_request_inner(endpoint, request, None)
+    send_request_inner(endpoint, request, None, RESPONSE_TIMEOUT)
+}
+
+/// [`send_request`] with a caller-chosen reply deadline, for a caller
+/// that runs under somebody else's clock — the Copilot hook command is
+/// killed by Copilot after a few seconds, well inside
+/// [`RESPONSE_TIMEOUT`], and must give up on a wedged renga first.
+pub fn send_request_with_timeout(
+    endpoint: &EndpointName,
+    request: &Request,
+    timeout: std::time::Duration,
+) -> Result<Response> {
+    send_request_inner(endpoint, request, None, timeout)
 }
 
 /// Like [`send_request`], but refuses to send unless the server
@@ -46,13 +58,14 @@ pub fn send_request_requiring(
     request: &Request,
     required_cap: &'static str,
 ) -> Result<Response> {
-    send_request_inner(endpoint, request, Some(required_cap))
+    send_request_inner(endpoint, request, Some(required_cap), RESPONSE_TIMEOUT)
 }
 
 fn send_request_inner(
     endpoint: &EndpointName,
     request: &Request,
     required_cap: Option<&'static str>,
+    timeout: std::time::Duration,
 ) -> Result<Response> {
     let name_string = endpoint.as_str().to_string();
     let endpoint_clone = endpoint.clone();
@@ -71,11 +84,11 @@ fn send_request_inner(
         })
         .context("spawn IPC client thread")?;
 
-    match rx.recv_timeout(RESPONSE_TIMEOUT) {
+    match rx.recv_timeout(timeout) {
         Ok(result) => result,
         Err(mpsc::RecvTimeoutError::Timeout) => Err(anyhow!(
             "no response from renga within {:?} (endpoint: {})",
-            RESPONSE_TIMEOUT,
+            timeout,
             name_string
         )),
         Err(mpsc::RecvTimeoutError::Disconnected) => Err(anyhow!("IPC client thread panicked")),
@@ -782,6 +795,12 @@ mod tests {
     /// no way to notice, since `split_refused` is a valid answer on
     /// either server with two different meanings. Hence gated, not
     /// advertise-only.
+    ///
+    /// `agent_hook` is advertise-only, like `subscribe_pane_scope`. Its
+    /// only sender is the `copilot-hook` command, which ignores every
+    /// reply, so there is nothing to gate; the token exists so a reader
+    /// of `agent_state` can tell "not tracked by this server" from "no
+    /// hook has reported yet", which an absent field cannot.
     #[test]
     fn capability_exposure_mints_no_new_token() {
         assert_eq!(
@@ -795,6 +814,7 @@ mod tests {
                 super::super::CAP_SUBSCRIBE_PANE_SCOPE,
                 super::super::CAP_CROSS_TAB_LIST,
                 super::super::CAP_SPLIT_REFUSAL_CAUSES,
+                super::super::CAP_AGENT_HOOK,
             ],
             "#304 is introspection only and adds no capability token"
         );

@@ -78,6 +78,7 @@ impl App {
             },
             claude_monitor: crate::claude_monitor::ClaudeMonitor::new(),
             peer_client_kinds: HashMap::new(),
+            agent_hook_states: HashMap::new(),
             pending_codex_peer_messages: HashMap::new(),
             codex_peer_notification: None,
             recent_peer_sends: HashMap::new(),

@@ -1,3 +1,4 @@
+mod agent_hooks;
 mod caller_scope;
 mod close_confirm;
 mod codex_peer;
