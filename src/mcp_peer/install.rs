@@ -19,6 +19,7 @@ use std::process::Command;
 
 use anyhow::{anyhow, bail, Context, Result};
 
+use super::copilot::{self as copilot_files, HooksStatus};
 use super::ENV_CLIENT_KIND;
 use crate::cli::{McpAction, McpClient};
 
@@ -33,10 +34,79 @@ pub fn run(action: &McpAction) -> Result<()> {
             force,
             client,
             codex_auto_approve_peer_tools,
-        } => install(*force, *client, *codex_auto_approve_peer_tools),
-        McpAction::Uninstall { client } => uninstall(*client),
-        McpAction::Status { client } => status(*client),
+        } => {
+            install(*force, *client, *codex_auto_approve_peer_tools)?;
+            if *client == McpClient::Copilot {
+                install_copilot_hooks()?;
+            }
+            Ok(())
+        }
+        McpAction::Uninstall { client } => {
+            // Hooks first: they are renga's own file and need no client
+            // CLI, so a missing or broken `copilot` binary — which fails
+            // `uninstall` — must not leave them behind.
+            if *client == McpClient::Copilot {
+                uninstall_copilot_hooks()?;
+            }
+            uninstall(*client)
+        }
+        McpAction::Status { client } => {
+            status(*client)?;
+            if *client == McpClient::Copilot {
+                copilot_hooks_status()?;
+            }
+            Ok(())
+        }
     }
+}
+
+// ── Copilot hooks ──────────────────────────────────────────────
+//
+// Kept outside `install` / `uninstall` / `status` so every exit path of
+// those — fresh install, self-heal, "already registered" — ends with the
+// hooks in place, instead of each early return having to remember them.
+
+fn install_copilot_hooks() -> Result<()> {
+    let exe = current_renga_exe()?;
+    let path = copilot_files::install_hooks(&exe)?;
+    println!(
+        "Installed Copilot lifecycle hooks → {}\n\
+         Copilot panes now report when a turn starts, ends or waits on a permission prompt; \
+         renga uses that to hold deliveries while a turn runs and shows it as `agent_state` \
+         in list_panes / list_peers. In Copilot sessions outside renga the hook exits at once \
+         without reporting anything.",
+        path.display()
+    );
+    Ok(())
+}
+
+fn uninstall_copilot_hooks() -> Result<()> {
+    let path = copilot_files::hooks_file_path()?;
+    if copilot_files::uninstall_hooks()? {
+        println!("Removed Copilot lifecycle hooks ({}).", path.display());
+    }
+    Ok(())
+}
+
+fn copilot_hooks_status() -> Result<()> {
+    let exe = current_renga_exe()?;
+    let path = copilot_files::hooks_file_path()?;
+    match copilot_files::hooks_status(&exe)? {
+        HooksStatus::Current => {
+            println!("\nCopilot lifecycle hooks: installed ({}).", path.display())
+        }
+        HooksStatus::Stale => println!(
+            "\nCopilot lifecycle hooks: OUT OF DATE ({} does not run {}).\n\
+             Run `renga-cp mcp install --client copilot` to rewrite them.",
+            path.display(),
+            exe.display()
+        ),
+        HooksStatus::Missing => println!(
+            "\nCopilot lifecycle hooks: not installed. `agent_state` stays empty for Copilot \
+             panes until `renga-cp mcp install --client copilot` is run."
+        ),
+    }
+    Ok(())
 }
 
 // ── install ────────────────────────────────────────────────────
@@ -535,12 +605,7 @@ pub(crate) fn verify_codex_renga_peers_install() -> std::result::Result<(), Stri
 /// honoring it is what keeps the spawn guard from reporting a missing
 /// registration for a user who relocated the directory.
 fn copilot_config_path() -> Result<PathBuf> {
-    if let Some(home) = std::env::var_os("COPILOT_HOME") {
-        return Ok(PathBuf::from(home).join("mcp-config.json"));
-    }
-    let home = dirs::home_dir()
-        .ok_or_else(|| anyhow!("could not resolve the current user's home directory"))?;
-    Ok(home.join(".copilot").join("mcp-config.json"))
+    Ok(copilot_files::copilot_home()?.join("mcp-config.json"))
 }
 
 /// Copilot counterpart of [`verify_codex_renga_peers_install`], and it

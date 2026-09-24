@@ -50,6 +50,7 @@
 //! MCP installed globally in `~/.claude/mcp_servers.json` from erroring
 //! out every time Claude starts outside renga.
 
+pub mod copilot;
 pub mod install;
 mod parent_watch;
 
@@ -723,7 +724,7 @@ fn tools_spec() -> Value {
         },
         {
             "name": "spawn_copilot_pane",
-            "description": "Higher-level convenience over `spawn_pane`: splits a pane and launches GitHub Copilot CLI without the orchestrating caller having to synthesize a shell-quoted `copilot ...` command string. This helper assumes the user has already run `renga-cp mcp install --client copilot`; that registration injects the `RENGA_PEER_CLIENT_KIND=copilot` env into Copilot's MCP server subprocess, so a plain `copilot` launch is enough for the new pane to register as a pull-based peer. Extra `args[]` are appended after the `copilot` token using the same POSIX-style shell quoting as spawn_claude_pane. Pane creation semantics (split refusal, cwd validation, name / role attachment) match `spawn_pane`. Note that Copilot prompts for folder trust on first launch in a directory and for each tool use unless the pane was launched with `--allow-tool`/`--allow-all-tools`; renga refuses to type into those dialogs, so an unattended worker pane usually wants those flags in `args[]`.",
+            "description": "Higher-level convenience over `spawn_pane`: splits a pane and launches GitHub Copilot CLI without the orchestrating caller having to synthesize a shell-quoted `copilot ...` command string. This helper assumes the user has already run `renga-cp mcp install --client copilot`; that registration injects the `RENGA_PEER_CLIENT_KIND=copilot` env into Copilot's MCP server subprocess, so a plain `copilot` launch is enough for the new pane to register as a pull-based peer. Extra `args[]` are appended after the `copilot` token using the same POSIX-style shell quoting as spawn_claude_pane. Pane creation semantics (split refusal, cwd validation, name / role attachment) match `spawn_pane`. Folder trust: Copilot asks whether to trust a folder on its first launch there, and renga refuses to type into that dialog. renga therefore adds the new pane's folder to Copilot's trusted folders when `trust_folder` is true, or when the caller pane's whole git repository is already trusted and the new folder belongs to it (e.g. a worktree) — the inheritance Copilot applies to worktrees; otherwise the result says the folder is untrusted and the dialog will appear. The filesystem root, the home directory and folders above it are never trusted. Copilot also asks before each tool use unless launched with `--allow-tool`/`--allow-all-tools` in `args[]`. Once the pane is up, `list_panes` / `list_peers` report its `agent_state` (`working` / `idle` / `blocked`) if `renga-cp mcp install --client copilot` installed renga's Copilot hooks.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -765,6 +766,14 @@ fn tools_spec() -> Value {
                         "type": "array",
                         "items": { "type": "string" },
                         "description": "Additional Copilot CLI args appended after the `copilot` token. renga owns shell quoting for each item, so callers should pass one logical token per array entry."
+                    },
+                    "prompt": {
+                        "type": "string",
+                        "description": "Optional first turn, passed as `copilot -i <prompt>`: Copilot submits it itself once its UI is ready and stays interactive afterwards, so no send_message race is needed for the first instruction. Single line, no control characters, at most 4096 bytes — it is typed into the new pane's shell as part of the launch command. Send longer or multi-line instructions with send_message deliver=\"user_turn\" once the pane is up."
+                    },
+                    "trust_folder": {
+                        "type": "boolean",
+                        "description": "Add the new pane's folder to Copilot's trusted folders (`trustedFolders` in its config.json) before launch, so the first-launch trust dialog does not stall an unattended pane. Trusting a folder lets Copilot load that folder's own hooks, MCP servers and skills. Not needed for a folder in the caller pane's git repository when that whole repository is already trusted — renga extends trust to it automatically. Refused for the filesystem root, the home directory and folders above it. When true and the folder cannot be trusted, the spawn is refused instead of launching a pane that would wait on the dialog."
                     }
                 }
             }
@@ -1019,6 +1028,9 @@ tab index shown is display metadata that shifts when tabs close:\n\n",
         if let Some(mode) = p.receive_mode {
             out.push_str(&format!(" receive={}", receive_mode_label(mode)));
         }
+        if let Some(state) = p.agent_state {
+            out.push_str(&format!(" state={}", activity_label(state)));
+        }
         match (p.same_tab, p.tab) {
             (Some(true), _) => out.push_str(" [your tab]"),
             (_, Some(tab)) => match &p.tab_name {
@@ -1036,6 +1048,16 @@ tab index shown is display metadata that shifts when tabs close:\n\n",
         out.push('\n');
     }
     out
+}
+
+/// Hook-reported agent activity as listed by `list_peers` /
+/// `list_panes`. Absent from the listing when there is no report.
+fn activity_label(state: ipc::AgentActivity) -> &'static str {
+    match state {
+        ipc::AgentActivity::Working => "working",
+        ipc::AgentActivity::Idle => "idle",
+        ipc::AgentActivity::Blocked => "blocked",
+    }
 }
 
 fn kind_label(kind: PeerClientKind) -> &'static str {
@@ -1981,6 +2003,9 @@ fn format_pane_list(panes: &[PaneInfo], scope: &ListScope) -> String {
         if p.focused {
             out.push_str(" (focused)");
         }
+        if let Some(state) = p.agent_state {
+            out.push_str(&format!(" state={}", activity_label(state)));
+        }
         // Only when the set can span tabs — on the default path every
         // record would carry the same marker, and a pre-#329 server's
         // reply carries no tab metadata to render at all.
@@ -2274,12 +2299,308 @@ fn build_codex_launch_command(extra_args: &[String]) -> String {
     parts.join(" ")
 }
 
-fn build_copilot_launch_command(extra_args: &[String]) -> String {
+/// `copilot [-i <prompt>] <args…>`.
+///
+/// `-i` is Copilot's "start interactive and execute this prompt" flag:
+/// the first turn is submitted by Copilot itself once its UI is up, so
+/// it needs no readiness race, and the session stays interactive
+/// afterwards (unlike `-p`, which exits when the turn ends). Verified
+/// on a live Copilot 1.0.82. It goes before `args[]` so a trailing
+/// value-taking flag in `args[]` cannot swallow it.
+fn build_copilot_launch_command(prompt: Option<&str>, extra_args: &[String]) -> String {
     let mut parts: Vec<String> = vec!["copilot".to_string()];
+    if let Some(p) = prompt {
+        parts.push("-i".to_string());
+        parts.push(shell_quote(p));
+    }
     for a in extra_args {
         parts.push(shell_quote(a));
     }
     parts.join(" ")
+}
+
+/// Longest `prompt` spawn_copilot_pane accepts. It is typed into the
+/// new pane's shell as part of one command line; the same ceiling as a
+/// user-turn body keeps that line ordinary.
+const COPILOT_PROMPT_MAX_BYTES: usize = 4096;
+
+/// Parse spawn_copilot_pane's optional `prompt`.
+///
+/// Control characters are refused, newlines included. The launch
+/// command is *typed* into a shell, so a newline is an Enter keypress
+/// there, and whether a quoted string survives one depends on the shell
+/// — renga cannot promise the same result in bash, fish and PowerShell.
+/// A multi-line first turn goes through `send_message` with
+/// `deliver="user_turn"` once the pane is up instead.
+fn parse_copilot_prompt(args: &Value) -> std::result::Result<Option<String>, String> {
+    let prompt = match args.get("prompt") {
+        None | Some(Value::Null) => return Ok(None),
+        Some(Value::String(s)) => s.trim(),
+        Some(other) => return Err(format!("`prompt` must be a string; got {other}")),
+    };
+    if prompt.is_empty() {
+        return Ok(None);
+    }
+    if prompt.chars().any(char::is_control) {
+        return Err(
+            "`prompt` must be a single line without control characters: it is typed into the \
+             new pane's shell as part of the launch command. Send a multi-line first turn with \
+             send_message deliver=\"user_turn\" after the pane is up."
+                .to_string(),
+        );
+    }
+    if prompt.len() > COPILOT_PROMPT_MAX_BYTES {
+        return Err(format!(
+            "`prompt` is {} bytes; the limit is {COPILOT_PROMPT_MAX_BYTES}. Send longer \
+             instructions with send_message after the pane is up.",
+            prompt.len()
+        ));
+    }
+    Ok(Some(prompt.to_string()))
+}
+
+/// Append `note` as a new paragraph to a successful tool-text response.
+/// Errors and a `None` note pass through untouched.
+fn append_tool_text(mut resp: Value, note: Option<&str>) -> Value {
+    let Some(note) = note else {
+        return resp;
+    };
+    if let Some(text) = resp
+        .pointer_mut("/result/content/0/text")
+        .and_then(|t| t.as_str().map(str::to_string))
+    {
+        resp["result"]["content"][0]["text"] = Value::String(format!("{text}\n\n{note}"));
+    }
+    resp
+}
+
+/// What spawn_copilot_pane should do about Copilot's folder-trust
+/// prompt, given what is already trusted.
+///
+/// renga extends trust in exactly two cases: the caller asked for it
+/// (`trust_folder: true`), or the caller's whole repository is already
+/// trusted and the new folder belongs to it — a worktree of it,
+/// typically. That second rule is the one Copilot applies itself
+/// when it creates a worktree of a trusted repository; it deliberately
+/// does *not* reach an unrelated folder just because the caller happens
+/// to sit in a trusted one. Anything else is left to the human, because
+/// trusting a folder loads *its* hooks, MCP servers and skills into
+/// Copilot — and a folder too broad to trust (the filesystem root or the
+/// home directory, which would trust everything beneath them) is
+/// refused even on request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CopilotTrustDecision {
+    AlreadyTrusted,
+    Add {
+        inherited: bool,
+    },
+    /// Refuse: the folder is too broad to trust.
+    TooBroad,
+    Leave,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CopilotTrustFacts {
+    requested: bool,
+    new_folder_trusted: bool,
+    new_folder_too_broad: bool,
+    /// The caller's whole repository is trusted and the new folder is in
+    /// it ([`copilot::may_inherit_trust`]).
+    same_repo_as_trusted_caller: bool,
+}
+
+fn decide_copilot_trust(f: CopilotTrustFacts) -> CopilotTrustDecision {
+    if f.new_folder_trusted {
+        CopilotTrustDecision::AlreadyTrusted
+    } else if f.new_folder_too_broad {
+        if f.requested {
+            CopilotTrustDecision::TooBroad
+        } else {
+            CopilotTrustDecision::Leave
+        }
+    } else if f.requested {
+        CopilotTrustDecision::Add { inherited: false }
+    } else if f.same_repo_as_trusted_caller {
+        CopilotTrustDecision::Add { inherited: true }
+    } else {
+        CopilotTrustDecision::Leave
+    }
+}
+
+/// The folder the new pane will start in, as far as a caller-scoped
+/// pane list can tell, when the request itself names none: `SpawnTab`
+/// inherits the caller's cwd and a same-tab split inherits the target's
+/// (see `handle_spawn_tab` / `handle_split` on the server). A split into
+/// *another* tab resolves its target there, which this list cannot see,
+/// so it answers `None`.
+fn inherited_spawn_cwd(
+    placement: &SpawnPlacement,
+    target: Option<&PaneRef>,
+    panes: &[PaneInfo],
+    caller: usize,
+) -> Option<String> {
+    let pane = match (placement, target) {
+        (SpawnPlacement::NewTab { .. }, _) => panes.iter().find(|p| p.id == caller),
+        (SpawnPlacement::Here, Some(PaneRef::Id(n))) => panes.iter().find(|p| p.id == *n),
+        (SpawnPlacement::Here, Some(PaneRef::Name(n))) => {
+            panes.iter().find(|p| p.name.as_deref() == Some(n.as_str()))
+        }
+        (SpawnPlacement::Here, Some(PaneRef::Focused)) => panes.iter().find(|p| p.focused),
+        _ => None,
+    }?;
+    pane.cwd.clone()
+}
+
+/// What [`prepare_copilot_folder_trust`] settled on.
+#[derive(Debug, Default)]
+struct CopilotTrustPrep {
+    /// The `cwd` to send — pinned to the folder renga trusted, when it
+    /// wrote one, so the pane cannot land anywhere else.
+    cwd: Option<String>,
+    /// Paragraph for the tool result.
+    note: Option<String>,
+    /// The folder renga added to `trustedFolders`, if any. Reported on a
+    /// spawn that then fails, since the write is not undone.
+    wrote: Option<String>,
+}
+
+/// Apply [`decide_copilot_trust`] before the pane is spawned.
+///
+/// Only an explicit `trust_folder: true` that cannot be honored is an
+/// error: spawning anyway would park the pane on the very dialog the
+/// caller asked renga to prevent. Every other failure degrades to
+/// Copilot asking, as it would have without renga. Nothing is written
+/// for a folder that is not an existing directory — the spawn would be
+/// refused (`cwd_invalid`) after the user's config had been edited.
+fn prepare_copilot_folder_trust(
+    endpoint: &EndpointName,
+    caller: usize,
+    placement: &SpawnPlacement,
+    target: Option<&PaneRef>,
+    cwd: Option<String>,
+    requested: bool,
+) -> std::result::Result<CopilotTrustPrep, String> {
+    // The prep to return when trust could not even be checked, or the
+    // error when the caller explicitly asked for it.
+    let unchecked = |cwd: Option<String>, why: String| {
+        if requested {
+            Err(format!(
+                "renga refused spawn_copilot_pane: trust_folder was requested but {why}"
+            ))
+        } else {
+            Ok(CopilotTrustPrep {
+                cwd,
+                note: Some(format!(
+                    "Folder trust: not checked ({why}); Copilot may ask whether to trust the \
+                     folder, and renga will not answer that dialog."
+                )),
+                wrote: None,
+            })
+        }
+    };
+    let panes: Vec<PaneInfo> = match client::send_request_requiring(
+        endpoint,
+        &Request::List {
+            from_pane: Some(caller),
+            tab: None,
+        },
+        crate::ipc::CAP_CALLER_SCOPE,
+    ) {
+        Ok(Response::Ok { data }) => serde_json::from_value(data).unwrap_or_default(),
+        _ => Vec::new(),
+    };
+    let Some(folder) = cwd
+        .clone()
+        .or_else(|| inherited_spawn_cwd(placement, target, &panes, caller))
+    else {
+        return unchecked(
+            cwd,
+            "the new pane's folder could not be determined from here; pass `cwd`".into(),
+        );
+    };
+    let path = std::path::Path::new(&folder);
+    if !path.is_dir() {
+        return unchecked(cwd, format!("{folder} is not an existing directory"));
+    }
+    let new_folder_trusted = match copilot::folder_is_trusted(path) {
+        Ok(t) => t,
+        Err(e) => {
+            return unchecked(
+                cwd,
+                format!("Copilot's trust list could not be read: {e:#}"),
+            )
+        }
+    };
+    let same_repo_as_trusted_caller = !new_folder_trusted
+        && !requested
+        && panes
+            .iter()
+            .find(|p| p.id == caller)
+            .and_then(|p| p.cwd.as_deref())
+            .map(std::path::Path::new)
+            .is_some_and(|caller_folder| {
+                copilot::may_inherit_trust(caller_folder, path).unwrap_or(false)
+            });
+    let decision = decide_copilot_trust(CopilotTrustFacts {
+        requested,
+        new_folder_trusted,
+        new_folder_too_broad: copilot::too_broad_to_trust(path),
+        same_repo_as_trusted_caller,
+    });
+    match decision {
+        CopilotTrustDecision::AlreadyTrusted => Ok(CopilotTrustPrep {
+            cwd,
+            ..Default::default()
+        }),
+        CopilotTrustDecision::TooBroad => Err(format!(
+            "renga refused spawn_copilot_pane: trust_folder would trust {folder}, which is the \
+             filesystem root or the home directory — Copilot trusts every folder beneath a \
+             trusted one. Pass a project folder as `cwd`."
+        )),
+        CopilotTrustDecision::Leave => Ok(CopilotTrustPrep {
+            cwd,
+            note: Some(format!(
+                "Folder trust: {folder} is not trusted by Copilot, so it will ask on startup and \
+                 renga will not answer that dialog. Pass `trust_folder: true` to trust it, or \
+                 answer it in the pane."
+            )),
+            wrote: None,
+        }),
+        CopilotTrustDecision::Add { inherited } => match copilot::trust_folder(path) {
+            Ok(()) => Ok(CopilotTrustPrep {
+                cwd: Some(folder.clone()),
+                note: Some(if inherited {
+                    format!(
+                        "Folder trust: added {folder} to Copilot's trusted folders — it is in \
+                         the same git repository as this pane's trusted folder."
+                    )
+                } else {
+                    format!("Folder trust: added {folder} to Copilot's trusted folders.")
+                }),
+                wrote: Some(folder),
+            }),
+            Err(e) => unchecked(cwd, format!("writing Copilot's trust list failed: {e:#}")),
+        },
+    }
+}
+
+/// On a failed spawn after renga already trusted a folder, say so in
+/// the error: the write is not rolled back (another pane may rely on it
+/// by then), and the caller should know its config changed.
+fn note_trust_on_error(mut resp: Value, wrote: Option<&str>) -> Value {
+    let Some(folder) = wrote else {
+        return resp;
+    };
+    if let Some(msg) = resp
+        .pointer("/error/message")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+    {
+        resp["error"]["message"] = Value::String(format!(
+            "{msg} (renga had already added {folder} to Copilot's trusted folders)"
+        ));
+    }
+    resp
 }
 
 fn parse_string_args_array(args: &Value) -> std::result::Result<Vec<String>, String> {
@@ -2761,7 +3082,22 @@ fn handle_spawn_copilot_pane_with(
         Ok(v) => v,
         Err(msg) => return err_response(id, -32602, &msg),
     };
-    let command = build_copilot_launch_command(&extra_args);
+    let prompt = match parse_copilot_prompt(args) {
+        Ok(p) => p,
+        Err(msg) => return err_response(id, -32602, &msg),
+    };
+    let trust_requested = match args.get("trust_folder") {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(b)) => *b,
+        Some(other) => {
+            return err_response(
+                id,
+                -32602,
+                &format!("`trust_folder` must be a boolean; got {other}"),
+            )
+        }
+    };
+    let command = build_copilot_launch_command(prompt.as_deref(), &extra_args);
 
     let (caller_pane, endpoint) = match require_connected(ctx, id, "spawn copilot pane") {
         Ok(t) => t,
@@ -2795,8 +3131,30 @@ fn handle_spawn_copilot_pane_with(
         Ok(v) => v,
         Err(msg) => return err_response(id, -32602, &msg),
     };
+    let trust = match prepare_copilot_folder_trust(
+        endpoint,
+        caller_pane,
+        &placement,
+        split_params.as_ref().map(|(_, target)| target),
+        cwd,
+        trust_requested,
+    ) {
+        Ok(v) => v,
+        Err(msg) => return err_response(id, -32603, &msg),
+    };
+    let CopilotTrustPrep {
+        cwd,
+        note: trust_note,
+        wrote: trust_wrote,
+    } = trust;
+    let finish = |resp: Value| {
+        note_trust_on_error(
+            append_tool_text(resp, trust_note.as_deref()),
+            trust_wrote.as_deref(),
+        )
+    };
     if let SpawnPlacement::NewTab { label } = placement {
-        return dispatch_spawn_tab(
+        let resp = dispatch_spawn_tab(
             id,
             "spawn_copilot_pane",
             "Copilot pane",
@@ -2811,6 +3169,7 @@ fn handle_spawn_copilot_pane_with(
             },
             Some(&command),
         );
+        return finish(resp);
     }
     let required_cap = placement.required_cap();
     let tab = match placement {
@@ -2818,7 +3177,7 @@ fn handle_spawn_copilot_pane_with(
         _ => None,
     };
     let (direction, target) = split_params.expect("split params parsed for non-new placement");
-    match client::send_request_requiring(
+    let resp = match client::send_request_requiring(
         endpoint,
         &Request::Split {
             target,
@@ -2852,7 +3211,8 @@ fn handle_spawn_copilot_pane_with(
         ),
         Ok(other) => err_response(id, -32603, &format!("unexpected renga response: {other:?}")),
         Err(e) => err_response(id, -32603, &format!("renga call failed: {e}")),
-    }
+    };
+    finish(resp)
 }
 
 fn handle_close_pane(id: &Value, args: &Value, ctx: &PeerCtx) -> Value {
@@ -4326,6 +4686,7 @@ mod tests {
             kind: None,
             receive_mode: None,
             summary: None,
+            agent_state: None,
         }
     }
 
@@ -4349,6 +4710,7 @@ mod tests {
             kind: None,
             receive_mode: None,
             summary: None,
+            agent_state: None,
         }
     }
 
@@ -4574,15 +4936,201 @@ mod tests {
 
     #[test]
     fn build_copilot_launch_command_bare_defaults_to_plain_copilot() {
-        assert_eq!(build_copilot_launch_command(&[]), "copilot");
+        assert_eq!(build_copilot_launch_command(None, &[]), "copilot");
+    }
+
+    #[test]
+    fn build_copilot_launch_command_puts_the_prompt_first_and_quoted() {
+        let got =
+            build_copilot_launch_command(Some("fix the bug, don't ask"), &["--model".to_string()]);
+        assert_eq!(got, "copilot -i 'fix the bug, don'\\''t ask' --model");
+    }
+
+    #[test]
+    fn copilot_prompt_is_optional_and_single_line() {
+        assert_eq!(parse_copilot_prompt(&json!({})), Ok(None));
+        assert_eq!(parse_copilot_prompt(&json!({"prompt": null})), Ok(None));
+        assert_eq!(parse_copilot_prompt(&json!({"prompt": "   "})), Ok(None));
+        assert_eq!(
+            parse_copilot_prompt(&json!({"prompt": "  run the tests  "})),
+            Ok(Some("run the tests".to_string()))
+        );
+        assert!(parse_copilot_prompt(&json!({"prompt": 3})).is_err());
+        assert!(
+            parse_copilot_prompt(&json!({"prompt": "one\ntwo"})).is_err(),
+            "a newline is an Enter keypress in the shell the command is typed into"
+        );
+        assert!(parse_copilot_prompt(&json!({"prompt": "a\u{1b}[2Jb"})).is_err());
+        let long = "x".repeat(COPILOT_PROMPT_MAX_BYTES + 1);
+        assert!(parse_copilot_prompt(&json!({ "prompt": long })).is_err());
+    }
+
+    #[test]
+    fn copilot_trust_is_only_extended_on_request_or_by_inheritance() {
+        use CopilotTrustDecision::*;
+        let facts = |requested, trusted, broad, same_repo| CopilotTrustFacts {
+            requested,
+            new_folder_trusted: trusted,
+            new_folder_too_broad: broad,
+            same_repo_as_trusted_caller: same_repo,
+        };
+        assert_eq!(
+            decide_copilot_trust(facts(false, true, false, false)),
+            AlreadyTrusted
+        );
+        assert_eq!(
+            decide_copilot_trust(facts(true, true, true, true)),
+            AlreadyTrusted
+        );
+        assert_eq!(
+            decide_copilot_trust(facts(true, false, false, false)),
+            Add { inherited: false }
+        );
+        assert_eq!(
+            decide_copilot_trust(facts(false, false, false, true)),
+            Add { inherited: true }
+        );
+        assert_eq!(
+            decide_copilot_trust(facts(false, false, false, false)),
+            Leave
+        );
+    }
+
+    /// Trusting `/` or `$HOME` would trust everything beneath them, for
+    /// every future Copilot session — refused on request, never inherited.
+    #[test]
+    fn a_folder_too_broad_to_trust_is_never_added() {
+        use CopilotTrustDecision::*;
+        let broad = |requested, same_repo| CopilotTrustFacts {
+            requested,
+            new_folder_trusted: false,
+            new_folder_too_broad: true,
+            same_repo_as_trusted_caller: same_repo,
+        };
+        assert_eq!(decide_copilot_trust(broad(true, false)), TooBroad);
+        assert_eq!(decide_copilot_trust(broad(false, true)), Leave);
+    }
+
+    #[test]
+    fn a_trust_write_is_reported_on_a_failed_spawn() {
+        let err = err_response(&json!(1), -32603, "renga refused spawn_copilot_pane: nope");
+        let out = note_trust_on_error(err.clone(), Some("/w"));
+        assert_eq!(
+            out["error"]["message"],
+            "renga refused spawn_copilot_pane: nope (renga had already added /w to Copilot's \
+             trusted folders)"
+        );
+        assert_eq!(note_trust_on_error(err.clone(), None), err);
+        let ok = ok_response(&json!(1), tool_text_result("Spawned."));
+        assert_eq!(note_trust_on_error(ok.clone(), Some("/w")), ok);
+    }
+
+    fn pane_info(id: usize, name: Option<&str>, focused: bool, cwd: &str) -> PaneInfo {
+        PaneInfo {
+            id,
+            name: name.map(str::to_string),
+            role: None,
+            focused,
+            tab: None,
+            tab_name: None,
+            same_tab: None,
+            x: 0,
+            y: 0,
+            width: 0,
+            height: 0,
+            cwd: Some(cwd.to_string()),
+            kind: None,
+            receive_mode: None,
+            summary: None,
+            agent_state: None,
+        }
+    }
+
+    /// Mirrors the server: a new tab inherits the *caller's* folder, a
+    /// split inherits its *target's*.
+    #[test]
+    fn the_inherited_spawn_folder_follows_the_server_rules() {
+        let panes = vec![
+            pane_info(1, Some("lead"), false, "/repo"),
+            pane_info(2, Some("worker"), true, "/repo/sub"),
+        ];
+        let new_tab = SpawnPlacement::NewTab { label: None };
+        assert_eq!(
+            inherited_spawn_cwd(&new_tab, None, &panes, 1).as_deref(),
+            Some("/repo")
+        );
+        let here = SpawnPlacement::Here;
+        assert_eq!(
+            inherited_spawn_cwd(&here, Some(&PaneRef::Focused), &panes, 1).as_deref(),
+            Some("/repo/sub")
+        );
+        assert_eq!(
+            inherited_spawn_cwd(&here, Some(&PaneRef::Name("lead".into())), &panes, 2).as_deref(),
+            Some("/repo")
+        );
+        assert_eq!(
+            inherited_spawn_cwd(&here, Some(&PaneRef::Id(2)), &panes, 1).as_deref(),
+            Some("/repo/sub")
+        );
+        assert_eq!(
+            inherited_spawn_cwd(&here, Some(&PaneRef::Id(9)), &panes, 1),
+            None
+        );
+        let other_tab = SpawnPlacement::Tab(crate::ipc::TabSelector::Index(3));
+        assert_eq!(
+            inherited_spawn_cwd(&other_tab, Some(&PaneRef::Focused), &panes, 1),
+            None,
+            "another tab's panes are not in a caller-scoped list"
+        );
+    }
+
+    #[test]
+    fn listings_show_the_agent_state_only_when_reported() {
+        let mut pane = pane_info(2, None, false, "/w");
+        let scope = ListScope::CallerTab;
+        assert!(!format_pane_list(std::slice::from_ref(&pane), &scope).contains("state="));
+        pane.agent_state = Some(ipc::AgentActivity::Blocked);
+        assert!(format_pane_list(std::slice::from_ref(&pane), &scope).contains("state=blocked"));
+
+        let mut peer = PeerInfo {
+            id: 2,
+            name: None,
+            role: None,
+            tab: None,
+            tab_name: None,
+            same_tab: None,
+            cwd: None,
+            kind: Some(PeerClientKind::Copilot),
+            receive_mode: None,
+            summary: None,
+            agent_state: None,
+        };
+        assert!(!format_peer_list(std::slice::from_ref(&peer)).contains("state="));
+        peer.agent_state = Some(ipc::AgentActivity::Working);
+        assert!(
+            format_peer_list(std::slice::from_ref(&peer)).contains("kind=copilot state=working")
+        );
+    }
+
+    #[test]
+    fn a_trust_note_is_appended_to_a_success_and_never_to_an_error() {
+        let ok = ok_response(&json!(1), tool_text_result("Spawned."));
+        let out = append_tool_text(ok.clone(), Some("Folder trust: added /x."));
+        assert_eq!(
+            out["result"]["content"][0]["text"],
+            "Spawned.\n\nFolder trust: added /x."
+        );
+        assert_eq!(append_tool_text(ok.clone(), None), ok);
+        let err = err_response(&json!(1), -32603, "nope");
+        assert_eq!(append_tool_text(err.clone(), Some("note")), err);
     }
 
     #[test]
     fn build_copilot_launch_command_quotes_values_with_whitespace() {
-        let got = build_copilot_launch_command(&[
-            "--add-dir".to_string(),
-            "C:/Program Files/work".to_string(),
-        ]);
+        let got = build_copilot_launch_command(
+            None,
+            &["--add-dir".to_string(), "C:/Program Files/work".to_string()],
+        );
         assert!(
             got.contains("'C:/Program Files/work'"),
             "arg with space not quoted: {got}"

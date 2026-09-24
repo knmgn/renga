@@ -291,6 +291,16 @@ pub enum IpcCommand {
     /// Code spawns it, inherits `RENGA_PANE_ID` / `RENGA_SOCKET` from
     /// the pane PTY, and never blocks on its own subcommand dispatch.
     McpPeer,
+    /// Report one GitHub Copilot CLI lifecycle hook to the renga
+    /// instance that owns this pane. Copilot runs it from the hooks file
+    /// `renga-cp mcp install --client copilot` writes; it is not meant to
+    /// be typed. Reads the hook payload on stdin, always exits 0 and
+    /// prints nothing — also outside renga, where the hook still fires.
+    #[command(hide = true)]
+    CopilotHook {
+        /// The Copilot hook event name, e.g. `agentStop`.
+        event: String,
+    },
     /// Manage the `renga-peers` MCP server registration in Claude
     /// Code or Codex. Thin wrapper around their MCP management
     /// commands so users get a one-liner instead of having to know the
@@ -523,6 +533,10 @@ impl IpcCommand {
             }),
             IpcCommand::McpPeer => anyhow::bail!(
                 "mcp-peer is a standalone subprocess, not an IPC request; \
+                 this variant must be intercepted before to_request() in main.rs"
+            ),
+            IpcCommand::CopilotHook { .. } => anyhow::bail!(
+                "copilot-hook sends its own request and must never fail; \
                  this variant must be intercepted before to_request() in main.rs"
             ),
             IpcCommand::Mcp { .. } => anyhow::bail!(

@@ -261,6 +261,19 @@ pub const CAP_CROSS_TAB_LIST: &str = "cross_tab_list";
 /// rather than a minor one.
 pub const CAP_SPLIT_REFUSAL_CAUSES: &str = "split_refusal_causes";
 
+/// Capability token advertised by servers that accept
+/// [`Request::AgentHook`] and report [`PaneInfo::agent_state`] /
+/// [`PeerInfo::agent_state`].
+///
+/// Informational rather than a gate. The only sender is the
+/// `renga-cp copilot-hook` command an agent runs as a lifecycle hook,
+/// and it is fire-and-forget: an older server refuses the unknown
+/// request, the hook exits 0 anyway, and the agent never notices. A
+/// consumer reading `agent_state` needs the token to tell "this server
+/// does not track state" apart from "no hook has reported yet" — both
+/// arrive as an absent field.
+pub const CAP_AGENT_HOOK: &str = "agent_hook";
+
 /// Every capability token this build's server advertises. Additive by
 /// construction — clients match on tokens they know and ignore the
 /// rest.
@@ -273,6 +286,7 @@ pub const SERVER_CAPABILITIES: &[&str] = &[
     CAP_SUBSCRIBE_PANE_SCOPE,
     CAP_CROSS_TAB_LIST,
     CAP_SPLIT_REFUSAL_CAUSES,
+    CAP_AGENT_HOOK,
 ];
 
 /// One IPC call from a client to the running renga instance.
@@ -674,6 +688,27 @@ pub enum Request {
     /// - `from_pane` is the caller's own pane id, taken from
     ///   `RENGA_PANE_ID` by the MCP peer subprocess.
     SetSummary { from_pane: usize, summary: String },
+    /// A lifecycle hook fired inside the agent running in `pane_id`.
+    ///
+    /// Sent by `renga-cp copilot-hook <event>`, which the agent runs as
+    /// a hook command, so `pane_id` is the `RENGA_PANE_ID` that agent
+    /// inherited. `event` is the agent's own event name, passed through
+    /// unmapped: which events mean "working" / "idle" / "blocked" is
+    /// decided server-side ([`AgentActivity::from_hook`]), so the hook
+    /// binary on disk never has to agree with the server about it.
+    ///
+    /// The two detail fields carry the only payload keys that change
+    /// the verdict; the rest of the agent's payload never leaves the
+    /// hook process.
+    AgentHook {
+        pane_id: usize,
+        kind: PeerClientKind,
+        event: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        notification_type: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        recoverable: Option<bool>,
+    },
 }
 
 /// Strip every control character from a caller-supplied display label
@@ -947,6 +982,89 @@ impl PeerClientKind {
     }
 }
 
+/// What an agent's own lifecycle hooks last said it was doing.
+///
+/// Reported by the agent, not inferred from its screen, and only ever
+/// used to *refuse* a write that the screen would allow: a hook can
+/// arrive late or not at all (the hook is optional and fire-and-forget),
+/// so its absence proves nothing, but a `working` report is something
+/// the screen cannot fake.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AgentActivity {
+    /// A turn is in progress.
+    Working,
+    /// The last turn ended and nothing has started since.
+    Idle,
+    /// The agent is waiting on a human: a permission prompt or a
+    /// question it asked.
+    Blocked,
+}
+
+/// What one hook report does to a pane's recorded [`AgentActivity`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentHookEffect {
+    /// Record this activity.
+    Set(AgentActivity),
+    /// Forget what was recorded: the agent session is gone.
+    Clear,
+    /// Not an event renga acts on.
+    Ignore,
+}
+
+impl AgentActivity {
+    /// Map one hook report onto its effect.
+    ///
+    /// Event names are accepted in both of Copilot's spellings — its
+    /// native camelCase and the PascalCase aliases it added for VS Code
+    /// / Claude Code hook-file compatibility — because renga does not
+    /// control which one a hook file uses. Measured against a live
+    /// Copilot 1.0.82: a turn fires `userPromptSubmitted` and ends with
+    /// `agentStop`; `sessionStart` arrives only *after* the first
+    /// prompt, so it says nothing about readiness and is ignored.
+    ///
+    /// Only Copilot is mapped: it is the one client renga installs hooks
+    /// for. A report from any other kind is ignored rather than guessed
+    /// at, since the same event name need not mean the same thing there.
+    pub fn from_hook(
+        kind: PeerClientKind,
+        event: &str,
+        notification_type: Option<&str>,
+        recoverable: Option<bool>,
+    ) -> AgentHookEffect {
+        use AgentActivity::*;
+        if kind != PeerClientKind::Copilot {
+            return AgentHookEffect::Ignore;
+        }
+        match event {
+            "userPromptSubmitted" | "UserPromptSubmit" => AgentHookEffect::Set(Working),
+            // A tool finishing means the agent is running again — this
+            // is what lifts `Blocked` once a human answers a permission
+            // prompt, since nothing else fires until the turn ends.
+            "postToolUse" | "PostToolUse" | "postToolUseFailure" | "PostToolUseFailure" => {
+                AgentHookEffect::Set(Working)
+            }
+            "agentStop" | "Stop" => AgentHookEffect::Set(Idle),
+            // Copilot's notification hook also fires for shell-command
+            // completion and agent completion, which are not waits.
+            "notification" | "Notification" => match notification_type {
+                Some("permission_prompt" | "elicitation_dialog") => AgentHookEffect::Set(Blocked),
+                _ => AgentHookEffect::Ignore,
+            },
+            // A recoverable error is retried inside the same turn.
+            "errorOccurred" | "ErrorOccurred" => {
+                if recoverable == Some(true) {
+                    AgentHookEffect::Ignore
+                } else {
+                    AgentHookEffect::Set(Idle)
+                }
+            }
+            "sessionEnd" | "SessionEnd" => AgentHookEffect::Clear,
+            _ => AgentHookEffect::Ignore,
+        }
+    }
+}
+
 /// How a peer receives logical renga messages.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -998,6 +1116,12 @@ pub struct PeerInfo {
     /// survive renga restart.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
+    /// What the pane's agent last reported through its lifecycle hooks
+    /// (see [`CAP_AGENT_HOOK`]). Absent when no hook has reported for
+    /// the agent currently on screen — including every agent launched
+    /// without renga's hooks installed, so absence is not "idle".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_state: Option<AgentActivity>,
 }
 
 /// One entry in the `List` response payload.
@@ -1073,6 +1197,9 @@ pub struct PaneInfo {
     /// Optional pane-authored summary; see [`PeerInfo::summary`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
+    /// Hook-reported agent activity; see [`PeerInfo::agent_state`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_state: Option<AgentActivity>,
 }
 
 /// Server reply to one [`Request`].
@@ -1513,6 +1640,68 @@ mod tests {
         assert_eq!(s, r#"{"cmd":"list"}"#);
     }
 
+    /// The hook binary on disk and the running server can be different
+    /// builds, so the wire form is pinned: the event name travels
+    /// verbatim and the optional details vanish when absent.
+    #[test]
+    fn agent_hook_request_wire_form() {
+        let bare = Request::AgentHook {
+            pane_id: 4,
+            kind: PeerClientKind::Copilot,
+            event: "agentStop".into(),
+            notification_type: None,
+            recoverable: None,
+        };
+        let s = serde_json::to_string(&bare).unwrap();
+        assert_eq!(
+            s,
+            r#"{"cmd":"agent_hook","pane_id":4,"kind":"copilot","event":"agentStop"}"#
+        );
+        assert_eq!(serde_json::from_str::<Request>(&s).unwrap(), bare);
+
+        let detailed: Request = serde_json::from_str(
+            r#"{"cmd":"agent_hook","pane_id":4,"kind":"copilot","event":"notification",
+                "notification_type":"permission_prompt","recoverable":false}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            detailed,
+            Request::AgentHook {
+                notification_type: Some(ref t),
+                recoverable: Some(false),
+                ..
+            } if t == "permission_prompt"
+        ));
+    }
+
+    /// `agent_state` is additive: absent from the wire until a hook has
+    /// reported, so a listing from a pane without hooks is byte-identical
+    /// to what it was before the field existed.
+    #[test]
+    fn agent_state_is_omitted_until_reported() {
+        let mut info = PeerInfo {
+            id: 1,
+            name: None,
+            role: None,
+            tab: None,
+            tab_name: None,
+            same_tab: None,
+            cwd: None,
+            kind: None,
+            receive_mode: None,
+            summary: None,
+            agent_state: None,
+        };
+        assert_eq!(serde_json::to_string(&info).unwrap(), r#"{"id":1}"#);
+        info.agent_state = Some(AgentActivity::Blocked);
+        assert_eq!(
+            serde_json::to_string(&info).unwrap(),
+            r#"{"id":1,"agent_state":"blocked"}"#
+        );
+        let old_wire: PeerInfo = serde_json::from_str(r#"{"id":1}"#).unwrap();
+        assert_eq!(old_wire.agent_state, None);
+    }
+
     #[test]
     fn scoped_list_request_carries_from_pane() {
         let s = serde_json::to_string(&Request::List {
@@ -1936,6 +2125,7 @@ mod tests {
             kind: None,
             receive_mode: None,
             summary: None,
+            agent_state: None,
         };
         let s = serde_json::to_string(&info).unwrap();
         // Match on the quoted key forms: `"tab"` is a substring of
@@ -1964,6 +2154,7 @@ mod tests {
             kind: None,
             receive_mode: None,
             summary: None,
+            agent_state: None,
         };
         let parsed: PaneInfo =
             serde_json::from_str(&serde_json::to_string(&info).unwrap()).unwrap();
@@ -2395,6 +2586,7 @@ mod tests {
             kind: None,
             receive_mode: None,
             summary: None,
+            agent_state: None,
         };
         let s = serde_json::to_string(&info).unwrap();
         assert!(!s.contains("role"), "unexpected role field: {s}");
@@ -2418,6 +2610,7 @@ mod tests {
             kind: Some(PeerClientKind::Claude),
             receive_mode: Some(PeerReceiveMode::Push),
             summary: None,
+            agent_state: None,
         };
         let parsed: PaneInfo =
             serde_json::from_str(&serde_json::to_string(&info).unwrap()).unwrap();
@@ -2442,6 +2635,7 @@ mod tests {
             kind: None,
             receive_mode: None,
             summary: None,
+            agent_state: None,
         };
         let s = serde_json::to_string(&info).unwrap();
         assert!(s.contains("\"x\":3"), "missing x: {s}");
@@ -2820,6 +3014,7 @@ mod tests {
             kind: None,
             receive_mode: None,
             summary: None,
+            agent_state: None,
         }
     }
 
@@ -2925,6 +3120,7 @@ mod tests {
             kind: None,
             receive_mode: None,
             summary: None,
+            agent_state: None,
         };
         let s = serde_json::to_string(&info).unwrap();
         assert!(!s.contains("summary"), "must omit summary key: {s}");
@@ -2948,6 +3144,7 @@ mod tests {
             kind: None,
             receive_mode: None,
             summary: Some("hello".into()),
+            agent_state: None,
         };
         let s = serde_json::to_string(&info).unwrap();
         assert!(s.contains("\"summary\":\"hello\""), "{s}");

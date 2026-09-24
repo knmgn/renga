@@ -149,6 +149,23 @@ impl App {
                 let result = self.handle_set_summary(pane_id, summary);
                 let _ = reply.send(result);
             }
+            AppCommand::AgentHook {
+                pane_id,
+                kind,
+                event,
+                notification_type,
+                recoverable,
+                reply,
+            } => {
+                let result = self.handle_agent_hook(
+                    pane_id,
+                    kind,
+                    &event,
+                    notification_type.as_deref(),
+                    recoverable,
+                );
+                let _ = reply.send(result);
+            }
         }
     }
 
@@ -286,6 +303,7 @@ impl App {
                 kind,
                 receive_mode: kind.map(|k| k.receive_mode()),
                 summary,
+                agent_state: self.agent_activity_of_pane(pane),
             });
         }
         infos
@@ -340,6 +358,7 @@ impl App {
                                 .copied()
                                 .map(|k| k.receive_mode()),
                             summary: pane.and_then(|p| p.summary.clone()),
+                            agent_state: self.agent_activity_of_pane(pane),
                         }
                     }),
             );
@@ -441,6 +460,7 @@ impl App {
                 .copied()
                 .map(|k| k.receive_mode()),
             summary: pane.summary.clone(),
+            agent_state: self.agent_activity(pane),
         })
     }
 
@@ -523,6 +543,7 @@ impl App {
                 .copied()
                 .map(|k| k.receive_mode()),
             summary: pane.summary.clone(),
+            agent_state: self.agent_activity(pane),
         })
     }
 

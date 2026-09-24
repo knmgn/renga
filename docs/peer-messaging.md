@@ -45,6 +45,8 @@ renga gives you two shortcuts so you don't have to type the Claude launch flag b
 
 Once Codex or Copilot is registered, orchestrator panes can also launch them in-band with `spawn_codex_pane(direction, …)` / `spawn_copilot_pane(direction, …)`. Both refuse up front — `[codex_not_installed]` / `[copilot_not_installed]` — when the client's MCP config lacks the matching `RENGA_PEER_CLIENT_KIND`, because a pane that registers under the wrong kind advertises a push channel it cannot receive on.
 
+`spawn_copilot_pane` also takes a `prompt` (the first turn, passed as `copilot -i`) and handles Copilot's first-launch folder-trust dialog: it trusts the new pane's folder when you pass `trust_folder: true`, or when your pane's whole git repository is already trusted and the folder belongs to it (e.g. a worktree), and otherwise tells you the dialog will appear. The filesystem root, your home directory and folders above it are never trusted. `renga-cp mcp install --client copilot` additionally installs Copilot lifecycle hooks (`~/.copilot/hooks/renga.json`), after which Copilot panes report `agent_state` — `working` / `idle` / `blocked` — in `list_panes` / `list_peers`, so an orchestrator can tell when a worker has finished its turn or is waiting on a permission prompt. Outside renga the hook exits immediately without reporting anything. Details: [`api-surface-v1.0.md`](./api-surface-v1.0.md) §1.17.
+
 ## Two-pane workflow
 
 ```

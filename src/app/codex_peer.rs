@@ -1,4 +1,4 @@
-use super::user_turn::{turn_readiness_on_screen, TurnAgent, TurnReadiness};
+use super::user_turn::{turn_readiness_on_screen, with_agent_activity, TurnAgent, TurnReadiness};
 use super::*;
 
 pub(crate) const CODEX_APPEND_ENTER_DELAY: Duration = Duration::from_millis(75);
@@ -570,18 +570,26 @@ impl App {
     /// its startup command yet, so the screen still belongs to the
     /// *shell*, and a shell theme whose prompt char is `›` would satisfy
     /// the remaining glyph check and get the nudge typed into it.
+    ///
+    /// `activity` is the pane's hook-reported state
+    /// ([`App::agent_activity`]); it can only withhold a nudge, never
+    /// authorize one (see [`with_agent_activity`]).
     pub(crate) fn pull_peer_delivery_ready(
         agent: TurnAgent,
         registered: bool,
         pane: &Pane,
+        activity: Option<ipc::AgentActivity>,
     ) -> bool {
         match agent {
             TurnAgent::Codex => Self::codex_peer_delivery_ready(registered, pane),
             TurnAgent::Copilot => {
-                let Ok(parser) = pane.parser.lock() else {
-                    return false;
+                let on_screen = {
+                    let Ok(parser) = pane.parser.lock() else {
+                        return false;
+                    };
+                    turn_readiness_on_screen(agent, parser.screen())
                 };
-                turn_readiness_on_screen(agent, parser.screen()) == TurnReadiness::Ready
+                with_agent_activity(on_screen, activity) == TurnReadiness::Ready
             }
             // Claude is push-mode and never reaches the nudge path.
             TurnAgent::Claude => false,
@@ -701,8 +709,18 @@ impl App {
                             let Some(agent) = pull_agent_for(registration, pane) else {
                                 continue;
                             };
-                            if !Self::pull_peer_delivery_ready(agent, registration.is_some(), pane)
-                            {
+                            // The field, not `self.agent_activity`: `self.workspaces`
+                            // is mutably borrowed by this loop.
+                            let activity = super::agent_hooks::agent_activity_of(
+                                self.agent_hook_states.get(&pane_id),
+                                pane.screen_epoch(),
+                            );
+                            if !Self::pull_peer_delivery_ready(
+                                agent,
+                                registration.is_some(),
+                                pane,
+                                activity,
+                            ) {
                                 continue;
                             }
                             let payload = crate::mcp_peer::build_send_keys_payload(

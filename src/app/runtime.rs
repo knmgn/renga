@@ -116,6 +116,7 @@ impl App {
             ws.shutdown();
         }
         self.peer_client_kinds.clear();
+        self.agent_hook_states.clear();
         self.pending_codex_peer_messages.clear();
     }
 

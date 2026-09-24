@@ -688,6 +688,27 @@ pub(crate) fn claude_turn_readiness(screen: &vt100::Screen) -> TurnReadiness {
     framed_turn_readiness(TurnAgent::Claude, screen)
 }
 
+/// Let the agent's own hook report overrule a screen that looks ready.
+///
+/// Only ever downgrades. A composer can be empty, framed and caret-lit
+/// while a turn runs — Copilot keeps it on screen the whole time, and
+/// its busy footer is the lone string that says otherwise. That footer
+/// is not on screen yet in the frames right after Enter, and a future
+/// Copilot may word it differently; the agent saying `working` covers
+/// both, and `blocked` covers a question renga's screen reading does not
+/// know the shape of. Nothing here can make a pane `Ready`: a missing or
+/// stale report is the common case, and it must fall back to the screen.
+pub(crate) fn with_agent_activity(
+    on_screen: TurnReadiness,
+    activity: Option<ipc::AgentActivity>,
+) -> TurnReadiness {
+    match (on_screen, activity) {
+        (TurnReadiness::Ready, Some(ipc::AgentActivity::Working)) => TurnReadiness::Busy,
+        (TurnReadiness::Ready, Some(ipc::AgentActivity::Blocked)) => TurnReadiness::NotReady,
+        (other, _) => other,
+    }
+}
+
 /// Readiness for a Copilot CLI pane.
 ///
 /// Copilot draws the same framed composer Claude Code does — `❯`
@@ -1020,10 +1041,13 @@ impl App {
         let Some(agent) = self.user_turn_agent(ws_index, pane_id) else {
             return TurnReadiness::Unsupported;
         };
-        let Ok(parser) = pane.parser.lock() else {
-            return TurnReadiness::NotReady;
+        let on_screen = {
+            let Ok(parser) = pane.parser.lock() else {
+                return TurnReadiness::NotReady;
+            };
+            turn_readiness_on_screen(agent, parser.screen())
         };
-        turn_readiness_on_screen(agent, parser.screen())
+        with_agent_activity(on_screen, self.agent_activity(pane))
     }
 
     /// Re-prove the composer and write the body **in one critical

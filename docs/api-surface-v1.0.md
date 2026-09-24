@@ -430,22 +430,45 @@ empty `capabilities` list.
 
 ### 1.17 `spawn_copilot_pane` — stable
 
-Same envelope as `spawn_codex_pane`. `args` is appended after the literal
-`copilot` token, with the same POSIX shell quoting as §1.7.
+Same envelope as `spawn_codex_pane`, plus two optional inputs. `args` is
+appended after the literal `copilot` token, with the same POSIX shell quoting
+as §1.7.
 
-**Pre-condition**: the user must have run `renga-cp mcp install --client copilot`
-so `RENGA_PEER_CLIENT_KIND=copilot` is injected into Copilot's MCP subprocess
-env. The handler verifies this up front by reading
-`~/.copilot/mcp-config.json` — or `$COPILOT_HOME/mcp-config.json` when that
-override is set — and requiring that
-`mcpServers["renga-peers"].env.RENGA_PEER_CLIENT_KIND` equals `"copilot"`. If
-the file is missing/unreadable, the entry is absent, or the value differs, the
-call returns a JSON-RPC `-32603` carrying the `[copilot_not_installed]` marker
-and the remediation hint
-`renga-cp mcp install --client copilot`. Same rationale as §1.8: without the env
-var the new pane registers as a **push** client, and push rides
-`notifications/claude/channel`, which Copilot CLI does not implement — every
-peer message to that pane would be dropped with no error on either side.
+| Param | Type | Notes |
+|---|---|---|
+| `prompt` | string | First turn, launched as `copilot -i <prompt> <args…>`. Copilot submits it itself once its UI is up and stays interactive afterwards (`-p` would exit when the turn ends). Trimmed; empty means absent. Refused with `-32602` when it contains a control character (newlines included — the launch command is *typed* into a shell, where a newline is Enter) or exceeds 4096 bytes. |
+| `trust_folder` | bool | Add the new pane's folder to Copilot's `trustedFolders` before launch. See **Folder trust** below. |
+
+**Folder trust.** Copilot asks whether to trust a folder on its first launch
+there, and renga never types into that dialog, so an unattended pane would wait
+on it. Before spawning, the handler resolves the folder the pane will start in
+(`cwd`, else the caller's folder for `tab: {new: …}`, else the split target's
+folder when it is in the caller's tab), requires it to be an existing
+directory, and reads `trustedFolders` from Copilot's `config.json`
+(`$COPILOT_HOME` honored). A folder at or under a trusted entry is already
+trusted — Copilot's own rule. Otherwise renga adds it when `trust_folder` is
+true, or when the caller's **whole git repository** is already trusted (an entry
+at or above the caller's worktree root) and the new folder belongs to that
+repository — a worktree of it, typically; the inheritance Copilot itself applies
+when it creates a worktree of a trusted repository — and pins the request's
+`cwd` to that folder. A trusted subfolder never spreads to the rest of its
+repository, and a home directory kept in git lends nothing to folders beneath
+it unless the home itself is trusted. The probe runs `git` with `GIT_DIR` and
+related variables removed, so an inherited one cannot make folders match. The
+filesystem root, the home directory and every folder above it are refused even
+with `trust_folder: true`, since Copilot would then trust everything beneath
+them. In every other case the pane is spawned untouched and
+the result text says the dialog will appear. The rewrite keeps Copilot's `//`
+comment header and file permissions, writes through a symlink (and refuses a
+dangling one), lands by rename,
+and aborts if Copilot changed (or created) the file meanwhile. Only an explicit
+`trust_folder: true` that cannot be honored (folder undeterminable or not a
+directory, too broad, config unreadable or not round-trippable, write failed)
+refuses the spawn with `-32603`; the other paths report the reason in the result
+text and spawn anyway. A trust written for a spawn the server then refuses is
+not rolled back, and the error message says it was written. Trusting a folder
+lets Copilot load that folder's own hooks, MCP servers and skills, which is why
+renga does not extend trust beyond those two cases.
 
 **Two Copilot-specific behaviors** callers should plan for, both measured
 against Copilot CLI 1.0.82:
@@ -460,9 +483,36 @@ against Copilot CLI 1.0.82:
   type into any of them (`user_turn_not_ready`): **folder trust** on first
   launch in a directory, a **session-restore picker** whenever that directory
   has previous Copilot sessions, and per-tool approval unless launched with
-  `--allow-tool` / `--allow-all-tools`. `args: ["--allow-tool=renga-peers"]`
-  removes only the third; the first two need `send_keys` (`Enter` to trust,
-  `Esc` to start fresh), which is what `inspect_pane` is for.
+  `--allow-tool` / `--allow-all-tools`. Folder trust is handled up front as
+  described above; `args: ["--allow-tool=renga-peers"]` removes the third. The
+  restore picker still needs `send_keys` (`Esc` to start fresh), which is what
+  `inspect_pane` is for.
+
+**Agent state.** When `renga-cp mcp install --client copilot` has installed
+renga's Copilot hooks (§3.3 `agent_hook`), the pane reports `agent_state` in
+`list_panes` / `list_peers`: `working` from a submitted prompt until the turn
+ends, `blocked` while Copilot waits on a permission prompt or a question, `idle`
+after the turn. `user_turn` delivery and the pull-mode `check_messages` nudge
+treat `working` as busy and `blocked` as not ready even when the screen looks
+idle; hook state never makes a pane ready on its own. The state is reported and
+used only while renga takes the pane's agent to be Copilot (registration first,
+then window title), so a Claude or Codex started in the same pane after a
+Copilot crash never inherits it.
+
+Copilot fires no hook when a human cancels a turn (Ctrl+C / Esc) or dismisses a
+permission prompt. renga therefore demotes `working` / `blocked` to `idle` once
+the screen has shown an idle Copilot composer — no busy footer, no dialog — for
+3 s without a break. A real turn does not trigger that while renga recognizes
+Copilot's `esc interrupt` busy footer, which Copilot shows throughout one (matched
+on the bare word `interrupt`, so the narrow-pane reflow does not hide it); should
+a future Copilot change that footer, the demotion would only fall back to
+screen-only readiness. Copilot also fires nothing between a human
+approving a tool and that tool finishing, so `blocked` persists through the
+approved tool's run (the busy footer keeps the grace clock from starting) and
+turns `working` when it completes: late, but on the side of refusing. A record
+is dropped when the pane's program enters or leaves the alternate screen, so a
+Copilot killed mid-turn does not leave `working` behind for the next one started
+in the same pane.
 
 ### Common error wire format
 
@@ -624,6 +674,7 @@ Server budgets: 5 s `APP_REPLY_TIMEOUT` (server → app event loop) +
 | `peer_register_client` | `pane_id: usize`, `kind: claude\|codex\|copilot` | Posted by `renga-cp mcp-peer` on startup. |
 | `set_pane_identity` | `target: PaneRef`, `name?`, `role?` (three-state: missing / null / value), `from_pane?: usize` | Uses serde `double_option`. `from_pane` (#296) behaves exactly as on `close`. |
 | `set_summary` | `from_pane: usize`, `summary: string` | Empty `summary` clears. >256 `chars` rejected with `summary_too_long`. |
+| `agent_hook` | `pane_id: usize`, `kind: claude\|codex\|copilot`, `event: string`, `notification_type?: string`, `recoverable?: bool` | Sent by `renga-cp copilot-hook <event>`, which Copilot runs from the hooks file (`<copilot home>/hooks/renga.json`) that `renga-cp mcp install --client copilot` writes. `event` is the agent's own event name, mapped server-side: for `copilot`, `userPromptSubmitted` / `postToolUse` / `postToolUseFailure` → `working`, `agentStop` and unrecoverable `errorOccurred` → `idle`, `notification` with `notification_type` `permission_prompt` / `elicitation_dialog` → `blocked`, `sessionEnd` clears; PascalCase aliases are accepted; anything else — and any other `kind` — is ignored. The record is dropped as soon as the pane's program enters or leaves the alternate screen, so it never outlives the agent run that sent it, and `working` / `blocked` fall back to `idle` after 3 s of an idle-looking screen (§1.17). Unknown `pane_id` → `pane_not_found`. The sender waits at most 1.5 s for a reply (and 1 s for its stdin) — well inside the 5 s after which Copilot would kill it — and ignores every reply, including an older server's refusal. |
 
 `PaneRef` = `{ id: usize } | { name: string } | "focused"`.
 
@@ -660,7 +711,13 @@ unit variant, so on the wire it is the bare string `"all"`, the shape
 `PaneInfo` payload (used by `list` data, `set_pane_identity` ok data, embedded
 in `peer_list` data):
 `{ id, name?, role?, focused, x, y, width, height, cwd?, kind?, receive_mode?,
-summary?, tab?, tab_name?, same_tab? }`.
+summary?, tab?, tab_name?, same_tab?, agent_state? }`.
+
+`agent_state?` (`working` / `idle` / `blocked`) is additive serde, present on
+`PaneInfo` and `PeerInfo` alike, and only while a lifecycle hook has reported
+for the agent run currently in the pane (see `agent_hook` in §3.3). Absence
+means "no report", not "idle": every agent without renga's hooks installed, and
+every server older than the `agent_hook` capability, omits it.
 
 The last three are additive serde (`default` + `skip_serializing_if`), added in
 #329, and carry the same meaning as their `PeerInfo` namesakes below: `tab?`
@@ -729,6 +786,12 @@ that omit `from_pane` — those behave identically on either server. It exists
 so a caller, an operator, or a test can read off `hello` / `server_info`
 (§1.16) whether a `from_pane` it sends will actually narrow the stream,
 rather than inferring it from observed traffic.
+
+Servers that accept `agent_hook` and report `agent_state` advertise
+`agent_hook`. Advertise-only, like `subscribe_pane_scope`: the one sender (the
+`copilot-hook` command) ignores every reply, so there is nothing to gate. The
+token lets a reader of `agent_state` tell "this server does not track agent
+state" from "no hook has reported yet", which an absent field alone cannot.
 
 Servers that understand the `tab` selector on `list` advertise `cross_tab_list`
 (#329), appended last to the capability list. Any `list_panes` carrying a `tab`
